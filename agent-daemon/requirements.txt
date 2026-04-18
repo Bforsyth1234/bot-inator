@@ -1,0 +1,26 @@
+# Server
+fastapi>=0.115.0,<1.0
+uvicorn[standard]>=0.32.0,<1.0
+websockets>=13.0,<14.0
+pydantic>=2.9.0,<3.0
+
+# AI / LLM
+smolagents>=1.0.0,<2.0
+mlx-lm>=0.20.0,<1.0
+sqlite-vec>=0.1.6,<1.0
+
+# macOS Events
+pyobjc-core>=10.3,<11.0
+pyobjc-framework-Cocoa>=10.3,<11.0
+pyobjc-framework-Quartz>=10.3,<11.0
+pyobjc-framework-ApplicationServices>=10.3,<11.0
+
+# File Watching
+watchdog>=5.0.0,<6.0
+
+# Browser Automation
+browser-use>=0.2.0,<1.0
+playwright>=1.48.0,<2.0
+
+# Utilities
+orjson>=3.10.0,<4.0
