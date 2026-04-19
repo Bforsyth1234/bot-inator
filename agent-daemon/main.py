@@ -156,7 +156,7 @@ async def ws_stream(websocket: WebSocket) -> None:
         )
         await websocket.send_text(payload)
 
-    orchestrator.register_ws_send(_ws_send)
+    orchestrator.add_subscriber(_ws_send)
 
     hello = Status(
         seq=_next_seq(),
@@ -185,3 +185,5 @@ async def ws_stream(websocket: WebSocket) -> None:
                 logger.debug("Ignoring inbound %s", type(msg).__name__)
     except WebSocketDisconnect:
         return
+    finally:
+        orchestrator.remove_subscriber(_ws_send)

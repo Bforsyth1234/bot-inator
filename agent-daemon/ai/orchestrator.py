@@ -61,6 +61,7 @@ class Orchestrator:
         self.approval_timeout = approval_timeout
 
         self._ws_send: Optional[WSSendCallable] = None
+        self._subscribers: set[WSSendCallable] = set()
         self._seq: int = 0
         self._task: Optional[asyncio.Task[None]] = None
         self._pending: dict[str, asyncio.Future[ApprovalResponsePayload]] = {}
@@ -68,9 +69,26 @@ class Orchestrator:
 
     # ---- lifecycle ----------------------------------------------------
 
-    def register_ws_send(self, send: WSSendCallable) -> None:
-        """Register the coroutine used to push messages to the UI."""
+    def register_ws_send(self, send: Optional[WSSendCallable]) -> None:
+        """Replace all subscribers with a single send callable.
+
+        Retained for backward compatibility with existing callers/tests.
+        Prefer :meth:`add_subscriber` / :meth:`remove_subscriber` when
+        multiple clients may be connected concurrently.
+        """
         self._ws_send = send
+        self._subscribers = {send} if send is not None else set()
+
+    def add_subscriber(self, send: WSSendCallable) -> None:
+        """Register a WebSocket send closure to receive broadcast messages."""
+        self._subscribers.add(send)
+        self._ws_send = send
+
+    def remove_subscriber(self, send: WSSendCallable) -> None:
+        """Remove a previously registered subscriber."""
+        self._subscribers.discard(send)
+        if self._ws_send is send:
+            self._ws_send = next(iter(self._subscribers), None)
 
     async def start(self) -> None:
         if self._task is not None:
@@ -240,13 +258,22 @@ class Orchestrator:
         await self._send(msg)
 
     async def _send(self, message: Any) -> None:
-        if self._ws_send is None:
-            logger.debug("ws_send not registered; dropping %s", type(message).__name__)
+        if not self._subscribers:
+            logger.debug(
+                "no subscribers; dropping %s", type(message).__name__
+            )
             return
-        try:
-            await self._ws_send(message)
-        except Exception:
-            logger.exception("ws_send failed")
+        dead: list[WSSendCallable] = []
+        for send in list(self._subscribers):
+            try:
+                await send(message)
+            except Exception:
+                logger.exception("ws_send failed; dropping subscriber")
+                dead.append(send)
+        for send in dead:
+            self._subscribers.discard(send)
+            if self._ws_send is send:
+                self._ws_send = next(iter(self._subscribers), None)
 
     def _next_seq(self) -> int:
         self._seq += 1

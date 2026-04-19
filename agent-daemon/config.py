@@ -9,7 +9,7 @@ class Settings:
 
     host: str = "127.0.0.1"
     port: int = 8000
-    model_path: str = "mlx-community/Qwen2.5-Coder-7B-4bit"
+    model_path: str = "mlx-community/Hermes-3-Llama-3.1-8B-4bit"
     watch_dirs: list[Path] = field(
         default_factory=lambda: [Path.home() / "Downloads"]
     )
