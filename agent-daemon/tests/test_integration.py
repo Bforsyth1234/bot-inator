@@ -72,6 +72,20 @@ def test_context_event_triggers_thought(client) -> None:
 
 def test_approval_request_and_response_roundtrip(client) -> None:
     bus = client.app.state.event_bus
+    orchestrator = client.app.state.orchestrator
+
+    def _stub_tool() -> str:
+        return "stub-ok"
+
+    original_tools = orchestrator.tools
+    orchestrator.tools = [_stub_tool]
+    try:
+        _roundtrip_body(client, bus)
+    finally:
+        orchestrator.tools = original_tools
+
+
+def _roundtrip_body(client, bus) -> None:
     with client.websocket_connect("/ws/stream") as ws:
         status = ws.receive_json()
         assert status["type"] == "status"

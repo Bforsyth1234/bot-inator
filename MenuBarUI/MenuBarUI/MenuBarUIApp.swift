@@ -1,13 +1,14 @@
+import AppKit
 import SwiftUI
 
 @main
 struct MenuBarUIApp: App {
-    @StateObject private var ws = WebSocketManager()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
         MenuBarExtra {
             RootPopoverView()
-                .environmentObject(ws)
+                .environmentObject(delegate.ws)
         } label: {
             // Brain/robot SF Symbol for the menu bar icon.
             Image(systemName: "brain.head.profile")
@@ -16,34 +17,25 @@ struct MenuBarUIApp: App {
     }
 }
 
-/// Top-level popover content. Hosts the thought stream and presents the
-/// approval sheet whenever an `approval_request` is pending.
+/// Owns the WebSocket manager and approval presenter for the full app
+/// lifetime so thoughts and approvals surface without requiring the popover
+/// to be open.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+    let ws = WebSocketManager()
+    private let approvalPresenter = ApprovalPresenter()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        ws.connect()
+        approvalPresenter.attach(to: ws)
+    }
+}
+
+/// Top-level popover content hosting the thought stream.
 struct RootPopoverView: View {
     @EnvironmentObject private var ws: WebSocketManager
-    @State private var showingApproval = false
-    @State private var presentedRequestId: String?
 
     var body: some View {
         ThoughtStreamView()
-            .sheet(isPresented: $showingApproval) {
-                if let pending = ws.pendingApproval {
-                    ApprovalAlert(payload: pending.payload) { approved, note in
-                        ws.sendApprovalResponse(
-                            requestId: pending.payload.requestId,
-                            approved: approved,
-                            userNote: note
-                        )
-                        presentedRequestId = nil
-                    }
-                }
-            }
-            .onChange(of: ws.pendingApproval?.payload.requestId) { _, newId in
-                if let newId, newId != presentedRequestId {
-                    presentedRequestId = newId
-                    showingApproval = true
-                } else if newId == nil {
-                    showingApproval = false
-                }
-            }
     }
 }

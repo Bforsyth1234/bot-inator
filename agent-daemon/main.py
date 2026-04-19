@@ -30,7 +30,7 @@ from schemas.ws_messages import (
     StatusPayload,
     WSMessage,
 )
-from tools.read_active_tab import read_active_tab
+from tools import AVAILABLE_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
         engine=engine,
         event_bus=bus,
         memory=memory,
-        tools=[read_active_tab],
+        tools=list(AVAILABLE_TOOLS),
     )
     await orchestrator.start()
 
