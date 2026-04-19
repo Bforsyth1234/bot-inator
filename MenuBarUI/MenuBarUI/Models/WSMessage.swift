@@ -16,6 +16,7 @@ struct ThoughtPayload: Codable, Hashable {
 
 enum ThoughtStage: String, Codable, Hashable {
     case eventReceived = "event_received"
+    case analysis
     case reasoning
     case plan
     case toolResult = "tool_result"

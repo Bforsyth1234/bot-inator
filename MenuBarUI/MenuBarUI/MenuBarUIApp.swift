@@ -31,11 +31,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 }
 
-/// Top-level popover content hosting the thought stream.
+/// Top-level popover content with tabs for the thought stream and in-app
+/// diagnostics. New diagnostic panes can be added as additional tabs.
 struct RootPopoverView: View {
     @EnvironmentObject private var ws: WebSocketManager
 
     var body: some View {
-        ThoughtStreamView()
+        TabView {
+            ThoughtStreamView()
+                .tabItem { Label("Thoughts", systemImage: "brain") }
+            DebugView()
+                .tabItem { Label("Debug", systemImage: "ladybug") }
+        }
+        .frame(width: 420, height: 560)
     }
 }

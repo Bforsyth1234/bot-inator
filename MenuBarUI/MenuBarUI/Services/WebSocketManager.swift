@@ -7,6 +7,7 @@ final class WebSocketManager: ObservableObject {
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var pendingApproval: (seq: Int, payload: ApprovalRequestPayload)?
     @Published private(set) var lastStatus: StatusPayload?
+    @Published private(set) var debug: DebugStats = DebugStats()
 
     private let url: URL
     private let session: URLSession
@@ -71,7 +72,12 @@ final class WebSocketManager: ObservableObject {
         task.resume()
         isConnected = true
         reconnectDelay = 1.0
+        debug.connectAttempts += 1
         receiveTask = Task { [weak self] in await self?.receiveLoop() }
+    }
+
+    func resetDebugStats() {
+        debug = DebugStats()
     }
 
     func disconnect() {
@@ -140,6 +146,7 @@ final class WebSocketManager: ObservableObject {
                 await handleIncoming(message)
             } catch {
                 NSLog("WebSocketManager receive error: \(error)")
+                debug.lastConnectError = String(describing: error)
                 await scheduleReconnect()
                 return
             }
@@ -148,14 +155,25 @@ final class WebSocketManager: ObservableObject {
 
     private func handleIncoming(_ message: URLSessionWebSocketTask.Message) async {
         let data: Data?
+        let rawPreview: String?
         switch message {
-        case .string(let s): data = s.data(using: .utf8)
-        case .data(let d): data = d
-        @unknown default: data = nil
+        case .string(let s):
+            data = s.data(using: .utf8)
+            rawPreview = String(s.prefix(240))
+        case .data(let d):
+            data = d
+            rawPreview = String(data: d.prefix(240), encoding: .utf8)
+        @unknown default:
+            data = nil
+            rawPreview = nil
         }
         guard let data else { return }
+        debug.framesReceived += 1
+        if let rawPreview { debug.lastRawFrame = rawPreview }
         do {
             let parsed = try decoder.decode(WSMessage.self, from: data)
+            debug.framesDecoded += 1
+            debug.recordDecoded(parsed)
             messages.append(parsed)
             switch parsed {
             case .approvalRequest(let seq, _, let payload):
@@ -167,6 +185,7 @@ final class WebSocketManager: ObservableObject {
             }
         } catch {
             NSLog("WebSocketManager decode error: \(error)")
+            debug.recordDecodeError(error, raw: rawPreview)
         }
     }
 
@@ -176,12 +195,67 @@ final class WebSocketManager: ObservableObject {
         isConnected = false
         task?.cancel(with: .abnormalClosure, reason: nil)
         task = nil
+        debug.reconnectsScheduled += 1
         let delay = reconnectDelay
         reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             await MainActor.run { self?.connect() }
+        }
+    }
+}
+
+// MARK: - Debug
+
+/// Diagnostic counters surfaced in the Debug tab. All mutations happen on
+/// the main actor via `WebSocketManager`.
+struct DebugStats {
+    var framesReceived: Int = 0
+    var framesDecoded: Int = 0
+    var decodeErrorCount: Int = 0
+    var connectAttempts: Int = 0
+    var reconnectsScheduled: Int = 0
+
+    var framesByType: [String: Int] = [:]
+    var thoughtsByStage: [ThoughtStage: Int] = [:]
+
+    var lastDecodeError: String?
+    var lastConnectError: String?
+    var lastRawFrame: String?
+    var recentDecodeErrors: [DecodeErrorEntry] = []
+
+    struct DecodeErrorEntry: Identifiable, Hashable {
+        let id = UUID()
+        let timestamp: Date
+        let message: String
+        let rawPreview: String?
+    }
+
+    private static let maxErrorHistory = 10
+
+    mutating func recordDecoded(_ message: WSMessage) {
+        let key: String
+        switch message {
+        case .thought(_, _, let payload):
+            key = "thought"
+            thoughtsByStage[payload.stage, default: 0] += 1
+        case .approvalRequest: key = "approval_request"
+        case .approvalResponse: key = "approval_response"
+        case .status: key = "status"
+        case .command: key = "command"
+        }
+        framesByType[key, default: 0] += 1
+    }
+
+    mutating func recordDecodeError(_ error: Error, raw: String?) {
+        decodeErrorCount += 1
+        let msg = String(describing: error)
+        lastDecodeError = msg
+        let entry = DecodeErrorEntry(timestamp: Date(), message: msg, rawPreview: raw)
+        recentDecodeErrors.append(entry)
+        if recentDecodeErrors.count > Self.maxErrorHistory {
+            recentDecodeErrors.removeFirst(recentDecodeErrors.count - Self.maxErrorHistory)
         }
     }
 }

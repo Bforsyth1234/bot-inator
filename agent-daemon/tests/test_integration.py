@@ -10,14 +10,16 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Must be set before importing main so lifespan skips OS listeners.
+# Must be set before importing main so lifespan skips OS listeners and
+# does not try to eager-load multi-GB MLX models during the test run.
 os.environ["AGENT_DISABLE_LISTENERS"] = "1"
+os.environ["AGENT_EAGER_LOAD"] = "0"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -28,6 +30,10 @@ from events.event_bus import ContextEvent  # noqa: E402
 def client():
     with patch(
         "ai.orchestrator.Orchestrator._build_agent", return_value=None
+    ), patch(
+        "ai.mlx_engine.MLXEngine.evaluate_event",
+        new_callable=AsyncMock,
+        return_value="",
     ):
         from main import app  # noqa: WPS433 - import after env/patch set up
 
@@ -68,6 +74,87 @@ def test_context_event_triggers_thought(client) -> None:
         assert first["type"] == "thought"
         assert first["payload"]["stage"] == "event_received"
         assert first["payload"]["event_id"]
+
+
+def test_analysis_engine_is_distinct_from_main_engine(client) -> None:
+    main_engine = client.app.state.engine
+    analysis_engine = client.app.state.analysis_engine
+    orchestrator = client.app.state.orchestrator
+    assert analysis_engine is not main_engine
+    assert orchestrator.analysis_engine is analysis_engine
+    assert orchestrator.engine is main_engine
+    assert analysis_engine.model_name != main_engine.model_name
+
+
+def test_evaluate_event_emits_analysis_thought(client) -> None:
+    bus = client.app.state.event_bus
+    analysis_engine = client.app.state.analysis_engine
+    analysis_engine.evaluate_event = AsyncMock(
+        return_value="User appears to be reviewing a Jira ticket."
+    )
+
+    with client.websocket_connect("/ws/stream") as ws:
+        status = ws.receive_json()
+        assert status["type"] == "status"
+
+        bus.push_threadsafe(
+            ContextEvent(
+                event_type="app_activated",
+                app_name="Google Chrome",
+                window_title="Jira - BUG-123",
+            )
+        )
+
+        saw_event_received = False
+        saw_analysis_content: str | None = None
+        for _ in range(10):
+            msg = ws.receive_json()
+            if msg["type"] != "thought":
+                continue
+            stage = msg["payload"]["stage"]
+            if stage == "event_received":
+                saw_event_received = True
+            elif stage == "analysis":
+                saw_analysis_content = msg["payload"]["content"]
+                break
+
+        assert saw_event_received, "expected an 'event_received' thought first"
+        assert saw_analysis_content == (
+            "User appears to be reviewing a Jira ticket."
+        ), "expected the analysis thought to carry evaluate_event output"
+
+        analysis_engine.evaluate_event.assert_awaited_once()
+        call_args = analysis_engine.evaluate_event.await_args
+        assert "Google Chrome" in call_args.args[0]
+
+
+def test_empty_evaluate_event_skips_analysis_thought(client) -> None:
+    """When evaluate_event returns '', no analysis thought should be emitted."""
+    bus = client.app.state.event_bus
+    with client.websocket_connect("/ws/stream") as ws:
+        status = ws.receive_json()
+        assert status["type"] == "status"
+
+        bus.push_threadsafe(
+            ContextEvent(
+                event_type="app_activated",
+                app_name="Safari",
+                window_title="Docs",
+            )
+        )
+
+        stages: list[str] = []
+        for _ in range(6):
+            msg = ws.receive_json()
+            if msg["type"] != "thought":
+                continue
+            stages.append(msg["payload"]["stage"])
+            if msg["payload"]["stage"] == "reasoning":
+                break
+
+        assert "event_received" in stages
+        assert "analysis" not in stages
+        assert "reasoning" in stages
 
 
 def test_approval_request_and_response_roundtrip(client) -> None:

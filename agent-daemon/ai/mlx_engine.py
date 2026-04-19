@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "mlx-community/Qwen2.5-Coder-7B-4bit"
+DEFAULT_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+
+EVENT_ANALYSIS_SYSTEM_PROMPT = (
+    "You are an on-device macOS assistant analysing a single system event. "
+    "Respond in one or two short sentences describing, in plain language, "
+    "what the user appears to be doing and whether the event looks routine "
+    "or noteworthy. Do not propose actions, do not call tools, do not use "
+    "markdown, and do not include reasoning tags."
+)
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 class MLXEngine:
@@ -69,6 +80,35 @@ class MLXEngine:
             await self.load()
         return await asyncio.to_thread(self._generate_sync, prompt, max_tokens)
 
+    async def evaluate_event(
+        self, event_context: str, max_tokens: int = 128
+    ) -> str:
+        """Run a single-shot plain-text analysis of a macOS event.
+
+        Runs alongside (not in place of) the orchestrator's tool-calling
+        loop. Callers can use this to produce a short human-readable
+        summary of an event — e.g. to emit as a ``thought`` frame —
+        without going through the agent's tool-selection pipeline.
+
+        Args:
+            event_context: Free-form description of the event
+                (e.g. ``"User switched to Safari: Jira - BUG-123"``).
+            max_tokens: Generation cap for the reply.
+
+        Returns:
+            A one-to-two sentence plain-text analysis, or an empty
+            string if generation failed.
+        """
+        if not self._loaded:
+            await self.load()
+        try:
+            return await asyncio.to_thread(
+                self._evaluate_event_sync, event_context, max_tokens
+            )
+        except Exception:
+            logger.exception("evaluate_event failed")
+            return ""
+
     # ---- internal helpers (assume lock is held where noted) ----
 
     async def _load_locked(self, model_name: str) -> None:
@@ -115,3 +155,47 @@ class MLXEngine:
             max_tokens=max_tokens,
             verbose=False,
         )
+
+    def _evaluate_event_sync(self, event_context: str, max_tokens: int) -> str:
+        from mlx_lm import generate  # type: ignore
+
+        prompt = self._build_event_prompt(event_context)
+        raw = generate(
+            self._model,
+            self._tokenizer,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            verbose=False,
+        )
+        return self._postprocess_event_output(raw)
+
+    def _build_event_prompt(self, event_context: str) -> Any:
+        """Render the chat-templated prompt for event analysis.
+
+        Falls back to a plain concatenated prompt if the tokenizer does
+        not expose ``apply_chat_template``.
+        """
+        messages = [
+            {"role": "system", "content": EVENT_ANALYSIS_SYSTEM_PROMPT},
+            {"role": "user", "content": event_context},
+        ]
+        apply = getattr(self._tokenizer, "apply_chat_template", None)
+        if callable(apply):
+            try:
+                return apply(
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+            except Exception:  # pragma: no cover - tokenizer quirks
+                logger.debug("apply_chat_template failed; using plain prompt")
+        return (
+            f"System: {EVENT_ANALYSIS_SYSTEM_PROMPT}\n"
+            f"User: {event_context}\n"
+            "Assistant:"
+        )
+
+    @staticmethod
+    def _postprocess_event_output(text: str) -> str:
+        cleaned = _THINK_BLOCK_RE.sub("", text or "").strip()
+        return cleaned

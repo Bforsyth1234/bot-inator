@@ -32,6 +32,10 @@ from schemas.ws_messages import (
 )
 from tools import AVAILABLE_TOOLS
 
+logging.basicConfig(
+    level=os.environ.get("AGENT_LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 _WS_ADAPTER: TypeAdapter = TypeAdapter(WSMessage)
@@ -55,7 +59,30 @@ async def lifespan(app: FastAPI):
     bus.bind_loop(asyncio.get_running_loop())
 
     engine = MLXEngine(settings.model_path)
+    analysis_engine = MLXEngine(settings.analysis_model_path)
     memory = Memory()
+
+    # Eager-load both engines in parallel so the first event is not
+    # blocked by a multi-GB model download + Metal compile.
+    if os.environ.get("AGENT_EAGER_LOAD", "1") != "0":
+        logger.info(
+            "Eager-loading MLX models: main=%s analysis=%s",
+            settings.model_path,
+            settings.analysis_model_path,
+        )
+        results = await asyncio.gather(
+            engine.load(),
+            analysis_engine.load(),
+            return_exceptions=True,
+        )
+        for name, result in zip(("main", "analysis"), results):
+            if isinstance(result, Exception):
+                logger.exception(
+                    "Failed to eager-load %s engine; will fall back to "
+                    "lazy load on first use",
+                    name,
+                    exc_info=result,
+                )
 
     listeners: list[Any] = []
     listener_names: list[str] = []
@@ -80,11 +107,13 @@ async def lifespan(app: FastAPI):
         event_bus=bus,
         memory=memory,
         tools=list(AVAILABLE_TOOLS),
+        analysis_engine=analysis_engine,
     )
     await orchestrator.start()
 
     app.state.event_bus = bus
     app.state.engine = engine
+    app.state.analysis_engine = analysis_engine
     app.state.memory = memory
     app.state.orchestrator = orchestrator
     app.state.listeners = listeners

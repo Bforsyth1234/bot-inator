@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 ThoughtStage = Literal[
-    "event_received", "reasoning", "plan", "tool_result", "complete"
+    "event_received", "analysis", "reasoning", "plan", "tool_result", "complete"
 ]
 
 

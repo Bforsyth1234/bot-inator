@@ -130,6 +130,7 @@ private struct StageBadge: View {
     private var color: Color {
         switch stage {
         case .eventReceived: return .blue
+        case .analysis: return .indigo
         case .reasoning: return .purple
         case .plan: return .orange
         case .toolResult: return .teal

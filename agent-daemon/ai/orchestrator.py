@@ -53,8 +53,10 @@ class Orchestrator:
         memory: Optional[Memory] = None,
         tools: Optional[list[Any]] = None,
         approval_timeout: float = 120.0,
+        analysis_engine: Optional[MLXEngine] = None,
     ) -> None:
         self.engine = engine
+        self.analysis_engine = analysis_engine or engine
         self.event_bus = event_bus
         self.memory = memory
         self.tools: list[Any] = tools or []
@@ -130,11 +132,31 @@ class Orchestrator:
         event_id = event.metadata.get("event_id") or f"evt_{uuid.uuid4().hex[:12]}"
         await self._emit_thought(event_id, "event_received", self._describe_event(event))
 
+        analysis = await self._analyse_event(event)
+        if analysis:
+            await self._emit_thought(event_id, "analysis", analysis)
+
         prompt = self._build_prompt(event)
         await self._emit_thought(event_id, "reasoning", f"Prompt: {prompt[:200]}")
 
         result = await self._run_agent(event_id, prompt)
         await self._emit_thought(event_id, "complete", str(result)[:500])
+
+    async def _analyse_event(self, event: ContextEvent) -> str:
+        """Run :meth:`MLXEngine.evaluate_event` for a plain-text summary.
+
+        Uses :attr:`analysis_engine` (a dedicated lightweight model when
+        configured, otherwise the main engine). Errors are swallowed so
+        the tool-calling path always runs. Returns an empty string when
+        analysis is unavailable.
+        """
+        try:
+            return await self.analysis_engine.evaluate_event(
+                self._describe_event(event)
+            )
+        except Exception:
+            logger.exception("evaluate_event failed")
+            return ""
 
     # ---- agent + tool wiring ------------------------------------------
 
