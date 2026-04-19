@@ -23,6 +23,15 @@ AVAILABLE_TOOLS = [
     move_file,
 ]
 
+# Tools whose side-effects are limited to reading local state (no file
+# writes, no network, no notifications). The orchestrator invokes these
+# without requesting user approval; see ``Orchestrator._wrap_tool_for_approval``.
+READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset({
+    "read_active_tab",
+    "read_clipboard",
+    "summarize_file",
+})
+
 __all__ = [
     "read_active_tab",
     "open_url",
@@ -32,4 +41,5 @@ __all__ = [
     "summarize_file",
     "move_file",
     "AVAILABLE_TOOLS",
+    "READ_ONLY_TOOL_NAMES",
 ]

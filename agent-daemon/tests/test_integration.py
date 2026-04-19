@@ -172,6 +172,56 @@ def test_approval_request_and_response_roundtrip(client) -> None:
         orchestrator.tools = original_tools
 
 
+def test_read_only_tool_bypasses_approval(client) -> None:
+    """Read-only tools must run without emitting an approval_request."""
+    bus = client.app.state.event_bus
+    orchestrator = client.app.state.orchestrator
+
+    def read_clipboard() -> str:
+        return "clipboard-content"
+
+    read_clipboard.name = "read_clipboard"  # type: ignore[attr-defined]
+
+    original_tools = orchestrator.tools
+    orchestrator.tools = [read_clipboard]
+    try:
+        with client.websocket_connect("/ws/stream") as ws:
+            status = ws.receive_json()
+            assert status["type"] == "status"
+
+            bus.push_threadsafe(
+                ContextEvent(
+                    event_type="file",
+                    metadata={"path": "/tmp/report.pdf", "action": "created"},
+                )
+            )
+
+            saw_tool_result = False
+            saw_complete = False
+            for _ in range(15):
+                msg = ws.receive_json()
+                assert msg["type"] != "approval_request", (
+                    "read-only tool must not trigger an approval_request"
+                )
+                if msg["type"] != "thought":
+                    continue
+                stage = msg["payload"]["stage"]
+                content = msg["payload"].get("content", "")
+                if stage == "tool_result":
+                    assert "read_clipboard" in content
+                    assert "read-only" in content
+                    assert "clipboard-content" in content
+                    saw_tool_result = True
+                elif stage == "complete":
+                    saw_complete = True
+                    break
+
+            assert saw_tool_result, "expected a tool_result thought for read_clipboard"
+            assert saw_complete, "expected a complete thought to close the loop"
+    finally:
+        orchestrator.tools = original_tools
+
+
 def _roundtrip_body(client, bus) -> None:
     with client.websocket_connect("/ws/stream") as ws:
         status = ws.receive_json()

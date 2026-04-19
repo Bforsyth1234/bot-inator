@@ -46,12 +46,24 @@ struct ThoughtStreamView: View {
                     .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
             }
             .listStyle(.plain)
+            .onAppear {
+                scrollToBottom(proxy: proxy, animated: false)
+            }
             .onChange(of: thoughts.count) { _, _ in
-                if let last = thoughts.last {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        proxy.scrollTo(last.seq, anchor: .bottom)
-                    }
+                scrollToBottom(proxy: proxy, animated: true)
+            }
+        }
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
+        guard let last = thoughts.last else { return }
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo(last.seq, anchor: .bottom)
                 }
+            } else {
+                proxy.scrollTo(last.seq, anchor: .bottom)
             }
         }
     }

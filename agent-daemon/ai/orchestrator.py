@@ -26,6 +26,7 @@ from schemas.ws_messages import (
     Thought,
     ThoughtPayload,
 )
+from tools import READ_ONLY_TOOL_NAMES
 
 from .mlx_engine import MLXEngine
 from .memory import Memory
@@ -187,6 +188,15 @@ class Orchestrator:
         """
         for tool in self.tools:
             tool_name = getattr(tool, "name", getattr(tool, "__name__", "tool"))
+            if tool_name in READ_ONLY_TOOL_NAMES:
+                try:
+                    result = tool() if callable(tool) else None
+                except Exception as exc:  # pragma: no cover - defensive
+                    result = f"error: {exc}"
+                await self._emit_thought(
+                    event_id, "tool_result", f"{tool_name} (read-only): {result}"
+                )
+                continue
             approved = await self._request_approval(
                 event_id=event_id,
                 tool_name=tool_name,
@@ -204,29 +214,37 @@ class Orchestrator:
         return "done"
 
     def _wrap_tool_for_approval(self, tool: Any) -> Any:
-        """Return a copy of ``tool`` whose invocation is gated on approval."""
+        """Return a copy of ``tool`` whose invocation is gated on approval.
+
+        Tools whose name is in :data:`tools.READ_ONLY_TOOL_NAMES` bypass the
+        approval round-trip and run inline; a ``tool_result`` thought is
+        still emitted so the UI stream reflects the call.
+        """
         orchestrator = self
 
         original_forward = getattr(tool, "forward", None) or getattr(tool, "__call__", None)
         tool_name = getattr(tool, "name", getattr(tool, "__name__", "tool"))
+        is_read_only = tool_name in READ_ONLY_TOOL_NAMES
 
         def gated_forward(*args: Any, **kwargs: Any) -> Any:
             loop = orchestrator.event_bus.loop or asyncio.get_event_loop()
             event_id = getattr(orchestrator, "_current_event_id", "evt_unknown")
-            coro = orchestrator._request_approval(
-                event_id=event_id,
-                tool_name=tool_name,
-                tool_args={"args": list(args), "kwargs": kwargs},
-                reasoning=f"Agent wants to call {tool_name}",
-            )
-            approved = asyncio.run_coroutine_threadsafe(coro, loop).result(
-                timeout=orchestrator.approval_timeout + 5
-            )
-            if not approved:
-                return {"skipped": True, "reason": "user_denied"}
+            if not is_read_only:
+                coro = orchestrator._request_approval(
+                    event_id=event_id,
+                    tool_name=tool_name,
+                    tool_args={"args": list(args), "kwargs": kwargs},
+                    reasoning=f"Agent wants to call {tool_name}",
+                )
+                approved = asyncio.run_coroutine_threadsafe(coro, loop).result(
+                    timeout=orchestrator.approval_timeout + 5
+                )
+                if not approved:
+                    return {"skipped": True, "reason": "user_denied"}
             result = original_forward(*args, **kwargs) if original_forward else None
+            label = f"{tool_name} (read-only)" if is_read_only else tool_name
             asyncio.run_coroutine_threadsafe(
-                orchestrator._emit_thought(event_id, "tool_result", f"{tool_name}: {result}"),
+                orchestrator._emit_thought(event_id, "tool_result", f"{label}: {result}"),
                 loop,
             )
             return result

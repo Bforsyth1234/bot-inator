@@ -114,17 +114,23 @@ not load under `mlx_lm.load`.
 ## 6. Tools (Phase 1 Sprint final)
 
 Registered in `tools/__init__.py::AVAILABLE_TOOLS` and wired via
-`main.py`. Every tool is currently approval-gated.
+`main.py`. Tools listed in `tools/__init__.py::READ_ONLY_TOOL_NAMES`
+bypass the approval gate and run inline; all other tools still emit an
+`approval_request` and wait on the user.
 
-| Tool               | Effect                                                  |
-|--------------------|---------------------------------------------------------|
-| `read_active_tab`  | AppleScript → Chrome, then Safari; returns URL/title.   |
-| `open_url`         | Opens a URL with `open`.                                |
-| `show_notification`| Posts a macOS notification via `osascript`.             |
-| `read_clipboard`   | `pbpaste` → string.                                     |
-| `write_clipboard`  | `pbcopy` ← string.                                      |
-| `summarize_file`   | Metadata + ≤2 KB preview for text files.                |
-| `move_file`        | Moves a file into an existing directory.                |
+| Tool               | Read-only | Effect                                            |
+|--------------------|-----------|---------------------------------------------------|
+| `read_active_tab`  | ✅         | AppleScript → Chrome, then Safari; URL/title.    |
+| `open_url`         |           | Opens a URL with `open`.                          |
+| `show_notification`|           | Posts a macOS notification via `osascript`.       |
+| `read_clipboard`   | ✅         | `pbpaste` → string.                              |
+| `write_clipboard`  |           | `pbcopy` ← string.                                |
+| `summarize_file`   | ✅         | Metadata + ≤2 KB preview for text files.         |
+| `move_file`        |           | Moves a file into an existing directory.          |
+
+`tool_result` thoughts emitted for read-only invocations are prefixed
+with ``"<name> (read-only)"`` so the MenuBar stream still reflects
+every call.
 
 ## 7. UI (`MenuBarUI/`)
 
@@ -184,19 +190,23 @@ Built ad-hoc via `swiftc` against macOS 14.0+ (arm64); artefact at
   - ✅ In-app Debug tab: new `DebugView.swift` + `DebugStats` struct on
     `WebSocketManager` (frames by type, thoughts by stage, decode-error
     ring buffer, connect attempts, last raw frame, reset button).
+  - ✅ Read-only tools (`read_active_tab`, `read_clipboard`,
+    `summarize_file`) bypass the approval gate via
+    `tools.READ_ONLY_TOOL_NAMES`. `_wrap_tool_for_approval` and
+    `_fallback_run` both consult the set; the read-only branch still
+    emits a `tool_result` thought prefixed with "(read-only)".
+    Covered by `test_read_only_tool_bypasses_approval`.
 
 ## 9. Open questions / follow-ups
 
-1. Should read-only tools (`read_active_tab`, `read_clipboard`,
-   `summarize_file`) bypass the approval gate?
-2. File-watcher noise: Chrome download churn (`.crdownload`) floods the
+1. File-watcher noise: Chrome download churn (`.crdownload`) floods the
    stream. Add debounce + extension filter?
-3. Closing the approval window via the red X currently no-ops; should we
+2. Closing the approval window via the red X currently no-ops; should we
    treat it as implicit deny?
-4. `MacAppListener` has no watchdog: if `_mac_app_helper` exits or
+3. `MacAppListener` has no watchdog: if `_mac_app_helper` exits or
    crashes, the daemon stops receiving app activations silently. Add a
    supervisor that restarts the helper on exit and exposes liveness in
    the Debug tab?
-5. Rapid app switches each trigger a full two-engine LLM pipeline.
+4. Rapid app switches each trigger a full two-engine LLM pipeline.
    Consider debouncing `app_activated` (e.g. require sustained focus
    ≥ 500 ms) or coalescing bursts before handing off to the orchestrator.
