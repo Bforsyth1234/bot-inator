@@ -103,3 +103,18 @@ logs/
 
 # Node (just in case)
 node_modules/
+
+# Local SQLite databases (memory store, tests, scratch)
+*.db
+*.db-shm
+*.db-wal
+
+# Agent-generated tools live in their own nested git repo. The
+# parent repo tracks only the .gitkeep placeholder so the directory
+# survives a fresh clone; everything else (the nested .git/, every
+# *.py the agent writes, __pycache__, etc.) stays out of the main
+# history. NB: a directory-level ignore (`generated/`) would prevent
+# git from descending into the folder to re-include the keepfile,
+# so the glob form is required.
+agent-daemon/tools/generated/*
+!agent-daemon/tools/generated/.gitkeep

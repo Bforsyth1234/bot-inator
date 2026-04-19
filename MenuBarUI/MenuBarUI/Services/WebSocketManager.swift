@@ -6,6 +6,7 @@ final class WebSocketManager: ObservableObject {
     @Published private(set) var messages: [WSMessage] = []
     @Published private(set) var isConnected: Bool = false
     @Published private(set) var pendingApproval: (seq: Int, payload: ApprovalRequestPayload)?
+    @Published private(set) var pendingCodeApproval: (seq: Int, payload: CodeApprovalRequestPayload)?
     @Published private(set) var lastStatus: StatusPayload?
     @Published private(set) var debug: DebugStats = DebugStats()
 
@@ -92,11 +93,17 @@ final class WebSocketManager: ObservableObject {
 
     // MARK: - Send
 
-    func sendApprovalResponse(requestId: String, approved: Bool, userNote: String?) {
+    func sendApprovalResponse(
+        requestId: String,
+        approved: Bool,
+        userNote: String?,
+        editedArgs: JSONValue? = nil
+    ) {
         let payload = ApprovalResponsePayload(
             requestId: requestId,
             approved: approved,
-            userNote: (userNote?.isEmpty == true) ? nil : userNote
+            userNote: (userNote?.isEmpty == true) ? nil : userNote,
+            editedArgs: editedArgs
         )
         let msg = WSMessage.approvalResponse(
             seq: nextSeq(),
@@ -106,6 +113,29 @@ final class WebSocketManager: ObservableObject {
         send(msg)
         if pendingApproval?.payload.requestId == requestId {
             pendingApproval = nil
+        }
+    }
+
+    func sendCodeApprovalResponse(
+        requestId: String,
+        approved: Bool,
+        editedCode: String? = nil,
+        userNote: String? = nil
+    ) {
+        let payload = CodeApprovalResponsePayload(
+            requestId: requestId,
+            approved: approved,
+            editedCode: editedCode,
+            userNote: (userNote?.isEmpty == true) ? nil : userNote
+        )
+        let msg = WSMessage.codeApprovalResponse(
+            seq: nextSeq(),
+            timestamp: Date(),
+            payload: payload
+        )
+        send(msg)
+        if pendingCodeApproval?.payload.requestId == requestId {
+            pendingCodeApproval = nil
         }
     }
 
@@ -178,6 +208,8 @@ final class WebSocketManager: ObservableObject {
             switch parsed {
             case .approvalRequest(let seq, _, let payload):
                 pendingApproval = (seq, payload)
+            case .codeApprovalRequest(let seq, _, let payload):
+                pendingCodeApproval = (seq, payload)
             case .status(_, _, let payload):
                 lastStatus = payload
             default:
@@ -242,6 +274,8 @@ struct DebugStats {
             thoughtsByStage[payload.stage, default: 0] += 1
         case .approvalRequest: key = "approval_request"
         case .approvalResponse: key = "approval_response"
+        case .codeApprovalRequest: key = "code_approval_request"
+        case .codeApprovalResponse: key = "code_approval_response"
         case .status: key = "status"
         case .command: key = "command"
         }

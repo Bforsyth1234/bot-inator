@@ -14,6 +14,12 @@ struct MenuBarUIApp: App {
             Image(systemName: "brain.head.profile")
         }
         .menuBarExtraStyle(.window)
+
+        Window("Manage Tools", id: "tool-manager") {
+            ToolManagerView()
+        }
+        .defaultSize(width: 480, height: 480)
+        .keyboardShortcut("t", modifiers: [.command, .shift])
     }
 }
 
@@ -35,14 +41,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 /// diagnostics. New diagnostic panes can be added as additional tabs.
 struct RootPopoverView: View {
     @EnvironmentObject private var ws: WebSocketManager
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        TabView {
-            ThoughtStreamView()
-                .tabItem { Label("Thoughts", systemImage: "brain") }
-            DebugView()
-                .tabItem { Label("Debug", systemImage: "ladybug") }
+        VStack(spacing: 0) {
+            TabView {
+                ThoughtStreamView()
+                    .tabItem { Label("Thoughts", systemImage: "brain") }
+                DebugView()
+                    .tabItem { Label("Debug", systemImage: "ladybug") }
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button {
+                    openWindow(id: "tool-manager")
+                } label: {
+                    Label("Manage Tools…", systemImage: "gear")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
         }
-        .frame(width: 420, height: 560)
+        .frame(width: 420, height: 600)
     }
 }

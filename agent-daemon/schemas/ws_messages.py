@@ -16,7 +16,13 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 ThoughtStage = Literal[
-    "event_received", "analysis", "reasoning", "plan", "tool_result", "complete"
+    "event_received",
+    "analysis",
+    "memory",
+    "reasoning",
+    "plan",
+    "tool_result",
+    "complete",
 ]
 
 
@@ -39,6 +45,39 @@ class ApprovalResponsePayload(BaseModel):
     request_id: str
     approved: bool
     user_note: str | None = None
+    # Optional args the user edited in the approval UI. Mirrors the shape of
+    # ``ApprovalRequestPayload.tool_args`` (``{"args": [...], "kwargs": {...}}``).
+    # When present, the orchestrator invokes the tool with these values
+    # instead of the ones the agent originally proposed.
+    edited_args: dict[str, Any] | None = None
+
+
+class CodeApprovalRequestPayload(BaseModel):
+    """Server→client request to review AI-generated Python tool source.
+
+    Sent by the meta-tool generator after it has drafted a module and passed
+    its static safety checks. The orchestrator blocks until a matching
+    :class:`CodeApprovalResponsePayload` arrives.
+    """
+
+    request_id: str
+    event_id: str
+    tool_name: str
+    description: str
+    code: str
+    timeout_seconds: int = 300
+
+
+class CodeApprovalResponsePayload(BaseModel):
+    """Client→server response to a :class:`CodeApprovalRequestPayload`."""
+
+    request_id: str
+    approved: bool
+    # Full source text, if the user hand-edited the draft in the review
+    # panel. When present, the meta-tool writes this content instead of the
+    # originally-proposed code.
+    edited_code: str | None = None
+    user_note: str | None = None
 
 
 StatusState = Literal[
@@ -54,7 +93,11 @@ class StatusPayload(BaseModel):
 
 
 CommandAction = Literal[
-    "pause_listeners", "resume_listeners", "reload_model", "clear_memory"
+    "pause_listeners",
+    "resume_listeners",
+    "reload_model",
+    "clear_memory",
+    "reload_dynamic_tools",
 ]
 
 
@@ -87,6 +130,16 @@ class ApprovalResponse(_BaseMessage):
     payload: ApprovalResponsePayload
 
 
+class CodeApprovalRequest(_BaseMessage):
+    type: Literal["code_approval_request"] = "code_approval_request"
+    payload: CodeApprovalRequestPayload
+
+
+class CodeApprovalResponse(_BaseMessage):
+    type: Literal["code_approval_response"] = "code_approval_response"
+    payload: CodeApprovalResponsePayload
+
+
 class Status(_BaseMessage):
     type: Literal["status"] = "status"
     payload: StatusPayload
@@ -98,6 +151,14 @@ class Command(_BaseMessage):
 
 
 WSMessage = Annotated[
-    Union[Thought, ApprovalRequest, ApprovalResponse, Status, Command],
+    Union[
+        Thought,
+        ApprovalRequest,
+        ApprovalResponse,
+        CodeApprovalRequest,
+        CodeApprovalResponse,
+        Status,
+        Command,
+    ],
     Field(discriminator="type"),
 ]

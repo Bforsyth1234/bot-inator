@@ -172,6 +172,188 @@ def test_approval_request_and_response_roundtrip(client) -> None:
         orchestrator.tools = original_tools
 
 
+def test_apply_edits_helper() -> None:
+    """``_apply_edits`` merges edited args with sensible fall-throughs."""
+    from ai.orchestrator import Orchestrator
+
+    # No edits -> originals are returned as fresh copies.
+    call_args, call_kwargs = Orchestrator._apply_edits(None, ["a"], {"k": 1})
+    assert call_args == ["a"] and call_kwargs == {"k": 1}
+
+    # Edited kwargs override; args fall through to the default.
+    edited = {"kwargs": {"message": "new"}}
+    call_args, call_kwargs = Orchestrator._apply_edits(edited, [], {"message": "orig"})
+    assert call_args == []
+    assert call_kwargs == {"message": "new"}
+
+    # Both edited.
+    edited = {"args": ["x"], "kwargs": {"y": 2}}
+    call_args, call_kwargs = Orchestrator._apply_edits(edited, ["a"], {"y": 1})
+    assert call_args == ["x"]
+    assert call_kwargs == {"y": 2}
+
+
+def test_approval_response_with_edited_args_overrides_tool_invocation(client) -> None:
+    """Editing a tool arg in the approval UI must change the actual call."""
+    bus = client.app.state.event_bus
+    orchestrator = client.app.state.orchestrator
+
+    captured: dict[str, object] = {}
+
+    def stub_send(target_number: str, message: str) -> str:
+        captured["target_number"] = target_number
+        captured["message"] = message
+        return "sent"
+
+    stub_send.name = "send_imessage"  # type: ignore[attr-defined]
+
+    original_tools = orchestrator.tools
+    orchestrator.tools = [stub_send]
+    try:
+        with client.websocket_connect("/ws/stream") as ws:
+            status = ws.receive_json()
+            assert status["type"] == "status"
+
+            bus.push_threadsafe(
+                ContextEvent(
+                    event_type="imessage_received",
+                    metadata={"sender": "+14155551212", "text": "yo"},
+                )
+            )
+
+            approval_req = None
+            for _ in range(10):
+                msg = ws.receive_json()
+                if msg["type"] == "approval_request":
+                    approval_req = msg
+                    break
+            assert approval_req is not None, "expected an approval_request frame"
+            assert approval_req["payload"]["tool_name"] == "send_imessage"
+
+            request_id = approval_req["payload"]["request_id"]
+            ws.send_json(
+                {
+                    "type": "approval_response",
+                    "seq": 1,
+                    "timestamp": "2026-04-19T12:00:00.000Z",
+                    "payload": {
+                        "request_id": request_id,
+                        "approved": True,
+                        "edited_args": {
+                            "args": [],
+                            "kwargs": {
+                                "target_number": "+14155550000",
+                                "message": "edited reply",
+                            },
+                        },
+                    },
+                }
+            )
+
+            saw_complete = False
+            for _ in range(15):
+                msg = ws.receive_json()
+                if msg["type"] == "thought" and msg["payload"]["stage"] == "complete":
+                    saw_complete = True
+                    break
+            assert saw_complete, "expected the loop to close"
+
+        assert captured == {
+            "target_number": "+14155550000",
+            "message": "edited reply",
+        }
+    finally:
+        orchestrator.tools = original_tools
+
+
+def test_imessage_event_builds_specialized_prompt() -> None:
+    """An ``imessage_received`` event must steer the agent toward send_imessage."""
+    from ai.orchestrator import Orchestrator
+
+    event = ContextEvent(
+        event_type="imessage_received",
+        metadata={"sender": "+14155551212", "text": "are we still on for 7?"},
+    )
+    prompt = Orchestrator._build_imessage_prompt(event)
+    assert "+14155551212" in prompt
+    assert "are we still on for 7?" in prompt
+    assert "send_imessage" in prompt
+    assert "target_number='+14155551212'" in prompt
+    assert "no action" in prompt
+
+    description = Orchestrator._build_imessage_prompt.__self__ if False else None
+    del description
+    assert "iMessage from +14155551212" in Orchestrator._describe_event(event)
+
+
+def test_imessage_watcher_emits_inbound_messages(tmp_path) -> None:
+    """The watcher only emits events for inbound messages after its baseline."""
+    import sqlite3
+    import time
+
+    from events.event_bus import EventBus
+    from events.imessage_watcher import IMessageWatcher
+
+    db_path = tmp_path / "chat.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+        CREATE TABLE message (
+            ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT,
+            is_from_me INTEGER,
+            handle_id INTEGER
+        );
+        INSERT INTO handle (ROWID, id) VALUES (1, '+14155551212');
+        INSERT INTO message (text, is_from_me, handle_id)
+            VALUES ('historical', 0, 1);
+        """
+    )
+    conn.commit()
+
+    import asyncio as _asyncio
+
+    loop = _asyncio.new_event_loop()
+    try:
+        bus = EventBus()
+        bus.bind_loop(loop)
+        watcher = IMessageWatcher(bus, db_path=db_path, poll_interval=0.05)
+        watcher.start()
+        time.sleep(0.15)
+
+        conn.execute(
+            "INSERT INTO message (text, is_from_me, handle_id) VALUES (?, 0, 1)",
+            ("hello from a friend",),
+        )
+        conn.execute(
+            "INSERT INTO message (text, is_from_me, handle_id) VALUES (?, 1, 1)",
+            ("this is me typing — must be ignored",),
+        )
+        conn.commit()
+        time.sleep(0.25)
+        watcher.stop()
+
+        events: list = []
+        while True:
+            try:
+                events.append(loop.run_until_complete(
+                    _asyncio.wait_for(bus.consume(), timeout=0.05)
+                ))
+            except _asyncio.TimeoutError:
+                break
+
+        texts = [e.metadata.get("text") for e in events]
+        assert "hello from a friend" in texts
+        assert "historical" not in texts
+        assert "this is me typing — must be ignored" not in texts
+        assert all(e.event_type == "imessage_received" for e in events)
+        assert all(e.metadata.get("sender") == "+14155551212" for e in events)
+    finally:
+        conn.close()
+        loop.close()
+
+
 def test_read_only_tool_bypasses_approval(client) -> None:
     """Read-only tools must run without emitting an approval_request."""
     bus = client.app.state.event_bus
@@ -269,3 +451,276 @@ def _roundtrip_body(client, bus) -> None:
 
         assert saw_tool_result, "expected a tool_result thought after approval"
         assert saw_complete, "expected a complete thought to close the loop"
+
+
+def test_memory_save_recall_round_trip(tmp_path) -> None:
+    """Saved memories can be recalled by the instance API.
+
+    Exact ordering depends on whether ``sqlite-vec`` is loadable in the
+    running Python: when it is we rely on vector similarity, otherwise the
+    store falls back to recency. The contract the orchestrator depends on
+    is that ``recall_memory`` returns ``list[str]`` bounded by ``top_k``
+    and includes previously-saved text.
+    """
+    from ai.memory import Memory, _fallback_embed
+
+    mem = Memory(
+        db_path=tmp_path / "memory.db",
+        embedder=lambda t: _fallback_embed(t),
+    )
+    try:
+        mem.save_memory("the user prefers dark mode")
+        mem.save_memory("the user lives in Oakland")
+        mem.save_memory("the user's dog is named Biscuit")
+
+        one = mem.recall_memory("anything", top_k=1)
+        assert len(one) == 1 and isinstance(one[0], str)
+
+        all_three = mem.recall_memory("anything", top_k=3)
+        assert len(all_three) == 3
+        assert all(isinstance(x, str) for x in all_three)
+        assert set(all_three) == {
+            "the user prefers dark mode",
+            "the user lives in Oakland",
+            "the user's dog is named Biscuit",
+        }
+    finally:
+        mem.close()
+
+
+def test_remember_preference_tool_writes_to_default_memory(tmp_path) -> None:
+    """The ``remember_preference`` tool persists via the module-level helper."""
+    from ai.memory import Memory, _fallback_embed, set_default_memory
+    from tools.remember_preference import remember_preference
+
+    mem = Memory(
+        db_path=tmp_path / "memory.db",
+        embedder=lambda t: _fallback_embed(t),
+    )
+    set_default_memory(mem)
+    try:
+        underlying = getattr(remember_preference, "__wrapped__", remember_preference)
+        result = underlying("the user prefers meetings after 2pm")
+        assert result["status"] == "ok"
+        assert isinstance(result["id"], int)
+
+        empty = underlying("   ")
+        assert empty["status"] == "error"
+
+        recalled = mem.recall_memory("when does the user like meetings?", top_k=1)
+        assert recalled and "meetings after 2pm" in recalled[0]
+    finally:
+        set_default_memory(None)
+        mem.close()
+
+
+def test_list_tools_includes_builtins_and_generated(client, tmp_path, monkeypatch) -> None:
+    """GET /api/tools surfaces built-ins and stub generated modules."""
+    from config import settings
+    monkeypatch.setattr(settings, "generated_tools_dir", tmp_path)
+    (tmp_path / "cold_tool.py").write_text(
+        '"""Module doc."""\n\n'
+        'def cold_tool(x: str) -> dict:\n'
+        '    """A cold tool that has not been loaded yet."""\n'
+        '    return {"status": "ok"}\n'
+    )
+
+    response = client.get("/api/tools")
+    assert response.status_code == 200
+    rows = response.json()
+    names = {r["name"]: r for r in rows}
+
+    assert "send_imessage" in names and names["send_imessage"]["is_generated"] is False
+    assert "generate_custom_tool" in names
+    assert "cold_tool" in names and names["cold_tool"]["is_generated"] is True
+    assert "cold tool" in names["cold_tool"]["description"].lower()
+
+
+def test_delete_tool_rejects_builtins(client) -> None:
+    assert client.delete("/api/tools/send_imessage").status_code == 400
+    assert client.delete("/api/tools/BadName").status_code == 400
+    assert client.delete("/api/tools/nonexistent_tool").status_code == 404
+
+
+def test_delete_tool_removes_file_and_unloads(client, tmp_path, monkeypatch) -> None:
+    """DELETE removes the file, detaches the tool, and best-effort commits."""
+    from config import settings
+    monkeypatch.setattr(settings, "generated_tools_dir", tmp_path)
+    orchestrator = client.app.state.orchestrator
+    path = tmp_path / "tempo_tool.py"
+    path.write_text(
+        '"""Temp."""\n\n'
+        'from smolagents import tool\n\n'
+        '@tool\n'
+        'def tempo_tool() -> dict:\n'
+        '    """Return a sentinel."""\n'
+        '    return {"status": "ok"}\n'
+    )
+    orchestrator.load_dynamic_tools(tmp_path)
+    assert "tempo_tool" in orchestrator._dynamic_tool_names
+
+    response = client.delete("/api/tools/tempo_tool")
+    assert response.status_code == 200
+    assert response.json()["unloaded"] is True
+    assert not path.exists()
+    assert "tempo_tool" not in orchestrator._dynamic_tool_names
+
+
+def test_load_dynamic_tools_skips_dotfiles(tmp_path) -> None:
+    """`.gitkeep` and the nested `.git/` folder must never be imported."""
+    import asyncio as _asyncio
+    from unittest.mock import patch as _patch
+
+    from ai.mlx_engine import MLXEngine
+    from ai.orchestrator import Orchestrator
+    from events.event_bus import EventBus
+
+    (tmp_path / ".gitkeep").write_text("")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (tmp_path / "wibble.py").write_text(
+        '"""Wibble."""\n'
+        'from smolagents import tool\n\n'
+        '@tool\n'
+        'def wibble() -> dict:\n'
+        '    """Return nothing."""\n'
+        '    return {"status": "ok"}\n'
+    )
+
+    loop = _asyncio.new_event_loop()
+    try:
+        bus = EventBus()
+        bus.bind_loop(loop)
+        with _patch.object(Orchestrator, "_build_agent", return_value=None):
+            orch = Orchestrator(
+                engine=MLXEngine(), event_bus=bus, tools=[],
+                generated_tools_dir=tmp_path,
+            )
+            loaded = orch.load_dynamic_tools()
+    finally:
+        loop.close()
+    assert loaded == ["wibble"]
+
+
+def test_pattern_recognizer_publishes_on_match(tmp_path) -> None:
+    """A parseable JSON suggestion becomes a pattern_detected ContextEvent."""
+    import asyncio as _asyncio
+
+    from ai.pattern_recognizer import PatternRecognizer
+    from events.event_bus import EventBus
+
+    async def scenario():
+        loop = _asyncio.get_running_loop()
+        bus = EventBus()
+        bus.bind_loop(loop)
+
+        async def fake_eval(_prompt: str) -> str:
+            return (
+                '{"tool_name": "open_jira_ticket", '
+                '"description": "Open the Jira ticket for the active branch.", '
+                '"expected_logic": "shell git rev-parse, extract key, open URL"}'
+            )
+
+        rec = PatternRecognizer(
+            event_bus=bus, evaluate=fake_eval,
+            trigger_every=2, trigger_interval=3600, cooldown_seconds=0.01,
+        )
+        for _ in range(2):
+            task = rec.observe(ContextEvent(event_type="app_activated", app_name="X"))
+        assert task is not None
+        await task
+        emitted = await _asyncio.wait_for(bus.consume(), timeout=0.5)
+        return emitted
+
+    event = _asyncio.run(scenario())
+    assert event.event_type == "pattern_detected"
+    assert event.metadata["tool_name"] == "open_jira_ticket"
+
+
+def test_pattern_recognizer_ignores_no_pattern(tmp_path) -> None:
+    """NO_PATTERN replies never leak onto the bus."""
+    import asyncio as _asyncio
+
+    from ai.pattern_recognizer import PatternRecognizer
+    from events.event_bus import EventBus
+
+    async def scenario() -> bool:
+        bus = EventBus()
+        bus.bind_loop(_asyncio.get_running_loop())
+
+        async def fake_eval(_prompt: str) -> str:
+            return "NO_PATTERN"
+
+        rec = PatternRecognizer(
+            event_bus=bus, evaluate=fake_eval,
+            trigger_every=1, trigger_interval=3600, cooldown_seconds=0.01,
+        )
+        task = rec.observe(ContextEvent(event_type="file"))
+        assert task is not None
+        await task
+        return bus.qsize() == 0
+
+    assert _asyncio.run(scenario())
+
+
+def test_orchestrator_injects_recalled_memories_into_prompt() -> None:
+    """A populated memory must surface as a 'memory' thought and feed the prompt.
+
+    Drives the orchestrator directly (rather than via the FastAPI app) so
+    the assertion doesn't depend on the full lifespan teardown while a
+    ``_fallback_run`` task is blocked waiting on an approval response.
+    """
+    import asyncio as _asyncio
+    from unittest.mock import AsyncMock, patch as _patch
+
+    from ai.memory import Memory, _fallback_embed
+    from ai.mlx_engine import MLXEngine
+    from ai.orchestrator import Orchestrator
+    from events.event_bus import EventBus
+
+    async def _scenario() -> list:
+        loop = _asyncio.get_running_loop()
+        bus = EventBus()
+        bus.bind_loop(loop)
+
+        engine = MLXEngine()
+        engine.evaluate_event = AsyncMock(return_value="")
+
+        mem = Memory(db_path=":memory:", embedder=lambda t: _fallback_embed(t))
+        mem.save_memory("the user prefers dark mode in Safari")
+
+        collected: list = []
+
+        async def _sub(message):
+            collected.append(message)
+
+        with _patch.object(Orchestrator, "_build_agent", return_value=None):
+            orch = Orchestrator(
+                engine=engine, event_bus=bus, memory=mem, tools=[]
+            )
+            orch.add_subscriber(_sub)
+            await orch.start()
+            bus.push_threadsafe(
+                ContextEvent(
+                    event_type="app_activated",
+                    app_name="Safari",
+                    window_title="Docs",
+                )
+            )
+            await _asyncio.sleep(0.3)
+            await orch.stop()
+
+        mem.close()
+        return collected
+
+    received = _asyncio.run(_scenario())
+    stages = {
+        m.payload.stage: m.payload.content
+        for m in received
+        if getattr(m, "type", None) == "thought"
+    }
+
+    assert "memory" in stages, f"expected a 'memory' thought; got {list(stages)}"
+    assert "dark mode" in stages["memory"]
+    assert "reasoning" in stages
+    assert "Relevant memories" in stages["reasoning"]

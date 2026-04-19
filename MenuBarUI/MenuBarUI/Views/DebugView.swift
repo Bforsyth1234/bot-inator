@@ -127,7 +127,7 @@ struct DebugView: View {
 
     private func sortedStages() -> [(ThoughtStage, Int)] {
         let order: [ThoughtStage] = [
-            .eventReceived, .analysis, .reasoning, .plan, .toolResult, .complete,
+            .eventReceived, .analysis, .memory, .reasoning, .plan, .toolResult, .complete,
         ]
         return order.compactMap { stage in
             ws.debug.thoughtsByStage[stage].map { (stage, $0) }

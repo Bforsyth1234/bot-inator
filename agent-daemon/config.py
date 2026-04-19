@@ -14,6 +14,14 @@ class Settings:
     watch_dirs: list[Path] = field(
         default_factory=lambda: [Path.home() / "Downloads"]
     )
+    # Directory that holds AI-generated smolagents @tool modules. Loaded at
+    # startup via :meth:`Orchestrator.load_dynamic_tools` and re-scanned
+    # whenever the meta-tool generator installs a new file.
+    generated_tools_dir: Path = field(
+        default_factory=lambda: Path(__file__).resolve().parent
+        / "tools"
+        / "generated"
+    )
 
 
 settings = Settings()

@@ -13,9 +13,12 @@ Phase 1 design:
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
+import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from events.event_bus import ContextEvent, EventBus
@@ -23,6 +26,9 @@ from schemas.ws_messages import (
     ApprovalRequest,
     ApprovalRequestPayload,
     ApprovalResponsePayload,
+    CodeApprovalRequest,
+    CodeApprovalRequestPayload,
+    CodeApprovalResponsePayload,
     Thought,
     ThoughtPayload,
 )
@@ -55,19 +61,37 @@ class Orchestrator:
         tools: Optional[list[Any]] = None,
         approval_timeout: float = 120.0,
         analysis_engine: Optional[MLXEngine] = None,
+        generated_tools_dir: Optional[Path] = None,
+        code_approval_timeout: float = 300.0,
+        pattern_recognizer: Any = None,
     ) -> None:
         self.engine = engine
         self.analysis_engine = analysis_engine or engine
         self.event_bus = event_bus
         self.memory = memory
         self.tools: list[Any] = tools or []
+        self._builtin_tool_names: frozenset[str] = frozenset(
+            getattr(t, "name", getattr(t, "__name__", "")) for t in self.tools
+        )
         self.approval_timeout = approval_timeout
+        self.code_approval_timeout = code_approval_timeout
+        self.generated_tools_dir = (
+            Path(generated_tools_dir) if generated_tools_dir else None
+        )
 
         self._ws_send: Optional[WSSendCallable] = None
         self._subscribers: set[WSSendCallable] = set()
         self._seq: int = 0
         self._task: Optional[asyncio.Task[None]] = None
         self._pending: dict[str, asyncio.Future[ApprovalResponsePayload]] = {}
+        self._pending_code: dict[
+            str, asyncio.Future[CodeApprovalResponsePayload]
+        ] = {}
+        # Names of tools injected at runtime via ``load_dynamic_tools``. Kept
+        # so :meth:`unload_dynamic_tool` can distinguish agent-authored tools
+        # from the built-ins baked in at construction time.
+        self._dynamic_tool_names: set[str] = set()
+        self.pattern_recognizer = pattern_recognizer
         self._agent: Any = None
 
     # ---- lifecycle ----------------------------------------------------
@@ -117,6 +141,169 @@ class Orchestrator:
         fut.set_result(payload)
         return True
 
+    def submit_code_approval_response(
+        self, payload: CodeApprovalResponsePayload
+    ) -> bool:
+        """Resolve a pending code-approval. Mirrors :meth:`submit_approval_response`."""
+        fut = self._pending_code.pop(payload.request_id, None)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(payload)
+        return True
+
+    async def request_code_approval(
+        self,
+        *,
+        tool_name: str,
+        description: str,
+        code: str,
+        event_id: Optional[str] = None,
+    ) -> CodeApprovalResponsePayload:
+        """Prompt the user to review AI-generated Python source.
+
+        Public entry point used by the meta-tool generator. Blocks on a
+        :class:`asyncio.Future` keyed by ``request_id`` until the client
+        replies with a :class:`CodeApprovalResponsePayload` or the
+        :attr:`code_approval_timeout` elapses (in which case a synthetic
+        denial is returned).
+        """
+        request_id = f"code_{uuid.uuid4().hex[:12]}"
+        ev_id = event_id or getattr(self, "_current_event_id", "evt_meta")
+        fut: asyncio.Future[CodeApprovalResponsePayload] = (
+            asyncio.get_event_loop().create_future()
+        )
+        self._pending_code[request_id] = fut
+        msg = CodeApprovalRequest(
+            seq=self._next_seq(),
+            timestamp=_now_iso(),
+            payload=CodeApprovalRequestPayload(
+                request_id=request_id,
+                event_id=ev_id,
+                tool_name=tool_name,
+                description=description,
+                code=code,
+                timeout_seconds=int(self.code_approval_timeout),
+            ),
+        )
+        await self._send(msg)
+        try:
+            return await asyncio.wait_for(
+                fut, timeout=self.code_approval_timeout
+            )
+        except asyncio.TimeoutError:
+            self._pending_code.pop(request_id, None)
+            logger.info("Code approval %s timed out", request_id)
+            return CodeApprovalResponsePayload(
+                request_id=request_id, approved=False
+            )
+
+    # ---- dynamic tool loading ----------------------------------------
+
+    def load_dynamic_tools(
+        self, directory: Optional[Path] = None
+    ) -> list[str]:
+        """Import every ``*.py`` module under ``directory`` as a smolagents tool.
+
+        Called on startup and again by the meta-tool generator after a new
+        file is persisted. Each successfully-imported module must expose a
+        single ``smolagents.Tool`` instance at module scope (either via the
+        ``@tool`` decorator or a ``Tool`` subclass). Imports are idempotent:
+        re-loading refreshes the cached module and replaces the previous
+        tool instance in :attr:`tools`.
+
+        Returns the sorted list of dynamic tool names currently loaded.
+
+        Files starting with ``.`` (e.g. ``.gitkeep``) and the nested
+        ``.git`` bookkeeping directory are always skipped.
+        """
+        target = Path(directory) if directory else self.generated_tools_dir
+        if target is None or not target.exists():
+            return sorted(self._dynamic_tool_names)
+
+        loaded: list[str] = []
+        for path in sorted(target.iterdir()):
+            if path.name.startswith(".") or path.is_dir():
+                continue
+            if path.suffix != ".py":
+                continue
+            name = path.stem
+            if name in self._builtin_tool_names:
+                logger.warning(
+                    "Generated tool %s shadows a built-in; skipping", name
+                )
+                continue
+            try:
+                tool_obj = self._import_tool_module(name, path)
+            except Exception:
+                logger.exception(
+                    "Failed to load dynamic tool from %s; skipping", path
+                )
+                continue
+            if tool_obj is None:
+                logger.warning(
+                    "No smolagents Tool instance found in %s; skipping", path
+                )
+                continue
+            self._replace_tool(name, tool_obj)
+            self._dynamic_tool_names.add(name)
+            loaded.append(name)
+
+        if loaded:
+            self._agent = self._build_agent()
+            logger.info("Loaded dynamic tools: %s", ", ".join(loaded))
+        return sorted(self._dynamic_tool_names)
+
+    def unload_dynamic_tool(self, name: str) -> bool:
+        """Remove a previously-loaded dynamic tool from the active agent.
+
+        Returns ``True`` when a matching tool was found and detached. Does
+        not touch the filesystem — the caller is responsible for unlinking
+        the source file.
+        """
+        if name not in self._dynamic_tool_names:
+            return False
+        self.tools = [
+            t
+            for t in self.tools
+            if getattr(t, "name", getattr(t, "__name__", "")) != name
+        ]
+        self._dynamic_tool_names.discard(name)
+        sys.modules.pop(f"tools.generated.{name}", None)
+        self._agent = self._build_agent()
+        logger.info("Unloaded dynamic tool: %s", name)
+        return True
+
+    @staticmethod
+    def _import_tool_module(name: str, path: Path) -> Any:
+        """Import ``path`` as ``tools.generated.<name>`` and return its Tool."""
+        mod_name = f"tools.generated.{name}"
+        sys.modules.pop(mod_name, None)
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = module
+        spec.loader.exec_module(module)
+        try:
+            from smolagents import Tool  # type: ignore
+        except ImportError:
+            Tool = None  # type: ignore
+        for attr in vars(module).values():
+            if Tool is not None and isinstance(attr, Tool):
+                return attr
+            if callable(attr) and getattr(attr, "name", None) == name:
+                return attr
+        return None
+
+    def _replace_tool(self, name: str, tool_obj: Any) -> None:
+        """Add or replace a tool in :attr:`tools` by name, preserving order."""
+        for idx, existing in enumerate(self.tools):
+            ex_name = getattr(existing, "name", getattr(existing, "__name__", ""))
+            if ex_name == name:
+                self.tools[idx] = tool_obj
+                return
+        self.tools.append(tool_obj)
+
     # ---- main loop ----------------------------------------------------
 
     async def _run(self) -> None:
@@ -133,15 +320,52 @@ class Orchestrator:
         event_id = event.metadata.get("event_id") or f"evt_{uuid.uuid4().hex[:12]}"
         await self._emit_thought(event_id, "event_received", self._describe_event(event))
 
+        if self.pattern_recognizer is not None:
+            try:
+                self.pattern_recognizer.observe(event)
+            except Exception:
+                logger.exception("pattern_recognizer.observe failed")
+
+        if event.event_type == "pattern_detected":
+            prompt = self._build_pattern_prompt(event)
+            await self._emit_thought(
+                event_id, "reasoning", f"Prompt: {prompt[:200]}"
+            )
+            result = await self._run_agent(event_id, prompt)
+            await self._emit_thought(event_id, "complete", str(result)[:500])
+            return
+
         analysis = await self._analyse_event(event)
         if analysis:
             await self._emit_thought(event_id, "analysis", analysis)
 
-        prompt = self._build_prompt(event)
+        memories = await self._recall_memories(event)
+        if memories:
+            await self._emit_thought(
+                event_id, "memory", "Recalled: " + " | ".join(memories)
+            )
+
+        prompt = self._build_prompt(event, memories=memories)
         await self._emit_thought(event_id, "reasoning", f"Prompt: {prompt[:200]}")
 
         result = await self._run_agent(event_id, prompt)
         await self._emit_thought(event_id, "complete", str(result)[:500])
+
+    async def _recall_memories(self, event: ContextEvent) -> list[str]:
+        """Pull the top few most relevant prior memories for ``event``.
+
+        Runs synchronously off-thread so the embedding call never blocks the
+        event loop. Errors are swallowed: memory is a best-effort context
+        signal, never a hard dependency for handling an event.
+        """
+        if self.memory is None:
+            return []
+        query = self._describe_event(event)
+        try:
+            return await asyncio.to_thread(self.memory.recall_memory, query, 3)
+        except Exception:
+            logger.exception("memory.recall_memory failed")
+            return []
 
     async def _analyse_event(self, event: ContextEvent) -> str:
         """Run :meth:`MLXEngine.evaluate_event` for a plain-text summary.
@@ -197,17 +421,20 @@ class Orchestrator:
                     event_id, "tool_result", f"{tool_name} (read-only): {result}"
                 )
                 continue
-            approved = await self._request_approval(
+            approved, edited = await self._request_approval(
                 event_id=event_id,
                 tool_name=tool_name,
-                tool_args={},
+                tool_args={"args": [], "kwargs": {}},
                 reasoning=f"Fallback invocation of {tool_name}",
             )
             if not approved:
                 await self._emit_thought(event_id, "tool_result", f"{tool_name}: skipped")
                 continue
+            call_args, call_kwargs = self._apply_edits(edited, [], {})
             try:
-                result = tool() if callable(tool) else None
+                result = (
+                    tool(*call_args, **call_kwargs) if callable(tool) else None
+                )
             except Exception as exc:  # pragma: no cover - defensive
                 result = f"error: {exc}"
             await self._emit_thought(event_id, "tool_result", f"{tool_name}: {result}")
@@ -229,6 +456,8 @@ class Orchestrator:
         def gated_forward(*args: Any, **kwargs: Any) -> Any:
             loop = orchestrator.event_bus.loop or asyncio.get_event_loop()
             event_id = getattr(orchestrator, "_current_event_id", "evt_unknown")
+            call_args: list[Any] = list(args)
+            call_kwargs: dict[str, Any] = dict(kwargs)
             if not is_read_only:
                 coro = orchestrator._request_approval(
                     event_id=event_id,
@@ -236,12 +465,19 @@ class Orchestrator:
                     tool_args={"args": list(args), "kwargs": kwargs},
                     reasoning=f"Agent wants to call {tool_name}",
                 )
-                approved = asyncio.run_coroutine_threadsafe(coro, loop).result(
-                    timeout=orchestrator.approval_timeout + 5
-                )
+                approved, edited = asyncio.run_coroutine_threadsafe(
+                    coro, loop
+                ).result(timeout=orchestrator.approval_timeout + 5)
                 if not approved:
                     return {"skipped": True, "reason": "user_denied"}
-            result = original_forward(*args, **kwargs) if original_forward else None
+                call_args, call_kwargs = orchestrator._apply_edits(
+                    edited, call_args, call_kwargs
+                )
+            result = (
+                original_forward(*call_args, **call_kwargs)
+                if original_forward
+                else None
+            )
             label = f"{tool_name} (read-only)" if is_read_only else tool_name
             asyncio.run_coroutine_threadsafe(
                 orchestrator._emit_thought(event_id, "tool_result", f"{label}: {result}"),
@@ -254,6 +490,29 @@ class Orchestrator:
             return tool
         return gated_forward
 
+    @staticmethod
+    def _apply_edits(
+        edited: dict[str, Any] | None,
+        default_args: list[Any],
+        default_kwargs: dict[str, Any],
+    ) -> tuple[list[Any], dict[str, Any]]:
+        """Merge user-edited args from the approval response.
+
+        The approval UI sends ``edited_args`` with the same shape as the
+        outbound ``tool_args`` (``{"args": [...], "kwargs": {...}}``). Either
+        sub-key is optional; missing ones fall back to the values the agent
+        originally proposed.
+        """
+        if not edited:
+            return list(default_args), dict(default_kwargs)
+        args = edited.get("args")
+        kwargs = edited.get("kwargs")
+        call_args = list(args) if isinstance(args, list) else list(default_args)
+        call_kwargs = (
+            dict(kwargs) if isinstance(kwargs, dict) else dict(default_kwargs)
+        )
+        return call_args, call_kwargs
+
     # ---- approval + streaming ----------------------------------------
 
     async def _request_approval(
@@ -262,7 +521,13 @@ class Orchestrator:
         tool_name: str,
         tool_args: dict[str, Any],
         reasoning: str,
-    ) -> bool:
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Return ``(approved, edited_args)`` from the user.
+
+        ``edited_args`` — when non-None — mirrors the shape of ``tool_args``
+        (``{"args": [...], "kwargs": {...}}``) and is honoured by the caller
+        in place of the original arguments proposed by the agent.
+        """
         request_id = f"req_{uuid.uuid4().hex[:12]}"
         fut: asyncio.Future[ApprovalResponsePayload] = asyncio.get_event_loop().create_future()
         self._pending[request_id] = fut
@@ -283,11 +548,11 @@ class Orchestrator:
 
         try:
             resp = await asyncio.wait_for(fut, timeout=self.approval_timeout)
-            return bool(resp.approved)
+            return bool(resp.approved), resp.edited_args
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
             logger.info("Approval %s timed out", request_id)
-            return False
+            return False, None
 
     async def _emit_thought(self, event_id: str, stage: str, content: str) -> None:
         msg = Thought(
@@ -321,7 +586,12 @@ class Orchestrator:
 
     # ---- prompt building ---------------------------------------------
 
-    def _build_prompt(self, event: ContextEvent) -> str:
+    def _build_prompt(
+        self, event: ContextEvent, memories: Optional[list[str]] = None
+    ) -> str:
+        if event.event_type == "imessage_received":
+            return self._build_imessage_prompt(event, memories=memories)
+
         parts = [
             "You are an on-device macOS assistant. Decide whether to help "
             "the user based on the following system event.",
@@ -333,6 +603,9 @@ class Orchestrator:
             parts.append(f"Window: {event.window_title}")
         if event.metadata:
             parts.append(f"Metadata: {event.metadata}")
+        memory_block = self._format_memories(memories)
+        if memory_block:
+            parts.append(memory_block)
         parts.append(
             "If an action would help, call exactly one tool. Otherwise reply "
             "'no action'."
@@ -340,7 +613,79 @@ class Orchestrator:
         return "\n".join(parts)
 
     @staticmethod
+    def _build_pattern_prompt(event: ContextEvent) -> str:
+        """Steer the agent toward ``generate_custom_tool`` for a detected pattern.
+
+        The pattern recognizer publishes the proposed ``tool_name``,
+        ``description`` and ``expected_logic`` in ``event.metadata``; those
+        fields are interpolated here so the agent has a concrete call to
+        make rather than re-deriving the intent from scratch.
+        """
+        meta = event.metadata
+        tool_name = meta.get("tool_name", "new_helper")
+        description = meta.get("description", "")
+        logic = meta.get("expected_logic", "")
+        return (
+            "You are an on-device macOS assistant. The pattern recognizer "
+            "has observed the user performing a repeatable workflow and "
+            "suggested a new tool that would automate it.\n\n"
+            f"Proposed tool name: {tool_name}\n"
+            f"Description: {description}\n"
+            f"Expected logic: {logic}\n\n"
+            "Call the `generate_custom_tool` tool exactly once with "
+            f"`tool_name={tool_name!r}`, a one-sentence description, and "
+            "a clear expected_logic paragraph. The user will review the "
+            "drafted source before it is installed; do not attempt to "
+            "invoke the new tool in this turn. If the pattern does not "
+            "warrant a new tool, reply with the plain text 'no action'."
+        )
+
+    @staticmethod
+    def _build_imessage_prompt(
+        event: ContextEvent, memories: Optional[list[str]] = None
+    ) -> str:
+        sender = event.metadata.get("sender", "unknown")
+        text = event.metadata.get("text", "")
+        memory_block = Orchestrator._format_memories(memories)
+        memory_suffix = f"\n\n{memory_block}" if memory_block else ""
+        return (
+            "You are an on-device macOS assistant watching the user's "
+            "iMessage inbox on their behalf.\n"
+            f"A new inbound message just arrived from {sender}:\n\n"
+            f"\"{text}\"\n\n"
+            "Decide whether a reply is warranted. Good candidates: a "
+            "direct question, a plan-making message, or anything that "
+            "clearly expects a response. Bad candidates: promotional "
+            "SMS, 2FA codes, automated alerts, or messages that are "
+            "obviously not for the assistant to answer."
+            f"{memory_suffix}\n\n"
+            "If — and only if — a reply is warranted, call the "
+            "`send_imessage` tool exactly once with "
+            f"`target_number={sender!r}` and a short, friendly reply "
+            "written in the user's voice. The call will prompt the user "
+            "for explicit approval before the message is sent. "
+            "Otherwise, reply with the plain text 'no action'."
+        )
+
+    @staticmethod
+    def _format_memories(memories: Optional[list[str]]) -> str:
+        if not memories:
+            return ""
+        lines = ["Relevant memories from prior sessions:"]
+        lines.extend(f"- {m}" for m in memories)
+        return "\n".join(lines)
+
+    @staticmethod
     def _describe_event(event: ContextEvent) -> str:
+        if event.event_type == "imessage_received":
+            sender = event.metadata.get("sender", "unknown")
+            text = event.metadata.get("text", "") or ""
+            preview = text if len(text) <= 120 else text[:120] + "…"
+            return f"iMessage from {sender}: {preview}"
+        if event.event_type == "pattern_detected":
+            tool_name = event.metadata.get("tool_name", "unknown")
+            desc = event.metadata.get("description", "")
+            return f"Pattern detected → suggested tool: {tool_name} — {desc}"
         return (
             f"{event.event_type}"
             + (f" in {event.app_name}" if event.app_name else "")

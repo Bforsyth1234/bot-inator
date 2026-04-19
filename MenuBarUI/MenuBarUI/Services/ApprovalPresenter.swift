@@ -11,12 +11,19 @@ final class ApprovalPresenter {
     private weak var ws: WebSocketManager?
     private var window: NSWindow?
     private var presentedId: String?
+    private var codeWindow: NSWindow?
+    private var presentedCodeId: String?
 
     func attach(to ws: WebSocketManager) {
         self.ws = ws
         ws.$pendingApproval
             .sink { [weak self] pending in
                 self?.handle(pending)
+            }
+            .store(in: &cancellables)
+        ws.$pendingCodeApproval
+            .sink { [weak self] pending in
+                self?.handleCode(pending)
             }
             .store(in: &cancellables)
     }
@@ -31,15 +38,28 @@ final class ApprovalPresenter {
         present(pending.payload)
     }
 
+    private func handleCode(
+        _ pending: (seq: Int, payload: CodeApprovalRequestPayload)?
+    ) {
+        guard let pending else {
+            closeCodeWindow()
+            return
+        }
+        if presentedCodeId == pending.payload.requestId, codeWindow != nil { return }
+        presentedCodeId = pending.payload.requestId
+        presentCode(pending.payload)
+    }
+
     private func present(_ payload: ApprovalRequestPayload) {
         window?.close()
 
-        let content = ApprovalAlert(payload: payload) { [weak self] approved, note in
+        let content = ApprovalAlert(payload: payload) { [weak self] approved, note, editedArgs in
             guard let self else { return }
             self.ws?.sendApprovalResponse(
                 requestId: payload.requestId,
                 approved: approved,
-                userNote: note
+                userNote: note,
+                editedArgs: editedArgs
             )
             self.closeWindow()
         }
@@ -57,9 +77,42 @@ final class ApprovalPresenter {
         window.makeKeyAndOrderFront(nil)
     }
 
+    private func presentCode(_ payload: CodeApprovalRequestPayload) {
+        codeWindow?.close()
+
+        let content = CodeReviewAlert(payload: payload) { [weak self] approved, editedCode, note in
+            guard let self else { return }
+            self.ws?.sendCodeApprovalResponse(
+                requestId: payload.requestId,
+                approved: approved,
+                editedCode: editedCode,
+                userNote: note
+            )
+            self.closeCodeWindow()
+        }
+
+        let hosting = NSHostingController(rootView: content)
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "Review Generated Tool"
+        window.styleMask = [.titled, .closable, .resizable]
+        window.level = .floating
+        window.isReleasedWhenClosed = false
+        window.center()
+        self.codeWindow = window
+
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+    }
+
     private func closeWindow() {
         window?.close()
         window = nil
         presentedId = nil
+    }
+
+    private func closeCodeWindow() {
+        codeWindow?.close()
+        codeWindow = nil
+        presentedCodeId = nil
     }
 }

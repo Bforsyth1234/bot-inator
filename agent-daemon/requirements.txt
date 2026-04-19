@@ -8,6 +8,7 @@ pydantic>=2.9.0,<3.0
 smolagents>=1.0.0,<2.0
 mlx-lm>=0.20.0,<1.0
 sqlite-vec>=0.1.6,<1.0
+sentence-transformers>=3.0.0,<4.0
 
 # macOS Events
 pyobjc-core>=10.3,<11.0

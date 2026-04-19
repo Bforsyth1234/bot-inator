@@ -10,7 +10,17 @@ from typing import Any
 
 @dataclass
 class ContextEvent:
-    """A single observation produced by an OS event source."""
+    """A single observation produced by an OS event source.
+
+    Known ``event_type`` values emitted by the built-in listeners:
+
+    * ``"app_activated"`` — NSWorkspace frontmost-app change
+      (``app_name``, ``metadata={"bundle_id", "pid"}``).
+    * ``"file"`` — watchdog filesystem create/modify
+      (``metadata={"path", "action"}``).
+    * ``"imessage_received"`` — inbound iMessage/SMS
+      (``metadata={"sender", "text", "rowid"}``).
+    """
 
     event_type: str
     app_name: str | None = None
