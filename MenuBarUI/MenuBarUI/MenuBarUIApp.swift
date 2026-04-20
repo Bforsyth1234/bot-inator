@@ -61,7 +61,7 @@ struct RootPopoverView: View {
             Divider()
             HStack {
                 Button {
-                    openWindow(id: "chat")
+                    presentWindow(id: "chat")
                 } label: {
                     Label("Chat…", systemImage: "bubble.left.and.bubble.right")
                         .labelStyle(.titleAndIcon)
@@ -70,7 +70,7 @@ struct RootPopoverView: View {
                 .keyboardShortcut("c", modifiers: [.command, .shift])
                 Spacer()
                 Button {
-                    openWindow(id: "tool-manager")
+                    presentWindow(id: "tool-manager")
                 } label: {
                     Label("Manage Tools…", systemImage: "gear")
                         .labelStyle(.titleAndIcon)
@@ -82,5 +82,14 @@ struct RootPopoverView: View {
             .padding(.vertical, 6)
         }
         .frame(width: 420, height: 600)
+    }
+
+    // On ``LSUIElement`` apps SwiftUI's ``openWindow`` silently no-ops when
+    // called from the ``MenuBarExtra`` popover because the process is still
+    // in ``.accessory`` activation. Foregrounding the app first forces the
+    // scene to materialize and come to front.
+    private func presentWindow(id: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: id)
     }
 }

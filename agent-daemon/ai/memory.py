@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import struct
 import threading
@@ -56,7 +57,16 @@ _st_lock = threading.Lock()
 
 
 def _load_st_model(model_name: str = DEFAULT_ST_MODEL) -> Any:
-    """Lazily instantiate and cache a SentenceTransformer model."""
+    """Lazily instantiate and cache a SentenceTransformer model.
+
+    Pinned to CPU by default: PyTorch's MPS backend dispatches Metal
+    command buffers that collide with concurrent ``mlx-lm`` encoders on
+    the same GPU, tripping ``A command encoder is already encoding to
+    this command buffer`` aborts. ``all-MiniLM-L6-v2`` is ~22M params so
+    CPU inference is a few tens of ms per encode — negligible next to an
+    agent step. Override via ``AGENT_EMBED_DEVICE=mps`` if/when upstream
+    resolves the contention.
+    """
     global _st_model
     if _st_model is not None:
         return _st_model
@@ -65,8 +75,13 @@ def _load_st_model(model_name: str = DEFAULT_ST_MODEL) -> Any:
             return _st_model
         from sentence_transformers import SentenceTransformer  # type: ignore
 
-        logger.info("Loading sentence-transformers model %s", model_name)
-        _st_model = SentenceTransformer(model_name)
+        device = os.environ.get("AGENT_EMBED_DEVICE", "cpu").strip() or "cpu"
+        logger.info(
+            "Loading sentence-transformers model %s on device=%s",
+            model_name,
+            device,
+        )
+        _st_model = SentenceTransformer(model_name, device=device)
     return _st_model
 
 

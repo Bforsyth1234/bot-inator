@@ -74,10 +74,12 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Private
 
     private func appendThought(_ payload: ThoughtPayload) {
-        var turn = byId[payload.eventId] ?? ChatTurn(
-            id: payload.eventId, userText: "", assistantText: "",
-            thoughts: [], isPending: true
-        )
+        // Only fold thoughts into turns that already exist: either the
+        // user seeded one via ``submit`` (pending chat turn) or a
+        // historical transcript row created one via ``upsert``. Thoughts
+        // for unknown event ids belong to ambient events (``app_activated``
+        // etc.) and don't belong in the chat surface.
+        guard var turn = byId[payload.eventId] else { return }
         // Ignore duplicates (e.g. a reconnect re-delivers the same frame).
         if !turn.thoughts.contains(payload) {
             turn.thoughts.append(payload)
@@ -87,9 +89,6 @@ final class ChatViewModel: ObservableObject {
             turn.isPending = false
         }
         byId[payload.eventId] = turn
-        if !orderedIds.contains(payload.eventId) {
-            orderedIds.append(payload.eventId)
-        }
         rebuild()
     }
 

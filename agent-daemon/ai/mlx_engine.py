@@ -110,6 +110,41 @@ class MLXEngine:
                 loop.close()
         return self._generate_sync(prompt, max_tokens)
 
+    def generate_chat_sync(
+        self, system: str, user: str, max_tokens: int = 512
+    ) -> str:
+        """Blocking chat-templated generation for worker-thread callers.
+
+        Wraps :meth:`generate_sync` with the tokenizer's chat template so
+        instruction-tuned models (Hermes-3, Qwen2.5, etc.) see the proper
+        ``system``/``user``/``assistant`` scaffold. Falls back to a plain
+        ``System:/User:/Assistant:`` concatenation when the tokenizer has
+        no ``apply_chat_template``.
+        """
+        if not self._loaded:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(self.load())
+            finally:
+                loop.close()
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        apply = getattr(self._tokenizer, "apply_chat_template", None)
+        prompt: Any
+        if callable(apply):
+            try:
+                prompt = apply(
+                    messages, add_generation_prompt=True, tokenize=False
+                )
+            except Exception:
+                logger.debug("apply_chat_template failed; using plain prompt")
+                prompt = f"System: {system}\nUser: {user}\nAssistant:"
+        else:
+            prompt = f"System: {system}\nUser: {user}\nAssistant:"
+        return self._generate_sync(prompt, max_tokens)
+
     async def evaluate_event(
         self, event_context: str, max_tokens: int = 128
     ) -> str:

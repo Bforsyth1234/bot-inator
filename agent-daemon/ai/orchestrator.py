@@ -331,7 +331,7 @@ class Orchestrator:
             await self._emit_thought(
                 event_id, "reasoning", f"Prompt: {prompt[:200]}"
             )
-            result = await self._run_agent(event_id, prompt)
+            result = await self._run_agent(event_id, prompt, max_steps=4)
             await self._emit_thought(event_id, "complete", str(result)[:500])
             return
 
@@ -352,7 +352,10 @@ class Orchestrator:
         prompt = self._build_prompt(event, memories=memories)
         await self._emit_thought(event_id, "reasoning", f"Prompt: {prompt[:200]}")
 
-        result = await self._run_agent(event_id, prompt)
+        # Ambient events must terminate in one tool call or ``no action``;
+        # a tight step cap keeps a malformed tool call from spiralling
+        # into an endless parse-retry loop.
+        result = await self._run_agent(event_id, prompt, max_steps=2)
         await self._emit_thought(event_id, "complete", str(result)[:500])
 
     async def _handle_user_message(
@@ -385,7 +388,10 @@ class Orchestrator:
             event_id, "reasoning", f"Prompt: {prompt[:200]}"
         )
 
-        result = await self._run_agent(event_id, prompt)
+        # Chat turns may chain: pick tool → call tool → final_answer, and
+        # ``generate_custom_tool`` adds a user-approval round-trip, so
+        # allow a moderate budget without leaving the loop unbounded.
+        result = await self._run_agent(event_id, prompt, max_steps=6)
         reply = str(result) if result is not None else ""
         await self._emit_thought(event_id, "complete", reply[:500])
 
@@ -444,11 +450,28 @@ class Orchestrator:
         model = _MLXModel(self.engine)
         return ToolCallingAgent(tools=wrapped, model=model)
 
-    async def _run_agent(self, event_id: str, prompt: str) -> Any:
+    async def _run_agent(
+        self,
+        event_id: str,
+        prompt: str,
+        max_steps: Optional[int] = None,
+    ) -> Any:
+        """Run the tool-calling agent, capping reasoning steps.
+
+        ``max_steps`` is passed straight through to ``agent.run`` so
+        each caller can pick a budget that matches the event's shape:
+        ambient events (one tool or ``no action``) get a tight cap,
+        user-chat turns (which may invoke ``generate_custom_tool``)
+        get more room. ``None`` falls back to smolagents' default.
+        """
         if self._agent is None:
             return await self._fallback_run(event_id, prompt)
         self._current_event_id = event_id
-        return await asyncio.to_thread(self._agent.run, prompt)
+        if max_steps is None:
+            return await asyncio.to_thread(self._agent.run, prompt)
+        return await asyncio.to_thread(
+            lambda: self._agent.run(prompt, max_steps=max_steps)
+        )
 
     async def _fallback_run(self, event_id: str, prompt: str) -> str:
         """Run a minimal loop that invokes each tool under approval gating.
@@ -695,7 +718,9 @@ class Orchestrator:
         Unlike the ambient-event prompt this is phrased as a conversation
         and explicitly permits a plain-text reply. Tools remain available
         but are gated on the user's intent; the agent is told not to call
-        a tool unless the message clearly asks for one.
+        a tool unless the message clearly asks for one. When the request
+        would be solved by a tool we don't yet have, the agent is steered
+        toward ``generate_custom_tool`` rather than a vague refusal.
         """
         text = (event.metadata.get("text") or "").strip()
         memory_block = Orchestrator._format_memories(memories)
@@ -704,9 +729,18 @@ class Orchestrator:
             "You are an on-device macOS assistant in a direct chat with "
             "the user. They just sent this message:\n\n"
             f"\"{text}\"\n\n"
-            "Respond clearly and concisely. Call a tool only if the user "
-            "asked you to do something that requires it; otherwise reply "
-            "with plain text."
+            "Decide how to respond, in this order:\n"
+            "1. If an existing tool can accomplish the request, call it.\n"
+            "2. If no existing tool fits but a small Python tool could "
+            "(e.g. a timer, a calculator, a file utility, a local API "
+            "call), call `generate_custom_tool` with a concrete "
+            "`tool_name` (snake_case), a one-sentence `description`, and "
+            "a short `expected_logic` paragraph. The user will review the "
+            "drafted code before it is installed.\n"
+            "3. Otherwise, reply in plain text.\n\n"
+            "Be concise. Do not fabricate results. Do not call "
+            "`generate_custom_tool` for questions that only need a direct "
+            "answer (definitions, explanations, chit-chat)."
             f"{memory_suffix}"
         )
 

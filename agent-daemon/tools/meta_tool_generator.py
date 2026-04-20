@@ -34,6 +34,7 @@ _GENERATED_DIR: Optional[Path] = None
 # the Python standard library + ``smolagents`` is out of bounds so generated
 # tools stay portable between agent installs.
 _ALLOWED_STDLIB: frozenset[str] = frozenset({
+    "__future__",
     "ast", "base64", "collections", "contextlib", "csv", "datetime",
     "difflib", "enum", "functools", "glob", "hashlib", "html", "http",
     "io", "itertools", "json", "logging", "math", "os", "pathlib",
@@ -57,6 +58,8 @@ Hard rules:
 * Import `from smolagents import tool`.
 * Define exactly one function decorated with @tool. The function name MUST match the requested tool_name.
 * Use ONLY the Python standard library and `smolagents`. No third-party packages.
+* For HTTP calls, use `urllib.request` from the standard library. Do NOT import `requests`, `httpx`, `aiohttp`, `urllib3`, or any other third-party HTTP client.
+* Read credentials (API tokens, keys) from `os.environ`; never hard-code them.
 * The function docstring MUST describe what the tool does, its Args, and its Returns.
 * Never call exec, eval, __import__, compile, os.system, os.popen, or pty.spawn.
 * Return a dict with a `status` key of either "ok" or "error".
@@ -83,9 +86,36 @@ def set_meta_tool_context(
 
 
 def _strip_fences(text: str) -> str:
-    """Pull Python source out of a fenced markdown block if the model added one."""
-    fence = re.search(r"```(?:python)?\n(.*?)```", text, re.DOTALL)
+    """Pull Python source out of a fenced markdown block if the model added one.
+
+    Tolerates a missing closing fence (model ran out of tokens or stopped
+    on its own), optional ``python``/``py`` language tag, and optional
+    leading whitespace on the opening fence line.
+    """
+    fence = re.search(
+        r"```(?:python|py)?[ \t]*\n(.*?)(?:```|\Z)",
+        text,
+        re.DOTALL,
+    )
     return fence.group(1).strip() if fence else text.strip()
+
+
+def _dump_rejected_draft(tool_name: str, source: str, reason: str) -> Optional[Path]:
+    """Persist a rejected draft for post-mortem inspection. Best-effort."""
+    if _GENERATED_DIR is None:
+        return None
+    try:
+        reject_dir = _GENERATED_DIR / "_rejected"
+        reject_dir.mkdir(parents=True, exist_ok=True)
+        import time
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = reject_dir / f"{tool_name}.{stamp}.py"
+        header = f"# rejected: {reason}\n# tool_name: {tool_name}\n\n"
+        path.write_text(header + source, encoding="utf-8")
+        return path
+    except Exception:
+        logger.exception("Failed to dump rejected draft for %s", tool_name)
+        return None
 
 
 def _validate_identifier(name: str) -> None:
@@ -159,15 +189,15 @@ def _draft_with_engine(
     :attr:`MLXEngine.generation_lock`, serializing against the agent's own
     inference loop instead of racing it on the Metal heap.
     """
-    prompt = (
-        _SYSTEM_PROMPT
-        + "\n\n"
-        + f"tool_name: {tool_name}\n"
-        + f"description: {description}\n"
-        + f"expected_logic: {expected_logic}\n\n"
-        + "Emit the full module now."
+    user_msg = (
+        f"tool_name: {tool_name}\n"
+        f"description: {description}\n"
+        f"expected_logic: {expected_logic}\n\n"
+        "Emit the full module now. Output nothing but the Python source."
     )
-    raw = engine.generate_sync(prompt, max_tokens=1200)
+    raw = engine.generate_chat_sync(
+        _SYSTEM_PROMPT, user_msg, max_tokens=1200
+    )
     return _strip_fences(raw)
 
 
@@ -256,18 +286,26 @@ def generate_custom_tool(
 ) -> dict[str, Any]:
     """Draft a new smolagents @tool module, request user review, and install it.
 
-    Use this only after the pattern recognizer (or the user) has proposed a
-    concrete automation. The function drives the main MLX engine to write a
-    stdlib-only Python module, runs static safety checks on the draft, asks
-    the user to review (and optionally edit) the source via a
-    ``code_approval_request`` frame, atomically writes the approved source
-    into ``agent-daemon/tools/generated/<tool_name>.py``, commits the file
-    to the nested git repo, and loads it into the active smolagents agent.
+    Call this when the user's request needs a capability that is not
+    covered by any existing tool and that a small Python module can
+    provide (timers, calculators, file utilities, stdlib HTTP calls,
+    etc.). Also appropriate when the pattern recognizer has proposed a
+    concrete automation. Do NOT call this for conversational turns that
+    only need a direct text answer. The function drives the main MLX
+    engine to write a stdlib-only Python module, runs static safety
+    checks on the draft, asks the user to review (and optionally edit)
+    the source via a ``code_approval_request`` frame, atomically writes
+    the approved source into ``agent-daemon/tools/generated/<tool_name>.py``,
+    commits the file to the nested git repo, and loads it into the active
+    smolagents agent.
 
     Args:
-        tool_name: Snake-case identifier for the new tool function.
+        tool_name: Snake-case identifier for the new tool function
+            (e.g. ``start_timer``, ``summarize_file``).
         description: One-sentence summary of what the tool does.
-        expected_logic: Short paragraph describing the intended behaviour.
+        expected_logic: Short paragraph describing the intended behaviour,
+            including inputs, outputs, and any edge cases the tool must
+            handle.
 
     Returns:
         A dict with ``status`` ("ok", "denied", "error"), ``tool_name``,
@@ -284,12 +322,19 @@ def generate_custom_tool(
     except ToolGenerationError as exc:
         return {"status": "error", "tool_name": tool_name, "error": str(exc)}
 
+    source = ""
     try:
         source = _draft_with_engine(
             _ENGINE, tool_name, description, expected_logic
         )
         _validate_source(tool_name, source)
     except ToolGenerationError as exc:
+        dumped = _dump_rejected_draft(tool_name, source, str(exc))
+        head = "\n".join(source.splitlines()[:10]) if source else "(empty)"
+        logger.warning(
+            "Meta-tool draft rejected for %s: %s\n  dumped=%s\n  first lines:\n%s",
+            tool_name, exc, dumped, head,
+        )
         return {"status": "error", "tool_name": tool_name, "error": str(exc)}
     except Exception as exc:
         logger.exception("Meta-tool draft failed")
