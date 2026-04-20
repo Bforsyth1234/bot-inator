@@ -24,7 +24,7 @@ from ai.mlx_engine import MLXEngine
 from ai.orchestrator import Orchestrator
 from ai.pattern_recognizer import PatternRecognizer
 from config import settings
-from events.event_bus import EventBus
+from events.event_bus import ContextEvent, EventBus
 from events.file_watcher import FileWatcher
 from events.imessage_watcher import IMessageWatcher
 from events.mac_listeners import MacAppListener
@@ -34,6 +34,7 @@ from schemas.ws_messages import (
     Command,
     Status,
     StatusPayload,
+    UserMessage,
     WSMessage,
 )
 from tools import AVAILABLE_TOOLS
@@ -253,6 +254,22 @@ async def list_tools() -> list[dict[str, Any]]:
     return rows
 
 
+@app.get("/api/chats")
+async def list_chat_log(limit: int = 200) -> list[dict[str, Any]]:
+    """Return the tail of the persisted chat transcript.
+
+    Used by the chat window to re-hydrate prior turns on first open or
+    after a daemon restart. Each row is ``{id, event_id, role, text,
+    created_at}`` in insertion order (oldest-first).
+    """
+    memory: Memory = app.state.memory
+    try:
+        return await asyncio.to_thread(memory.get_chat_log, limit)
+    except Exception as exc:
+        logger.exception("get_chat_log failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.delete("/api/tools/{tool_name}")
 async def delete_tool(tool_name: str) -> dict[str, Any]:
     """Uninstall an agent-authored tool. Refuses to touch built-ins."""
@@ -355,6 +372,17 @@ async def ws_stream(websocket: WebSocket) -> None:
                 orchestrator.submit_code_approval_response(msg.payload)
             elif isinstance(msg, Command):
                 await _handle_command(app, msg)
+            elif isinstance(msg, UserMessage):
+                bus: EventBus = app.state.event_bus
+                await bus.push(
+                    ContextEvent(
+                        event_type="user_message",
+                        metadata={
+                            "event_id": msg.payload.message_id,
+                            "text": msg.payload.text,
+                        },
+                    )
+                )
             else:
                 logger.debug("Ignoring inbound %s", type(msg).__name__)
     except WebSocketDisconnect:

@@ -105,6 +105,19 @@ class CommandPayload(BaseModel):
     action: CommandAction
 
 
+class UserMessagePayload(BaseModel):
+    """Client→server chat message typed by the user in the chat window.
+
+    ``message_id`` is generated on the client and reused as the
+    ``event_id`` on every ``thought`` frame the daemon emits while handling
+    the turn, so the chat UI can group the agent's streamed reasoning
+    under the originating user bubble.
+    """
+
+    message_id: str
+    text: str
+
+
 # ---------------------------------------------------------------------------
 # Messages (discriminated on `type`)
 # ---------------------------------------------------------------------------
@@ -150,6 +163,11 @@ class Command(_BaseMessage):
     payload: CommandPayload
 
 
+class UserMessage(_BaseMessage):
+    type: Literal["user_message"] = "user_message"
+    payload: UserMessagePayload
+
+
 WSMessage = Annotated[
     Union[
         Thought,
@@ -159,6 +177,7 @@ WSMessage = Annotated[
         CodeApprovalResponse,
         Status,
         Command,
+        UserMessage,
     ],
     Field(discriminator="type"),
 ]

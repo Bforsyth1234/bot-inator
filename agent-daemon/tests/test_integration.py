@@ -530,14 +530,14 @@ def test_list_tools_includes_builtins_and_generated(client, tmp_path, monkeypatc
     rows = response.json()
     names = {r["name"]: r for r in rows}
 
-    assert "send_imessage" in names and names["send_imessage"]["is_generated"] is False
+    assert "show_notification" in names and names["show_notification"]["is_generated"] is False
     assert "generate_custom_tool" in names
     assert "cold_tool" in names and names["cold_tool"]["is_generated"] is True
     assert "cold tool" in names["cold_tool"]["description"].lower()
 
 
 def test_delete_tool_rejects_builtins(client) -> None:
-    assert client.delete("/api/tools/send_imessage").status_code == 400
+    assert client.delete("/api/tools/show_notification").status_code == 400
     assert client.delete("/api/tools/BadName").status_code == 400
     assert client.delete("/api/tools/nonexistent_tool").status_code == 404
 
@@ -724,3 +724,291 @@ def test_orchestrator_injects_recalled_memories_into_prompt() -> None:
     assert "dark mode" in stages["memory"]
     assert "reasoning" in stages
     assert "Relevant memories" in stages["reasoning"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Chat
+# ---------------------------------------------------------------------------
+
+
+def test_chat_prompt_includes_user_text_and_memories() -> None:
+    """``_build_chat_prompt`` folds the typed message + recalled memories."""
+    from ai.orchestrator import Orchestrator
+
+    event = ContextEvent(
+        event_type="user_message",
+        metadata={"event_id": "msg_abc", "text": "what's on my calendar?"},
+    )
+    prompt = Orchestrator._build_chat_prompt(
+        event, memories=["User prefers morning meetings"]
+    )
+    assert "what's on my calendar?" in prompt
+    assert "direct chat" in prompt
+    assert "User prefers morning meetings" in prompt
+
+
+def test_user_message_frame_is_routed_to_event_bus(client) -> None:
+    """Inbound ``user_message`` WS frames must become ``ContextEvent``s."""
+    message_id = "msg_test_route"
+    try:
+        with client.websocket_connect("/ws/stream") as ws:
+            status = ws.receive_json()
+            assert status["type"] == "status"
+
+            ws.send_json(
+                {
+                    "type": "user_message",
+                    "seq": 1,
+                    "timestamp": "2026-04-19T12:00:00.000Z",
+                    "payload": {
+                        "message_id": message_id,
+                        "text": "hello agent",
+                    },
+                }
+            )
+
+            saw_event_received = False
+            saw_user_desc = False
+            for _ in range(12):
+                msg = ws.receive_json()
+                if msg["type"] != "thought":
+                    continue
+                if msg["payload"]["stage"] == "event_received":
+                    saw_event_received = True
+                    if "User said: hello agent" in msg["payload"]["content"]:
+                        saw_user_desc = True
+                    assert msg["payload"]["event_id"] == message_id
+                    break
+            assert saw_event_received, "expected an 'event_received' thought"
+            assert saw_user_desc, "expected the description to echo the user's text"
+    finally:
+        # The ``client`` fixture shares the production memory DB; scrub any
+        # rows this test wrote so the user's live transcript stays clean.
+        mem = client.app.state.memory
+        conn = mem.connect()
+        conn.execute("DELETE FROM chat_log WHERE event_id = ?", (message_id,))
+        conn.commit()
+
+
+def test_chat_log_persists_user_and_assistant_turn(tmp_path) -> None:
+    """User + final assistant text are appended to ``chat_log``."""
+    import asyncio as _asyncio
+
+    from ai.memory import Memory
+    from ai.orchestrator import Orchestrator
+    from events.event_bus import EventBus
+    from ai.mlx_engine import MLXEngine
+
+    mem = Memory(db_path=tmp_path / "chat.db")
+
+    async def _scenario() -> None:
+        bus = EventBus()
+        bus.bind_loop(_asyncio.get_running_loop())
+        engine = MLXEngine("stub")
+        orch = Orchestrator(engine=engine, event_bus=bus, memory=mem, tools=[])
+        # Short-circuit the agent: the fallback path returns ``"done"`` and
+        # the test is only asserting persistence, not tool dispatch.
+        orch._build_agent = lambda: None  # type: ignore[assignment]
+        orch._agent = None
+        await orch.start()
+        bus.push_threadsafe(
+            ContextEvent(
+                event_type="user_message",
+                metadata={"event_id": "msg_t1", "text": "remember this"},
+            )
+        )
+        await _asyncio.sleep(0.4)
+        await orch.stop()
+
+    _asyncio.run(_scenario())
+    rows = mem.get_chat_log(limit=50)
+    mem.close()
+
+    roles = [(r["event_id"], r["role"]) for r in rows]
+    assert ("msg_t1", "user") in roles
+    assert any(r == "assistant" for _, r in roles), (
+        f"expected an assistant row; got {roles}"
+    )
+
+
+def test_api_chats_returns_recent_log(client) -> None:
+    """``GET /api/chats`` surfaces rows persisted via :meth:`Memory.log_chat`."""
+    mem = client.app.state.memory
+    event_id = "msg_test_api"
+    try:
+        mem.log_chat(event_id, "user", "ping")
+        mem.log_chat(event_id, "assistant", "pong")
+
+        response = client.get("/api/chats")
+        assert response.status_code == 200
+        body = response.json()
+        pairs = [(r["event_id"], r["role"], r["text"]) for r in body]
+        assert (event_id, "user", "ping") in pairs
+        assert (event_id, "assistant", "pong") in pairs
+    finally:
+        conn = mem.connect()
+        conn.execute("DELETE FROM chat_log WHERE event_id = ?", (event_id,))
+        conn.commit()
+
+
+def test_user_message_ws_roundtrip() -> None:
+    """Schema round-trip for the new ``user_message`` frame."""
+    import json as _json
+
+    from pydantic import TypeAdapter
+
+    from schemas.ws_messages import (
+        UserMessage,
+        UserMessagePayload,
+        WSMessage,
+    )
+
+    msg = UserMessage(
+        seq=7,
+        timestamp="2026-04-19T12:00:00.000Z",
+        payload=UserMessagePayload(
+            message_id="msg_abc123", text="hi there"
+        ),
+    )
+    raw = msg.model_dump_json()
+    parsed = TypeAdapter(WSMessage).validate_python(_json.loads(raw))
+    assert parsed == msg
+    assert type(parsed) is UserMessage
+
+
+
+# ---------------------------------------------------------------------------
+# MLX stability — lock + periodic cache clear
+# ---------------------------------------------------------------------------
+
+
+def test_generate_sync_holds_lock_and_bumps_counter() -> None:
+    """``_generate_sync`` acquires :attr:`generation_lock` for the call.
+
+    A sentinel stub replaces ``mlx_lm.generate`` with a function that
+    observes the lock state mid-call. Verifies that (a) the lock is held
+    while MLX runs and (b) the per-engine counter is incremented so the
+    periodic cache clear has a trigger.
+    """
+    import sys
+    import types
+
+    from ai.mlx_engine import MLXEngine
+
+    eng = MLXEngine("stub")
+    eng._model = object()
+    eng._tokenizer = object()
+    eng._loaded = True
+
+    observed: dict[str, bool] = {"locked": False}
+
+    fake_mod = types.ModuleType("mlx_lm")
+    def _fake_generate(model, tokenizer, prompt, max_tokens, verbose):  # noqa: D401
+        observed["locked"] = eng.generation_lock.locked()
+        return "ok"
+    fake_mod.generate = _fake_generate  # type: ignore[attr-defined]
+    sys.modules["mlx_lm"] = fake_mod
+    try:
+        before = eng._gen_count
+        out = eng._generate_sync("p", 8)
+    finally:
+        sys.modules.pop("mlx_lm", None)
+
+    assert out == "ok"
+    assert observed["locked"] is True
+    assert eng._gen_count == before + 1
+    assert eng.generation_lock.locked() is False
+
+
+def test_concurrent_sync_generations_serialize(monkeypatch) -> None:
+    """Two threads calling :meth:`_generate_sync` never overlap inside MLX.
+
+    Tracks the count of in-flight fake generations; the lock contract
+    guarantees the maximum observed overlap is ``1``.
+    """
+    import sys
+    import threading as _threading
+    import time
+    import types
+
+    from ai.mlx_engine import MLXEngine
+
+    eng = MLXEngine("stub")
+    eng._model = object()
+    eng._tokenizer = object()
+    eng._loaded = True
+
+    inflight = 0
+    peak = 0
+    gate = _threading.Lock()
+
+    fake_mod = types.ModuleType("mlx_lm")
+    def _fake_generate(model, tokenizer, prompt, max_tokens, verbose):  # noqa: D401
+        nonlocal inflight, peak
+        with gate:
+            inflight += 1
+            peak = max(peak, inflight)
+        time.sleep(0.05)
+        with gate:
+            inflight -= 1
+        return "ok"
+    fake_mod.generate = _fake_generate  # type: ignore[attr-defined]
+    sys.modules["mlx_lm"] = fake_mod
+
+    try:
+        threads = [
+            _threading.Thread(target=lambda: eng._generate_sync("p", 8))
+            for _ in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.modules.pop("mlx_lm", None)
+
+    assert peak == 1, f"expected serialized generations, saw peak overlap {peak}"
+
+
+def test_metal_cache_clear_fires_on_interval(monkeypatch) -> None:
+    """``_maybe_clear_metal_cache_locked`` invokes ``mx.metal.clear_cache``.
+
+    Patches ``AGENT_MLX_CACHE_EVERY`` to 2 via the module constant and
+    asserts the stub is called on the 2nd and 4th generation, never in
+    between.
+    """
+    import sys
+    import types
+
+    from ai import mlx_engine as _mlx_mod
+    from ai.mlx_engine import MLXEngine
+
+    monkeypatch.setattr(_mlx_mod, "_CACHE_CLEAR_EVERY_N", 2)
+
+    eng = MLXEngine("stub")
+    eng._model = object()
+    eng._tokenizer = object()
+    eng._loaded = True
+
+    calls = {"n": 0}
+    fake_metal = types.SimpleNamespace(clear_cache=lambda: calls.__setitem__("n", calls["n"] + 1))
+    fake_mx = types.ModuleType("mlx.core")
+    fake_mx.metal = fake_metal  # type: ignore[attr-defined]
+    fake_mx_pkg = types.ModuleType("mlx")
+    fake_mx_pkg.core = fake_mx  # type: ignore[attr-defined]
+    sys.modules["mlx"] = fake_mx_pkg
+    sys.modules["mlx.core"] = fake_mx
+
+    fake_mlx_lm = types.ModuleType("mlx_lm")
+    fake_mlx_lm.generate = lambda *a, **kw: "ok"  # type: ignore[attr-defined]
+    sys.modules["mlx_lm"] = fake_mlx_lm
+
+    try:
+        for _ in range(5):
+            eng._generate_sync("p", 8)
+    finally:
+        for k in ("mlx", "mlx.core", "mlx_lm"):
+            sys.modules.pop(k, None)
+
+    # Ran 5 times with interval=2 → triggers at gen 2 and gen 4.
+    assert calls["n"] == 2, f"expected 2 cache clears, got {calls['n']}"

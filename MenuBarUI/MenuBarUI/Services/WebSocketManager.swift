@@ -148,6 +148,23 @@ final class WebSocketManager: ObservableObject {
         send(msg)
     }
 
+    /// Send a user chat turn. Returns the generated `messageId` so the
+    /// caller can immediately render a local user bubble keyed by the
+    /// same id the daemon will echo back on every `thought` frame.
+    @discardableResult
+    func sendUserMessage(_ text: String) -> String {
+        let messageId = "msg_" + UUID().uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .prefix(12).lowercased()
+        let msg = WSMessage.userMessage(
+            seq: nextSeq(),
+            timestamp: Date(),
+            payload: UserMessagePayload(messageId: messageId, text: text)
+        )
+        send(msg)
+        return messageId
+    }
+
     private func send(_ message: WSMessage) {
         guard let task else { return }
         do {
@@ -278,6 +295,7 @@ struct DebugStats {
         case .codeApprovalResponse: key = "code_approval_response"
         case .status: key = "status"
         case .command: key = "command"
+        case .userMessage: key = "user_message"
         }
         framesByType[key, default: 0] += 1
     }

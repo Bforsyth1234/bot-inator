@@ -151,7 +151,14 @@ def _draft_with_engine(
     description: str,
     expected_logic: str,
 ) -> str:
-    """Drive the main engine to write a @tool module synchronously."""
+    """Drive the main engine to write a @tool module synchronously.
+
+    Called from the smolagents agent worker thread (spawned by
+    ``asyncio.to_thread`` in :meth:`Orchestrator._run_agent`), so we drop
+    into the engine's sync API directly — this routes through the shared
+    :attr:`MLXEngine.generation_lock`, serializing against the agent's own
+    inference loop instead of racing it on the Metal heap.
+    """
     prompt = (
         _SYSTEM_PROMPT
         + "\n\n"
@@ -160,11 +167,7 @@ def _draft_with_engine(
         + f"expected_logic: {expected_logic}\n\n"
         + "Emit the full module now."
     )
-    loop = asyncio.new_event_loop()
-    try:
-        raw = loop.run_until_complete(engine.generate(prompt, max_tokens=1200))
-    finally:
-        loop.close()
+    raw = engine.generate_sync(prompt, max_tokens=1200)
     return _strip_fences(raw)
 
 

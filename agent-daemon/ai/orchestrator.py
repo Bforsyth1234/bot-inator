@@ -335,6 +335,10 @@ class Orchestrator:
             await self._emit_thought(event_id, "complete", str(result)[:500])
             return
 
+        if event.event_type == "user_message":
+            await self._handle_user_message(event, event_id)
+            return
+
         analysis = await self._analyse_event(event)
         if analysis:
             await self._emit_thought(event_id, "analysis", analysis)
@@ -350,6 +354,48 @@ class Orchestrator:
 
         result = await self._run_agent(event_id, prompt)
         await self._emit_thought(event_id, "complete", str(result)[:500])
+
+    async def _handle_user_message(
+        self, event: ContextEvent, event_id: str
+    ) -> None:
+        """Run a direct chat turn and persist both sides of the exchange.
+
+        Mirrors the ambient-event path but skips the analysis engine (the
+        user already told us what they want) and logs the user turn + final
+        agent reply into the :class:`Memory` chat transcript so the chat
+        window can re-hydrate on reconnect.
+        """
+        text = (event.metadata.get("text") or "").strip()
+        if self.memory is not None and text:
+            try:
+                await asyncio.to_thread(
+                    self.memory.log_chat, event_id, "user", text
+                )
+            except Exception:
+                logger.exception("memory.log_chat (user) failed")
+
+        memories = await self._recall_memories(event)
+        if memories:
+            await self._emit_thought(
+                event_id, "memory", "Recalled: " + " | ".join(memories)
+            )
+
+        prompt = self._build_chat_prompt(event, memories=memories)
+        await self._emit_thought(
+            event_id, "reasoning", f"Prompt: {prompt[:200]}"
+        )
+
+        result = await self._run_agent(event_id, prompt)
+        reply = str(result) if result is not None else ""
+        await self._emit_thought(event_id, "complete", reply[:500])
+
+        if self.memory is not None and reply:
+            try:
+                await asyncio.to_thread(
+                    self.memory.log_chat, event_id, "assistant", reply
+                )
+            except Exception:
+                logger.exception("memory.log_chat (assistant) failed")
 
     async def _recall_memories(self, event: ContextEvent) -> list[str]:
         """Pull the top few most relevant prior memories for ``event``.
@@ -641,6 +687,30 @@ class Orchestrator:
         )
 
     @staticmethod
+    def _build_chat_prompt(
+        event: ContextEvent, memories: Optional[list[str]] = None
+    ) -> str:
+        """System prompt for a direct user → agent chat turn.
+
+        Unlike the ambient-event prompt this is phrased as a conversation
+        and explicitly permits a plain-text reply. Tools remain available
+        but are gated on the user's intent; the agent is told not to call
+        a tool unless the message clearly asks for one.
+        """
+        text = (event.metadata.get("text") or "").strip()
+        memory_block = Orchestrator._format_memories(memories)
+        memory_suffix = f"\n\n{memory_block}" if memory_block else ""
+        return (
+            "You are an on-device macOS assistant in a direct chat with "
+            "the user. They just sent this message:\n\n"
+            f"\"{text}\"\n\n"
+            "Respond clearly and concisely. Call a tool only if the user "
+            "asked you to do something that requires it; otherwise reply "
+            "with plain text."
+            f"{memory_suffix}"
+        )
+
+    @staticmethod
     def _build_imessage_prompt(
         event: ContextEvent, memories: Optional[list[str]] = None
     ) -> str:
@@ -686,6 +756,10 @@ class Orchestrator:
             tool_name = event.metadata.get("tool_name", "unknown")
             desc = event.metadata.get("description", "")
             return f"Pattern detected → suggested tool: {tool_name} — {desc}"
+        if event.event_type == "user_message":
+            text = event.metadata.get("text", "") or ""
+            preview = text if len(text) <= 120 else text[:120] + "…"
+            return f"User said: {preview}"
         return (
             f"{event.event_type}"
             + (f" in {event.app_name}" if event.app_name else "")
@@ -873,22 +947,27 @@ def _make_mlx_model_class() -> type:
                 **chat_tmpl_kwargs,
             )
 
-            # Stream-generate tokens
+            # Stream-generate tokens under the engine's generation lock so
+            # concurrent callers (``evaluate_event``, ``generate_sync`` from
+            # a meta-tool, another agent step) serialize against this loop
+            # instead of trampling the shared Metal allocator.
             output_tokens = 0
             text = ""
-            for response in _mlx_lm.stream_generate(
-                self.engine.model,
-                tokenizer,
-                prompt=prompt_ids,
-                **completion_kwargs,
-            ):
-                output_tokens += 1
-                text += response.text
-                if stops and any(
-                    (stop_index := text.rfind(stop)) != -1 for stop in stops
+            with self.engine.generation_lock:
+                for response in _mlx_lm.stream_generate(
+                    self.engine.model,
+                    tokenizer,
+                    prompt=prompt_ids,
+                    **completion_kwargs,
                 ):
-                    text = text[:stop_index]
-                    break
+                    output_tokens += 1
+                    text += response.text
+                    if stops and any(
+                        (stop_index := text.rfind(stop)) != -1 for stop in stops
+                    ):
+                        text = text[:stop_index]
+                        break
+                self.engine._maybe_clear_metal_cache_locked()
 
             if stop_sequences is not None and not getattr(self, "supports_stop_parameter", False):
                 text = remove_content_after_stop_sequences(text, stop_sequences)

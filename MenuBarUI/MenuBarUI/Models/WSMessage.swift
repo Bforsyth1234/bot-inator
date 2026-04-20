@@ -147,6 +147,20 @@ struct CodeApprovalResponsePayload: Codable, Hashable {
     }
 }
 
+/// Client→server chat turn sent by the user from the chat window.
+/// `messageId` is generated client-side and reused as the `event_id`
+/// on every incoming `thought` frame emitted while the daemon handles
+/// the turn, so the UI can group thoughts under the right user bubble.
+struct UserMessagePayload: Codable, Hashable {
+    let messageId: String
+    let text: String
+
+    enum CodingKeys: String, CodingKey {
+        case messageId = "message_id"
+        case text
+    }
+}
+
 // MARK: - Discriminated Union
 
 enum WSMessage: Codable, Hashable {
@@ -157,6 +171,7 @@ enum WSMessage: Codable, Hashable {
     case codeApprovalResponse(seq: Int, timestamp: Date, payload: CodeApprovalResponsePayload)
     case status(seq: Int, timestamp: Date, payload: StatusPayload)
     case command(seq: Int, timestamp: Date, payload: CommandPayload)
+    case userMessage(seq: Int, timestamp: Date, payload: UserMessagePayload)
 
     var seq: Int {
         switch self {
@@ -164,7 +179,8 @@ enum WSMessage: Codable, Hashable {
              .approvalResponse(let seq, _, _),
              .codeApprovalRequest(let seq, _, _),
              .codeApprovalResponse(let seq, _, _),
-             .status(let seq, _, _), .command(let seq, _, _):
+             .status(let seq, _, _), .command(let seq, _, _),
+             .userMessage(let seq, _, _):
             return seq
         }
     }
@@ -175,7 +191,8 @@ enum WSMessage: Codable, Hashable {
              .approvalResponse(_, let ts, _),
              .codeApprovalRequest(_, let ts, _),
              .codeApprovalResponse(_, let ts, _),
-             .status(_, let ts, _), .command(_, let ts, _):
+             .status(_, let ts, _), .command(_, let ts, _),
+             .userMessage(_, let ts, _):
             return ts
         }
     }
@@ -192,6 +209,7 @@ enum WSMessage: Codable, Hashable {
         case codeApprovalResponse = "code_approval_response"
         case status
         case command
+        case userMessage = "user_message"
     }
 
     init(from decoder: Decoder) throws {
@@ -222,6 +240,9 @@ enum WSMessage: Codable, Hashable {
         case .command:
             self = .command(seq: seq, timestamp: timestamp,
                             payload: try container.decode(CommandPayload.self, forKey: .payload))
+        case .userMessage:
+            self = .userMessage(seq: seq, timestamp: timestamp,
+                                payload: try container.decode(UserMessagePayload.self, forKey: .payload))
         }
     }
 
@@ -250,6 +271,9 @@ enum WSMessage: Codable, Hashable {
             try container.encode(payload, forKey: .payload)
         case .command(_, _, let payload):
             try container.encode(MessageType.command, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .userMessage(_, _, let payload):
+            try container.encode(MessageType.userMessage, forKey: .type)
             try container.encode(payload, forKey: .payload)
         }
     }

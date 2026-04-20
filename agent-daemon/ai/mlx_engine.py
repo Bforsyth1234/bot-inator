@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import threading
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# How many generations between ``mx.metal.clear_cache()`` calls. MLX-LM
+# on Apple Silicon accumulates Metal heap allocations across generations
+# which eventually triggers sporadic segfaults; periodically flushing the
+# cache keeps the heap bounded without measurably affecting throughput.
+_CACHE_CLEAR_EVERY_N = int(os.environ.get("AGENT_MLX_CACHE_EVERY", "16"))
 
 DEFAULT_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 
@@ -35,6 +43,12 @@ class MLXEngine:
         self._model: Any = None
         self._tokenizer: Any = None
         self._lock: asyncio.Lock = asyncio.Lock()
+        # Held for the duration of every sync MLX call. Lets the smolagents
+        # model adapter (which calls ``mlx_lm.stream_generate`` directly,
+        # bypassing the async wrapper) interleave safely with
+        # :meth:`generate` and :meth:`evaluate_event`.
+        self.generation_lock: threading.Lock = threading.Lock()
+        self._gen_count: int = 0
         self._loaded: bool = False
 
     @property
@@ -79,6 +93,22 @@ class MLXEngine:
         if not self._loaded:
             await self.load()
         return await asyncio.to_thread(self._generate_sync, prompt, max_tokens)
+
+    def generate_sync(self, prompt: str, max_tokens: int = 512) -> str:
+        """Blocking variant of :meth:`generate` for worker-thread callers.
+
+        Meta-tools dispatched inside ``asyncio.to_thread(agent.run, …)``
+        can invoke this without constructing a nested event loop. Must not
+        be called from the main event-loop thread — it holds
+        :attr:`generation_lock` while MLX runs, which would starve the loop.
+        """
+        if not self._loaded:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(self.load())
+            finally:
+                loop.close()
+        return self._generate_sync(prompt, max_tokens)
 
     async def evaluate_event(
         self, event_context: str, max_tokens: int = 128
@@ -148,26 +178,58 @@ class MLXEngine:
     def _generate_sync(self, prompt: str, max_tokens: int) -> str:
         from mlx_lm import generate  # type: ignore
 
-        return generate(
-            self._model,
-            self._tokenizer,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            verbose=False,
-        )
+        with self.generation_lock:
+            try:
+                return generate(
+                    self._model,
+                    self._tokenizer,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    verbose=False,
+                )
+            finally:
+                self._maybe_clear_metal_cache_locked()
 
     def _evaluate_event_sync(self, event_context: str, max_tokens: int) -> str:
         from mlx_lm import generate  # type: ignore
 
         prompt = self._build_event_prompt(event_context)
-        raw = generate(
-            self._model,
-            self._tokenizer,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            verbose=False,
-        )
+        with self.generation_lock:
+            try:
+                raw = generate(
+                    self._model,
+                    self._tokenizer,
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    verbose=False,
+                )
+            finally:
+                self._maybe_clear_metal_cache_locked()
         return self._postprocess_event_output(raw)
+
+    def _maybe_clear_metal_cache_locked(self) -> None:
+        """Flush the Metal allocator every ``_CACHE_CLEAR_EVERY_N`` calls.
+
+        Invoked from the sync path while :attr:`generation_lock` is held,
+        so it never races with another in-flight generation. Silently
+        no-ops on non-Metal builds or older ``mlx.core`` releases.
+        """
+        self._gen_count += 1
+        if self._gen_count % _CACHE_CLEAR_EVERY_N != 0:
+            return
+        try:
+            import mlx.core as mx  # type: ignore
+            clear = getattr(getattr(mx, "metal", None), "clear_cache", None)
+            if clear is None:
+                clear = getattr(mx, "clear_cache", None)
+            if callable(clear):
+                clear()
+                logger.debug(
+                    "Cleared MLX metal cache after %d generations",
+                    self._gen_count,
+                )
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
 
     def _build_event_prompt(self, event_context: str) -> Any:
         """Render the chat-templated prompt for event analysis.

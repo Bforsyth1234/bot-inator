@@ -20,6 +20,13 @@ struct MenuBarUIApp: App {
         }
         .defaultSize(width: 480, height: 480)
         .keyboardShortcut("t", modifiers: [.command, .shift])
+
+        Window("Chat", id: "chat") {
+            ChatView()
+                .environmentObject(delegate.ws)
+        }
+        .defaultSize(width: 520, height: 620)
+        .keyboardShortcut("c", modifiers: [.command, .shift])
     }
 }
 
@@ -53,6 +60,14 @@ struct RootPopoverView: View {
             }
             Divider()
             HStack {
+                Button {
+                    openWindow(id: "chat")
+                } label: {
+                    Label("Chat…", systemImage: "bubble.left.and.bubble.right")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("c", modifiers: [.command, .shift])
                 Spacer()
                 Button {
                     openWindow(id: "tool-manager")

@@ -152,6 +152,21 @@ class Memory:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_log_event_id "
+            "ON chat_log(event_id)"
+        )
         try:
             conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0("
@@ -160,6 +175,54 @@ class Memory:
         except sqlite3.OperationalError as exc:
             logger.warning("Could not create vec0 table: %s", exc)
         conn.commit()
+
+    # ---- chat transcript log ---------------------------------------------
+
+    def log_chat(self, event_id: str, role: str, text: str) -> int:
+        """Append one chat turn to the persistent transcript.
+
+        ``role`` is typically ``"user"`` or ``"assistant"``. Returns the
+        inserted row id. Callers must not rely on per-turn ordering beyond
+        insertion order; the query API sorts by ``id`` ascending.
+        """
+        conn = self.connect()
+        cur = conn.execute(
+            "INSERT INTO chat_log (event_id, role, text) VALUES (?, ?, ?)",
+            (event_id, role, text),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+    def get_chat_log(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Return the most recent ``limit`` turns in insertion order.
+
+        The rows come back oldest-first so the UI can render them straight
+        into a scrolling log without reversing. ``limit`` is clamped to
+        ``[1, 1000]`` to keep the payload bounded.
+        """
+        limit = max(1, min(int(limit), 1000))
+        conn = self.connect()
+        rows = conn.execute(
+            """
+            SELECT id, event_id, role, text, created_at
+            FROM chat_log
+            WHERE id > (
+                SELECT COALESCE(MAX(id), 0) - ? FROM chat_log
+            )
+            ORDER BY id ASC
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "event_id": r[1],
+                "role": r[2],
+                "text": r[3],
+                "created_at": r[4],
+            }
+            for r in rows
+        ]
 
     def store_embedding(
         self, text: str, metadata: Optional[dict[str, Any]] = None
