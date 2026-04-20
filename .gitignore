@@ -35,6 +35,7 @@ MANIFEST
 venv/
 env/
 ENV/
+.venv.old/
 
 # Testing / coverage
 .pytest_cache/

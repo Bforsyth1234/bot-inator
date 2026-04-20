@@ -253,9 +253,8 @@ class Memory:
                 SELECT memories.id, memories.text, memories.metadata, distance
                 FROM memory_vec
                 JOIN memories ON memories.id = memory_vec.rowid
-                WHERE embedding MATCH ?
+                WHERE embedding MATCH ? AND k = ?
                 ORDER BY distance
-                LIMIT ?
                 """,
                 (self._serialize(embedding), top_k),
             ).fetchall()
