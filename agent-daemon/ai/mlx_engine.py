@@ -38,16 +38,25 @@ class MLXEngine:
     serialized against swaps.
     """
 
+    # Class-level Metal serialization lock. Shared across every MLXEngine
+    # instance so the main tool-calling engine (e.g. Hermes-3) and the
+    # analysis engine (e.g. Qwen2.5) never encode to the GPU at the same
+    # time. The Metal command-buffer coalescer aborts the process
+    # (``A command encoder is already encoding to this command buffer``)
+    # when two MLX generations race, even though each instance has its
+    # own model weights, because they share the same physical device.
+    _metal_lock: threading.Lock = threading.Lock()
+
     def __init__(self, model_name: str = DEFAULT_MODEL) -> None:
         self.model_name: str = model_name
         self._model: Any = None
         self._tokenizer: Any = None
         self._lock: asyncio.Lock = asyncio.Lock()
-        # Held for the duration of every sync MLX call. Lets the smolagents
-        # model adapter (which calls ``mlx_lm.stream_generate`` directly,
-        # bypassing the async wrapper) interleave safely with
-        # :meth:`generate` and :meth:`evaluate_event`.
-        self.generation_lock: threading.Lock = threading.Lock()
+        # Alias the class-level Metal lock so existing callers that reach
+        # for ``engine.generation_lock`` (e.g. the smolagents model
+        # adapter that wraps ``mlx_lm.stream_generate``) keep working
+        # while every engine shares one cross-instance serializer.
+        self.generation_lock: threading.Lock = MLXEngine._metal_lock
         self._gen_count: int = 0
         self._loaded: bool = False
 

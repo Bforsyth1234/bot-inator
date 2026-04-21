@@ -68,23 +68,31 @@ async def lifespan(app: FastAPI):
 
     engine = MLXEngine(settings.model_path)
     analysis_engine = MLXEngine(settings.analysis_model_path)
+    # Code-specialist engine reserved for meta-tool drafting. Kept
+    # isolated from ``engine`` so the tool-calling agent retains its
+    # generalist chat model while drafts are produced by a coder model.
+    drafting_engine = MLXEngine(settings.drafting_model_path)
     memory = Memory()
     set_default_memory(memory)
 
-    # Eager-load both engines in parallel so the first event is not
-    # blocked by a multi-GB model download + Metal compile.
+    # Eager-load all three engines in parallel so the first event is not
+    # blocked by multi-GB model downloads + Metal compile.
     if os.environ.get("AGENT_EAGER_LOAD", "1") != "0":
         logger.info(
-            "Eager-loading MLX models: main=%s analysis=%s",
+            "Eager-loading MLX models: main=%s analysis=%s drafting=%s",
             settings.model_path,
             settings.analysis_model_path,
+            settings.drafting_model_path,
         )
         results = await asyncio.gather(
             engine.load(),
             analysis_engine.load(),
+            drafting_engine.load(),
             return_exceptions=True,
         )
-        for name, result in zip(("main", "analysis"), results):
+        for name, result in zip(
+            ("main", "analysis", "drafting"), results
+        ):
             if isinstance(result, Exception):
                 logger.exception(
                     "Failed to eager-load %s engine; will fall back to "
@@ -135,6 +143,7 @@ async def lifespan(app: FastAPI):
         orchestrator=orchestrator,
         engine=engine,
         generated_dir=settings.generated_tools_dir,
+        drafting_engine=drafting_engine,
     )
     try:
         orchestrator.load_dynamic_tools()
@@ -145,6 +154,7 @@ async def lifespan(app: FastAPI):
     app.state.event_bus = bus
     app.state.engine = engine
     app.state.analysis_engine = analysis_engine
+    app.state.drafting_engine = drafting_engine
     app.state.memory = memory
     app.state.orchestrator = orchestrator
     app.state.pattern_recognizer = pattern_recognizer
@@ -169,6 +179,7 @@ async def lifespan(app: FastAPI):
             import tools.meta_tool_generator as _mg  # noqa: WPS433
             _mg._ORCHESTRATOR = None  # type: ignore[attr-defined]
             _mg._ENGINE = None  # type: ignore[attr-defined]
+            _mg._DRAFT_ENGINE = None  # type: ignore[attr-defined]
             _mg._GENERATED_DIR = None  # type: ignore[attr-defined]
         except Exception:
             logger.exception("Error clearing meta-tool context")

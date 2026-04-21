@@ -91,8 +91,24 @@ class Orchestrator:
         # so :meth:`unload_dynamic_tool` can distinguish agent-authored tools
         # from the built-ins baked in at construction time.
         self._dynamic_tool_names: set[str] = set()
+        # Set by :func:`tools.meta_tool_generator.generate_custom_tool`
+        # when a new tool was installed (or matched an existing file) so
+        # :meth:`_handle_user_message` can transparently re-run the same
+        # prompt against the rebuilt agent, which now has the tool in
+        # its schema. Cleared immediately after consumption to keep the
+        # auto-rerun single-shot per user turn.
+        self._pending_rerun_tool: Optional[str] = None
         self.pattern_recognizer = pattern_recognizer
         self._agent: Any = None
+
+    def mark_tool_ready_for_rerun(self, tool_name: str) -> None:
+        """Flag the current user turn for an auto-rerun with ``tool_name``.
+
+        Called from the meta-tool generator after a successful install
+        (or when an identically-named tool already exists on disk). The
+        flag is consumed by :meth:`_handle_user_message`.
+        """
+        self._pending_rerun_tool = tool_name
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -391,8 +407,31 @@ class Orchestrator:
         # Chat turns may chain: pick tool → call tool → final_answer, and
         # ``generate_custom_tool`` adds a user-approval round-trip, so
         # allow a moderate budget without leaving the loop unbounded.
+        self._pending_rerun_tool = None
         result = await self._run_agent(event_id, prompt, max_steps=6)
         reply = str(result) if result is not None else ""
+
+        # If the turn generated (or matched) a tool, the current agent's
+        # schema was frozen before the tool was available. ``load_dynamic_tools``
+        # has already rebuilt ``self._agent`` with the new tool, so one more
+        # pass can call it directly without making the user re-ask. The flag
+        # is consumed here so a rerun can never cascade into another rerun.
+        pending = self._pending_rerun_tool
+        self._pending_rerun_tool = None
+        if pending:
+            rerun_prompt = (
+                f"The tool `{pending}` is now installed and available in "
+                "your tool list. Call it directly to fulfil the user's "
+                "original request below. Do NOT call `generate_custom_tool` "
+                f"again for `{pending}`.\n\n{prompt}"
+            )
+            await self._emit_thought(
+                event_id, "reasoning",
+                f"Auto-rerun with {pending}: {rerun_prompt[:160]}",
+            )
+            result = await self._run_agent(event_id, rerun_prompt, max_steps=6)
+            reply = str(result) if result is not None else reply
+
         await self._emit_thought(event_id, "complete", reply[:500])
 
         if self.memory is not None and reply:
@@ -730,13 +769,18 @@ class Orchestrator:
             "the user. They just sent this message:\n\n"
             f"\"{text}\"\n\n"
             "Decide how to respond, in this order:\n"
-            "1. If an existing tool can accomplish the request, call it.\n"
+            "1. Look at your available tools first. If one of them can "
+            "accomplish the request, call it — do not generate a "
+            "duplicate.\n"
             "2. If no existing tool fits but a small Python tool could "
             "(e.g. a timer, a calculator, a file utility, a local API "
             "call), call `generate_custom_tool` with a concrete "
             "`tool_name` (snake_case), a one-sentence `description`, and "
             "a short `expected_logic` paragraph. The user will review the "
-            "drafted code before it is installed.\n"
+            "drafted code before it is installed. After the tool "
+            "installs, it is NOT callable in this turn — immediately "
+            "reply with final_answer telling the user the tool is ready "
+            "and asking them to re-issue their original request.\n"
             "3. Otherwise, reply in plain text.\n\n"
             "Be concise. Do not fabricate results. Do not call "
             "`generate_custom_tool` for questions that only need a direct "

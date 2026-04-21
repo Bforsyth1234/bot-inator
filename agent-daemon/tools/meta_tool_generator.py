@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 # Populated by :func:`set_meta_tool_context` at lifespan startup.
 _ORCHESTRATOR: "Optional[Orchestrator]" = None
 _ENGINE: "Optional[MLXEngine]" = None
+# Code-specialist engine used exclusively for drafting. Falls back to
+# ``_ENGINE`` when the lifespan didn't wire a dedicated drafting model.
+_DRAFT_ENGINE: "Optional[MLXEngine]" = None
 _GENERATED_DIR: Optional[Path] = None
 
 # Bare module imports we refuse to accept from drafted code. Anything outside
@@ -50,7 +53,7 @@ _BANNED_SUBSTRINGS: tuple[str, ...] = (
 )
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
-_SYSTEM_PROMPT = """You write a single Python module that defines ONE smolagents @tool.
+_SYSTEM_PROMPT_BASE = """You write a single Python module that defines ONE smolagents @tool.
 
 Hard rules:
 * First line must be a one-line docstring.
@@ -64,6 +67,24 @@ Hard rules:
 * Never call exec, eval, __import__, compile, os.system, os.popen, or pty.spawn.
 * Return a dict with a `status` key of either "ok" or "error".
 * Do not emit backticks, markdown fences, commentary, or any text outside the module source.
+
+User-visible output rules:
+* NEVER use `print()` to communicate with the user. The daemon's stdout is not a user interface.
+* To notify the user (timer fires, reminder triggers, task completes, alert), either:
+  (a) Shell out to macOS: `subprocess.run(["osascript", "-e", 'display notification "<msg>" with title "<title>" sound name "Ping"'])`, or
+  (b) Call an existing built-in tool (see BUILT-IN TOOLS below) by importing and invoking it directly.
+* Whichever path you pick, the user must actually see something — do not "log" or "print" completion.
+
+Background work rules:
+* When spawning threads for timers, delays, or polling, always mark them as daemons:
+  `threading.Thread(target=..., args=..., daemon=True).start()`
+  Non-daemon threads block daemon shutdown.
+* Prefer `threading.Timer(interval, callback).start()` over hand-rolled `time.sleep` countdown loops when the only goal is "fire once after N seconds".
+* Do not tight-loop on `time.sleep(1)` just to decrement a counter — it wastes cycles and produces no useful output.
+
+Composition rules:
+* Prefer composing the BUILT-IN TOOLS below over reinventing their functionality. If a built-in does what you need, import and call it directly rather than re-implementing.
+* Do not duplicate built-in tool names. The orchestrator will reject drafts whose name collides with a built-in.
 """
 
 
@@ -76,11 +97,18 @@ def set_meta_tool_context(
     orchestrator: "Orchestrator",
     engine: "MLXEngine",
     generated_dir: Path,
+    drafting_engine: "Optional[MLXEngine]" = None,
 ) -> None:
-    """Wire the module-level singletons the @tool relies on at runtime."""
-    global _ORCHESTRATOR, _ENGINE, _GENERATED_DIR
+    """Wire the module-level singletons the @tool relies on at runtime.
+
+    ``drafting_engine`` is the code-specialist model used to write new
+    tool source. When omitted, falls back to ``engine`` so tests and
+    headless invocations keep working with a single MLX instance.
+    """
+    global _ORCHESTRATOR, _ENGINE, _DRAFT_ENGINE, _GENERATED_DIR
     _ORCHESTRATOR = orchestrator
     _ENGINE = engine
+    _DRAFT_ENGINE = drafting_engine or engine
     _GENERATED_DIR = Path(generated_dir)
     _GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -175,6 +203,35 @@ def _decorator_name(dec: ast.expr) -> str:
     return ""
 
 
+def _format_builtin_tools_context() -> str:
+    """Render a concise ``BUILT-IN TOOLS`` section for the system prompt.
+
+    Pulls ``name`` + ``description`` from every built-in tool currently
+    registered on the orchestrator so the drafter knows what it can
+    compose with. Falls back to a short note when the orchestrator is
+    unavailable (e.g. in unit tests).
+    """
+    if _ORCHESTRATOR is None:
+        return "BUILT-IN TOOLS\n(unavailable in this context)\n"
+
+    builtin_names = getattr(_ORCHESTRATOR, "_builtin_tool_names", frozenset())
+    lines: list[str] = ["BUILT-IN TOOLS (prefer composing these; do not duplicate their names):"]
+    for tool_obj in getattr(_ORCHESTRATOR, "tools", []):
+        name = getattr(tool_obj, "name", getattr(tool_obj, "__name__", ""))
+        if not name or name not in builtin_names:
+            continue
+        desc = (
+            getattr(tool_obj, "description", None)
+            or getattr(tool_obj, "__doc__", None)
+            or ""
+        )
+        first_line = desc.strip().splitlines()[0] if desc.strip() else "(no description)"
+        lines.append(f"- {name}: {first_line[:180]}")
+    if len(lines) == 1:
+        lines.append("(no built-in tools registered)")
+    return "\n".join(lines) + "\n"
+
+
 def _draft_with_engine(
     engine: "MLXEngine",
     tool_name: str,
@@ -189,6 +246,9 @@ def _draft_with_engine(
     :attr:`MLXEngine.generation_lock`, serializing against the agent's own
     inference loop instead of racing it on the Metal heap.
     """
+    system_prompt = (
+        _SYSTEM_PROMPT_BASE + "\n" + _format_builtin_tools_context()
+    )
     user_msg = (
         f"tool_name: {tool_name}\n"
         f"description: {description}\n"
@@ -196,7 +256,7 @@ def _draft_with_engine(
         "Emit the full module now. Output nothing but the Python source."
     )
     raw = engine.generate_chat_sync(
-        _SYSTEM_PROMPT, user_msg, max_tokens=1200
+        system_prompt, user_msg, max_tokens=1200
     )
     return _strip_fences(raw)
 
@@ -322,10 +382,31 @@ def generate_custom_tool(
     except ToolGenerationError as exc:
         return {"status": "error", "tool_name": tool_name, "error": str(exc)}
 
+    # Skip drafting if a tool with this name already lives on disk. The
+    # orchestrator hot-loads ``tools/generated/*.py`` at startup, so the
+    # tool is already callable. Flag an auto-rerun so the orchestrator
+    # transparently uses it against the original prompt.
+    existing_path = _GENERATED_DIR / f"{tool_name}.py"
+    if existing_path.exists():
+        loaded = sorted(getattr(_ORCHESTRATOR, "_dynamic_tool_names", set()))
+        _mark_for_rerun(tool_name)
+        return {
+            "status": "exists",
+            "tool_name": tool_name,
+            "path": str(existing_path),
+            "loaded_tools": loaded,
+            "message": (
+                f"Tool {tool_name!r} already exists. Emit final_answer "
+                "acknowledging this; the orchestrator will invoke it "
+                "automatically."
+            ),
+        }
+
     source = ""
     try:
         source = _draft_with_engine(
-            _ENGINE, tool_name, description, expected_logic
+            _DRAFT_ENGINE or _ENGINE,
+            tool_name, description, expected_logic,
         )
         _validate_source(tool_name, source)
     except ToolGenerationError as exc:
@@ -384,13 +465,38 @@ def generate_custom_tool(
             "error": f"installed but failed to load: {exc}",
         }
 
+    # The running agent's tool schema was frozen at the start of this
+    # run, so ``tool_name`` is NOT yet callable in the same turn even
+    # though the file is on disk and the next run's agent will see it.
+    # Flag the orchestrator for an auto-rerun with the original prompt
+    # so the newly-installed tool is invoked transparently. The message
+    # instructs the model to finish cleanly with final_answer.
+    _mark_for_rerun(tool_name)
     return {
         "status": "ok",
         "tool_name": tool_name,
         "path": str(target_path),
         "git": git_summary,
         "git_ok": git_ok,
+        "message": (
+            f"Tool {tool_name!r} was drafted, approved, and installed. "
+            "Immediately emit final_answer with a brief confirmation; "
+            "the orchestrator will automatically invoke the new tool "
+            "to fulfil the original request."
+        ),
     }
+
+
+def _mark_for_rerun(tool_name: str) -> None:
+    """Best-effort signal to the orchestrator to auto-rerun the turn."""
+    if _ORCHESTRATOR is None:
+        return
+    mark = getattr(_ORCHESTRATOR, "mark_tool_ready_for_rerun", None)
+    if callable(mark):
+        try:
+            mark(tool_name)
+        except Exception:
+            logger.exception("mark_tool_ready_for_rerun failed")
 
 
 def _request_code_approval(
