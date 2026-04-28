@@ -185,9 +185,10 @@ class Orchestrator:
         """
         request_id = f"code_{uuid.uuid4().hex[:12]}"
         ev_id = event_id or getattr(self, "_current_event_id", "evt_meta")
-        fut: asyncio.Future[CodeApprovalResponsePayload] = (
-            asyncio.get_event_loop().create_future()
-        )
+        # Use asyncio.get_running_loop() for Python 3.10+ compatibility;
+        # get_event_loop() is deprecated when called from coroutines.
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[CodeApprovalResponsePayload] = loop.create_future()
         self._pending_code[request_id] = fut
         msg = CodeApprovalRequest(
             seq=self._next_seq(),
@@ -207,6 +208,7 @@ class Orchestrator:
                 fut, timeout=self.code_approval_timeout
             )
         except asyncio.TimeoutError:
+            # Atomically pop to avoid race with submit_code_approval_response
             self._pending_code.pop(request_id, None)
             logger.info("Code approval %s timed out", request_id)
             return CodeApprovalResponsePayload(
@@ -637,7 +639,9 @@ class Orchestrator:
         in place of the original arguments proposed by the agent.
         """
         request_id = f"req_{uuid.uuid4().hex[:12]}"
-        fut: asyncio.Future[ApprovalResponsePayload] = asyncio.get_event_loop().create_future()
+        # Use asyncio.get_running_loop() for Python 3.10+ compatibility
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[ApprovalResponsePayload] = loop.create_future()
         self._pending[request_id] = fut
 
         msg = ApprovalRequest(
