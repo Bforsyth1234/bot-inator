@@ -50,7 +50,20 @@ _ALLOWED_THIRD_PARTY: frozenset[str] = frozenset({"smolagents"})
 _BANNED_SUBSTRINGS: tuple[str, ...] = (
     "__import__(", "eval(", "exec(", "compile(",
     "os.system(", "os.popen(", "pty.spawn(",
+    # Reflection-based bypasses
+    "getattr(", "setattr(", "delattr(",
+    # importlib can import arbitrary modules
+    "importlib.import_module(", "import_module(",
+    # Code object manipulation
+    "types.FunctionType(", "types.CodeType(",
+    # ctypes can call arbitrary C functions
+    "ctypes.",
 )
+# Banned AST node types that indicate dangerous dynamic behavior
+_BANNED_AST_CALLS: frozenset[str] = frozenset({
+    "getattr", "setattr", "delattr", "vars", "globals", "locals",
+    "open",  # File I/O should use pathlib or explicit subprocess
+})
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 _SYSTEM_PROMPT_BASE = """You write a single Python module that defines ONE smolagents @tool.
@@ -164,6 +177,8 @@ def _validate_source(tool_name: str, source: str) -> None:
         raise ToolGenerationError(f"draft is not valid Python: {exc}") from exc
 
     allowed = _ALLOWED_STDLIB | _ALLOWED_THIRD_PARTY
+    # Disallow importlib entirely — it can import arbitrary modules at runtime
+    disallowed_from_import: frozenset[str] = frozenset({"importlib"})
     found_tool_fn = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -173,6 +188,10 @@ def _validate_source(tool_name: str, source: str) -> None:
                     raise ToolGenerationError(
                         f"disallowed import: {alias.name}"
                     )
+                if root in disallowed_from_import:
+                    raise ToolGenerationError(
+                        f"disallowed import (runtime bypass risk): {alias.name}"
+                    )
         elif isinstance(node, ast.ImportFrom):
             if node.level and node.level > 0:
                 raise ToolGenerationError("relative imports are not allowed")
@@ -180,6 +199,17 @@ def _validate_source(tool_name: str, source: str) -> None:
             if module and module not in allowed:
                 raise ToolGenerationError(
                     f"disallowed import: {node.module}"
+                )
+            if module in disallowed_from_import:
+                raise ToolGenerationError(
+                    f"disallowed import (runtime bypass risk): {node.module}"
+                )
+        elif isinstance(node, ast.Call):
+            # Check for banned function calls by name
+            call_name = _get_call_name(node)
+            if call_name in _BANNED_AST_CALLS:
+                raise ToolGenerationError(
+                    f"disallowed function call: {call_name}()"
                 )
         elif isinstance(node, ast.FunctionDef) and node.name == tool_name:
             for dec in node.decorator_list:
@@ -191,6 +221,16 @@ def _validate_source(tool_name: str, source: str) -> None:
         raise ToolGenerationError(
             f"no @tool function named {tool_name!r} found in draft"
         )
+
+
+def _get_call_name(node: ast.Call) -> str:
+    """Extract the function name from a Call node for validation."""
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        # Handle chained attributes like os.path.join -> return "join"
+        return node.func.attr
+    return ""
 
 
 def _decorator_name(dec: ast.expr) -> str:
