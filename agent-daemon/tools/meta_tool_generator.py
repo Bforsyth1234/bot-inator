@@ -262,14 +262,25 @@ def _draft_with_engine(
 
 
 def _atomic_write(path: Path, source: str) -> None:
-    """Write ``source`` to ``path`` via a temp file + ``os.replace``."""
+    """Write ``source`` to ``path`` via a temp file + ``os.replace``.
+
+    Uses a random suffix to prevent predictable temp file names (mitigates
+    symlink attacks on shared systems). The temp file is created with
+    restrictive permissions (0600) via mkstemp.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Use a random hex suffix instead of predictable prefix to mitigate
+    # symlink race attacks on multi-user systems
+    import secrets
+    suffix = f".{secrets.token_hex(8)}.tmp"
     fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.stem}.", suffix=".tmp", dir=str(path.parent)
+        prefix=".", suffix=suffix, dir=str(path.parent)
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(source.rstrip() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())  # Ensure data hits disk before rename
         os.replace(tmp_name, path)
     except Exception:
         try:
