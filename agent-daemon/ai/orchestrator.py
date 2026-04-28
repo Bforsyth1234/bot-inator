@@ -91,6 +91,11 @@ class Orchestrator:
         # so :meth:`unload_dynamic_tool` can distinguish agent-authored tools
         # from the built-ins baked in at construction time.
         self._dynamic_tool_names: set[str] = set()
+        # Lock to serialize dynamic tool loading/unloading operations. This
+        # prevents concurrent modifications to self.tools and self._agent
+        # from startup, reload commands, and meta-tool installs.
+        import threading
+        self._tool_load_lock = threading.RLock()
         # Set by :func:`tools.meta_tool_generator.generate_custom_tool`
         # when a new tool was installed (or matched an existing file) so
         # :meth:`_handle_user_message` can transparently re-run the same
@@ -231,43 +236,46 @@ class Orchestrator:
 
         Files starting with ``.`` (e.g. ``.gitkeep``) and the nested
         ``.git`` bookkeeping directory are always skipped.
+
+        Thread-safe: uses ``_tool_load_lock`` to serialize concurrent calls.
         """
-        target = Path(directory) if directory else self.generated_tools_dir
-        if target is None or not target.exists():
+        with self._tool_load_lock:
+            target = Path(directory) if directory else self.generated_tools_dir
+            if target is None or not target.exists():
+                return sorted(self._dynamic_tool_names)
+
+            loaded: list[str] = []
+            for path in sorted(target.iterdir()):
+                if path.name.startswith(".") or path.is_dir():
+                    continue
+                if path.suffix != ".py":
+                    continue
+                name = path.stem
+                if name in self._builtin_tool_names:
+                    logger.warning(
+                        "Generated tool %s shadows a built-in; skipping", name
+                    )
+                    continue
+                try:
+                    tool_obj = self._import_tool_module(name, path)
+                except Exception:
+                    logger.exception(
+                        "Failed to load dynamic tool from %s; skipping", path
+                    )
+                    continue
+                if tool_obj is None:
+                    logger.warning(
+                        "No smolagents Tool instance found in %s; skipping", path
+                    )
+                    continue
+                self._replace_tool(name, tool_obj)
+                self._dynamic_tool_names.add(name)
+                loaded.append(name)
+
+            if loaded:
+                self._agent = self._build_agent()
+                logger.info("Loaded dynamic tools: %s", ", ".join(loaded))
             return sorted(self._dynamic_tool_names)
-
-        loaded: list[str] = []
-        for path in sorted(target.iterdir()):
-            if path.name.startswith(".") or path.is_dir():
-                continue
-            if path.suffix != ".py":
-                continue
-            name = path.stem
-            if name in self._builtin_tool_names:
-                logger.warning(
-                    "Generated tool %s shadows a built-in; skipping", name
-                )
-                continue
-            try:
-                tool_obj = self._import_tool_module(name, path)
-            except Exception:
-                logger.exception(
-                    "Failed to load dynamic tool from %s; skipping", path
-                )
-                continue
-            if tool_obj is None:
-                logger.warning(
-                    "No smolagents Tool instance found in %s; skipping", path
-                )
-                continue
-            self._replace_tool(name, tool_obj)
-            self._dynamic_tool_names.add(name)
-            loaded.append(name)
-
-        if loaded:
-            self._agent = self._build_agent()
-            logger.info("Loaded dynamic tools: %s", ", ".join(loaded))
-        return sorted(self._dynamic_tool_names)
 
     def unload_dynamic_tool(self, name: str) -> bool:
         """Remove a previously-loaded dynamic tool from the active agent.
@@ -275,19 +283,22 @@ class Orchestrator:
         Returns ``True`` when a matching tool was found and detached. Does
         not touch the filesystem — the caller is responsible for unlinking
         the source file.
+
+        Thread-safe: uses ``_tool_load_lock`` to serialize concurrent calls.
         """
-        if name not in self._dynamic_tool_names:
-            return False
-        self.tools = [
-            t
-            for t in self.tools
-            if getattr(t, "name", getattr(t, "__name__", "")) != name
-        ]
-        self._dynamic_tool_names.discard(name)
-        sys.modules.pop(f"tools.generated.{name}", None)
-        self._agent = self._build_agent()
-        logger.info("Unloaded dynamic tool: %s", name)
-        return True
+        with self._tool_load_lock:
+            if name not in self._dynamic_tool_names:
+                return False
+            self.tools = [
+                t
+                for t in self.tools
+                if getattr(t, "name", getattr(t, "__name__", "")) != name
+            ]
+            self._dynamic_tool_names.discard(name)
+            sys.modules.pop(f"tools.generated.{name}", None)
+            self._agent = self._build_agent()
+            logger.info("Unloaded dynamic tool: %s", name)
+            return True
 
     @staticmethod
     def _import_tool_module(name: str, path: Path) -> Any:
