@@ -181,6 +181,23 @@ def _validate_source(tool_name: str, source: str) -> None:
                 raise ToolGenerationError(
                     f"disallowed import: {node.module}"
                 )
+        elif isinstance(node, ast.Call):
+            # Block ``mod.__dict__["foo"](...)`` reflection: the callable is a
+            # Subscript whose value chain references ``__dict__``. This evades
+            # substring/AST-name checks because no banned identifier is named
+            # directly.
+            if isinstance(node.func, ast.Subscript) and _references_dunder_dict(node.func.value):
+                raise ToolGenerationError(
+                    "disallowed call via __dict__ subscript reflection"
+                )
+        elif isinstance(node, ast.Attribute):
+            # Block bare ``something.__dict__`` attribute access anywhere in
+            # the module — there is no legitimate use for it in a tool and it
+            # is the gateway for the subscript-reflection bypass above.
+            if node.attr == "__dict__":
+                raise ToolGenerationError(
+                    "access to __dict__ is not allowed"
+                )
         elif isinstance(node, ast.FunctionDef) and node.name == tool_name:
             for dec in node.decorator_list:
                 dec_name = _decorator_name(dec)
@@ -191,6 +208,15 @@ def _validate_source(tool_name: str, source: str) -> None:
         raise ToolGenerationError(
             f"no @tool function named {tool_name!r} found in draft"
         )
+
+
+def _references_dunder_dict(node: ast.AST) -> bool:
+    """True if ``node`` is or contains a ``.__dict__`` attribute access."""
+    if isinstance(node, ast.Attribute) and node.attr == "__dict__":
+        return True
+    if isinstance(node, ast.Attribute):
+        return _references_dunder_dict(node.value)
+    return False
 
 
 def _decorator_name(dec: ast.expr) -> str:
