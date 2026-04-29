@@ -322,8 +322,20 @@ class Orchestrator:
 
     # ---- main loop ----------------------------------------------------
 
+    # Warn if the event queue exceeds this depth (indicates processing backlog)
+    _QUEUE_DEPTH_WARNING_THRESHOLD = 20
+
     async def _run(self) -> None:
         while True:
+            # Monitor queue depth to detect processing backlog
+            queue_size = self.event_bus.qsize()
+            if queue_size > self._QUEUE_DEPTH_WARNING_THRESHOLD:
+                logger.warning(
+                    "Event queue depth %d exceeds threshold %d; "
+                    "processing may be falling behind",
+                    queue_size,
+                    self._QUEUE_DEPTH_WARNING_THRESHOLD,
+                )
             event = await self.event_bus.consume()
             try:
                 await self._handle_event(event)
