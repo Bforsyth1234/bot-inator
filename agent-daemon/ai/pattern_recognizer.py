@@ -52,6 +52,11 @@ class PatternRecognizer:
     it up on the next iteration.
     """
 
+    # Maximum recent suggestions to track for de-duplication (prevents ping-pong)
+    _MAX_RECENT_SUGGESTIONS = 10
+    # Per-tool cooldown after suggestion (prevents rapid re-suggestion)
+    _PER_TOOL_COOLDOWN_SECONDS = 600.0  # 10 minutes
+
     def __init__(
         self,
         *,
@@ -74,6 +79,10 @@ class PatternRecognizer:
         self._last_eval_at: float = 0.0
         self._cooldown_until: float = 0.0
         self._last_suggestion: Optional[str] = None
+        # Track per-tool cooldowns to prevent re-suggesting recently suggested tools
+        self._tool_cooldowns: dict[str, float] = {}
+        # Recent suggestions deque to detect ping-pong patterns
+        self._recent_suggestions: Deque[str] = deque(maxlen=self._MAX_RECENT_SUGGESTIONS)
         self._eval_lock = asyncio.Lock()
 
     # ---- public API --------------------------------------------------
@@ -119,10 +128,45 @@ class PatternRecognizer:
             if suggestion is None:
                 return
             tool_name = suggestion["tool_name"]
+
+            # Guard 1: Skip if identical to the last suggestion
             if tool_name == self._last_suggestion:
+                logger.debug("Skipping duplicate suggestion: %s", tool_name)
                 return
+
+            # Guard 2: Skip if this tool is in per-tool cooldown (recently suggested)
+            now = time.time()
+            tool_cooldown_until = self._tool_cooldowns.get(tool_name, 0.0)
+            if now < tool_cooldown_until:
+                logger.debug(
+                    "Skipping %s: still in per-tool cooldown for %.1fs",
+                    tool_name,
+                    tool_cooldown_until - now,
+                )
+                return
+
+            # Guard 3: Detect ping-pong patterns (same tool suggested multiple times recently)
+            recent_count = sum(1 for t in self._recent_suggestions if t == tool_name)
+            if recent_count >= 2:
+                logger.warning(
+                    "Suppressing %s: suggested %d times recently (ping-pong guard)",
+                    tool_name,
+                    recent_count,
+                )
+                # Apply extended cooldown to break the cycle
+                self._tool_cooldowns[tool_name] = now + self._PER_TOOL_COOLDOWN_SECONDS * 2
+                return
+
+            # Update tracking state
             self._last_suggestion = tool_name
-            self._cooldown_until = time.time() + self.cooldown_seconds
+            self._recent_suggestions.append(tool_name)
+            self._tool_cooldowns[tool_name] = now + self._PER_TOOL_COOLDOWN_SECONDS
+            self._cooldown_until = now + self.cooldown_seconds
+
+            # Prune expired cooldowns to avoid memory growth
+            self._tool_cooldowns = {
+                k: v for k, v in self._tool_cooldowns.items() if v > now
+            }
             event = ContextEvent(
                 event_type="pattern_detected", metadata=suggestion
             )
