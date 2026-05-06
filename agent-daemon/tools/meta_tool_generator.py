@@ -181,6 +181,18 @@ def _validate_source(tool_name: str, source: str) -> None:
                 raise ToolGenerationError(
                     f"disallowed import: {node.module}"
                 )
+        elif isinstance(node, ast.Call):
+            # Block ``subprocess.<anything>(..., shell=True)``: subprocess is
+            # allowlisted for legitimate uses (e.g. osascript notifications),
+            # but ``shell=True`` turns any string argument into a shell
+            # injection primitive.
+            call_name = _shell_call_name(node)
+            if call_name in {"run", "call", "check_call", "check_output", "Popen"}:
+                for kw in node.keywords:
+                    if kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                        raise ToolGenerationError(
+                            "subprocess call with shell=True is not allowed"
+                        )
         elif isinstance(node, ast.FunctionDef) and node.name == tool_name:
             for dec in node.decorator_list:
                 dec_name = _decorator_name(dec)
@@ -191,6 +203,15 @@ def _validate_source(tool_name: str, source: str) -> None:
         raise ToolGenerationError(
             f"no @tool function named {tool_name!r} found in draft"
         )
+
+
+def _shell_call_name(node: ast.Call) -> str:
+    """Return the called function name, or "" for non-Name/Attribute calls."""
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return ""
 
 
 def _decorator_name(dec: ast.expr) -> str:
