@@ -37,9 +37,28 @@ from tools import READ_ONLY_TOOL_NAMES
 from .mlx_engine import MLXEngine
 from .memory import Memory
 
+# ``engine`` is duck-typed against the surface defined by
+# :class:`MLXEngine` (load/unload/swap/generate/generate_sync/
+# generate_chat_sync/evaluate_event/loaded/current_model/model_name).
+# :class:`~ai.groq_engine.GroqEngine` is the second concrete implementation;
+# tests pass mocks. ``Any`` keeps the orchestrator from importing the Groq
+# module at type-check time so its optional dependency tree stays optional.
+EngineLike = Any
+
 logger = logging.getLogger(__name__)
 
 WSSendCallable = Callable[[Any], Awaitable[None]]
+
+# Event types that feed observers (the WebSocket activity stream and the
+# pattern recognizer) but do not warrant invoking the tool-calling agent.
+# ``app_activated`` is the canonical example: the helper subprocess emits
+# one every time NSWorkspace switches focus, which is far too noisy to
+# justify a 70B chat-model call (and the model's typical response is a
+# tautological ``show_notification`` that asks the user to approve a
+# popup informing them of the focus change they just caused). Pattern
+# detection still runs because the recognizer's whole job is finding
+# repeatable workflows in activation sequences.
+_AGENT_TRIGGER_EXCLUDED_EVENT_TYPES: frozenset[str] = frozenset({"app_activated"})
 
 
 def _now_iso() -> str:
@@ -55,12 +74,12 @@ class Orchestrator:
 
     def __init__(
         self,
-        engine: MLXEngine,
+        engine: EngineLike,
         event_bus: EventBus,
         memory: Optional[Memory] = None,
         tools: Optional[list[Any]] = None,
         approval_timeout: float = 120.0,
-        analysis_engine: Optional[MLXEngine] = None,
+        analysis_engine: Optional[EngineLike] = None,
         generated_tools_dir: Optional[Path] = None,
         code_approval_timeout: float = 300.0,
         pattern_recognizer: Any = None,
@@ -380,6 +399,12 @@ class Orchestrator:
             await self._handle_user_message(event, event_id)
             return
 
+        # Signal-only events (e.g. ``app_activated``) feed pattern detection
+        # and the activity stream but never trigger the tool-calling agent;
+        # see ``_AGENT_TRIGGER_EXCLUDED_EVENT_TYPES`` for the rationale.
+        if event.event_type in _AGENT_TRIGGER_EXCLUDED_EVENT_TYPES:
+            return
+
         analysis = await self._analyse_event(event)
         if analysis:
             await self._emit_thought(event_id, "analysis", analysis)
@@ -510,9 +535,44 @@ class Orchestrator:
             return None
 
         wrapped = [self._wrap_tool_for_approval(t) for t in self.tools]
-        _MLXModel = _make_mlx_model_class()
-        model = _MLXModel(self.engine)
+        model = self._build_smolagents_model()
+        if model is None:
+            return None
         return ToolCallingAgent(tools=wrapped, model=model)
+
+    def _build_smolagents_model(self) -> Any:
+        """Pick the right smolagents ``Model`` adapter for ``self.engine``.
+
+        Local MLX engines route through :func:`_make_mlx_model_class` so we
+        keep the in-house ``<tool_call>`` parser and shared Metal lock.
+        Groq engines plug straight into smolagents' built-in
+        ``OpenAIServerModel`` pointed at Groq's OpenAI-compatible endpoint.
+        Mocks (used in tests) match neither and fall back to a no-op
+        ``ToolCallingAgent``-less path via :meth:`_fallback_run`.
+        """
+        if isinstance(self.engine, MLXEngine):
+            _MLXModel = _make_mlx_model_class()
+            return _MLXModel(self.engine)
+        try:
+            from .groq_engine import GroqEngine  # type: ignore
+        except ImportError:
+            GroqEngine = None  # type: ignore
+        if GroqEngine is not None and isinstance(self.engine, GroqEngine):
+            try:
+                from smolagents.models import OpenAIServerModel  # type: ignore
+            except ImportError:
+                logger.warning(
+                    "smolagents.OpenAIServerModel unavailable; "
+                    "Groq engine cannot drive the agent loop"
+                )
+                return None
+            return OpenAIServerModel(
+                model_id=self.engine.model_name,
+                api_base=self.engine.api_base,
+                api_key=self.engine.api_key,
+                flatten_messages_as_text=False,
+            )
+        return None
 
     async def _run_agent(
         self,

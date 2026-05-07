@@ -99,7 +99,7 @@ def test_evaluate_event_emits_analysis_thought(client) -> None:
 
         bus.push_threadsafe(
             ContextEvent(
-                event_type="app_activated",
+                event_type="file",
                 app_name="Google Chrome",
                 window_title="Jira - BUG-123",
             )
@@ -137,7 +137,7 @@ def test_empty_evaluate_event_skips_analysis_thought(client) -> None:
 
         bus.push_threadsafe(
             ContextEvent(
-                event_type="app_activated",
+                event_type="file",
                 app_name="Safari",
                 window_title="Docs",
             )
@@ -702,7 +702,7 @@ def test_orchestrator_injects_recalled_memories_into_prompt() -> None:
             await orch.start()
             bus.push_threadsafe(
                 ContextEvent(
-                    event_type="app_activated",
+                    event_type="file",
                     app_name="Safari",
                     window_title="Docs",
                 )

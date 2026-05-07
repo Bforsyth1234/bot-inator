@@ -25,3 +25,4 @@ playwright>=1.48.0,<2.0
 
 # Utilities
 orjson>=3.10.0,<4.0
+python-dotenv>=1.0.0,<2.0

@@ -23,6 +23,9 @@ from ai.memory import Memory, set_default_memory
 from ai.mlx_engine import MLXEngine
 from ai.orchestrator import Orchestrator
 from ai.pattern_recognizer import PatternRecognizer
+# GroqEngine is imported lazily inside ``lifespan`` so the daemon still
+# boots cleanly when ``settings.provider == "local"`` and the optional
+# Groq dependency tree is missing.
 from config import settings
 from events.event_bus import ContextEvent, EventBus
 from events.file_watcher import FileWatcher
@@ -59,6 +62,43 @@ def _listeners_enabled() -> bool:
     return os.environ.get("AGENT_DISABLE_LISTENERS") != "1"
 
 
+def _build_engines() -> tuple[Any, Any, Any]:
+    """Construct the (main, analysis, drafting) engine triplet.
+
+    Provider is read from :data:`settings.provider`. ``"groq"`` builds
+    three :class:`~ai.groq_engine.GroqEngine` instances pointed at the
+    configured Groq endpoint; anything else (default ``"local"``) keeps
+    the original MLX-on-Apple-Silicon stack. Each engine is isolated so
+    the tool-calling agent, the lightweight analysis loop, and the
+    meta-tool drafter can run on different model ids without sharing
+    state. Unknown provider names fall back to ``"local"`` with a warning
+    so a typo in ``AGENT_PROVIDER`` cannot brick startup.
+    """
+    provider = (settings.provider or "local").lower()
+    if provider == "groq":
+        from ai.groq_engine import GroqEngine  # noqa: WPS433
+        return (
+            GroqEngine(settings.groq_main_model,
+                       api_key=settings.groq_api_key,
+                       api_base=settings.groq_api_base),
+            GroqEngine(settings.groq_analysis_model,
+                       api_key=settings.groq_api_key,
+                       api_base=settings.groq_api_base),
+            GroqEngine(settings.groq_drafting_model,
+                       api_key=settings.groq_api_key,
+                       api_base=settings.groq_api_base),
+        )
+    if provider != "local":
+        logger.warning(
+            "Unknown AGENT_PROVIDER=%r; falling back to local MLX", provider
+        )
+    return (
+        MLXEngine(settings.model_path),
+        MLXEngine(settings.analysis_model_path),
+        MLXEngine(settings.drafting_model_path),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.seq = 0
@@ -66,39 +106,40 @@ async def lifespan(app: FastAPI):
     bus = EventBus()
     bus.bind_loop(asyncio.get_running_loop())
 
-    engine = MLXEngine(settings.model_path)
-    analysis_engine = MLXEngine(settings.analysis_model_path)
-    # Code-specialist engine reserved for meta-tool drafting. Kept
-    # isolated from ``engine`` so the tool-calling agent retains its
-    # generalist chat model while drafts are produced by a coder model.
-    drafting_engine = MLXEngine(settings.drafting_model_path)
+    engine, analysis_engine, drafting_engine = _build_engines()
     memory = Memory()
     set_default_memory(memory)
 
-    # Eager-load all three engines in parallel so the first event is not
-    # blocked by multi-GB model downloads + Metal compile.
+    # Eager-load the engines sequentially. Parallel ``asyncio.gather``
+    # used to race ``huggingface_hub.snapshot_download``'s internal
+    # ``tqdm.contrib.concurrent.ensure_lock`` context manager — the
+    # second exiter hits ``AttributeError: type object 'tqdm' has no
+    # attribute '_lock'`` (or, in the other interleaving, deadlocks on
+    # the same RLock). Serializing the loads sidesteps both outcomes and
+    # costs nothing on warm-cache startups since each mmap is near-instant.
+    # For the Groq provider eager-loading is essentially free — it just
+    # constructs the OpenAI client and validates the API key — but we
+    # still skip it under ``AGENT_EAGER_LOAD=0`` for symmetry with tests.
     if os.environ.get("AGENT_EAGER_LOAD", "1") != "0":
         logger.info(
-            "Eager-loading MLX models: main=%s analysis=%s drafting=%s",
-            settings.model_path,
-            settings.analysis_model_path,
-            settings.drafting_model_path,
+            "Eager-loading %s models: main=%s analysis=%s drafting=%s",
+            settings.provider,
+            engine.model_name,
+            analysis_engine.model_name,
+            drafting_engine.model_name,
         )
-        results = await asyncio.gather(
-            engine.load(),
-            analysis_engine.load(),
-            drafting_engine.load(),
-            return_exceptions=True,
-        )
-        for name, result in zip(
-            ("main", "analysis", "drafting"), results
+        for name, eng in (
+            ("main", engine),
+            ("analysis", analysis_engine),
+            ("drafting", drafting_engine),
         ):
-            if isinstance(result, Exception):
+            try:
+                await eng.load()
+            except Exception:
                 logger.exception(
                     "Failed to eager-load %s engine; will fall back to "
                     "lazy load on first use",
                     name,
-                    exc_info=result,
                 )
 
     listeners: list[Any] = []
@@ -358,12 +399,13 @@ async def ws_stream(websocket: WebSocket) -> None:
 
     orchestrator.add_subscriber(_ws_send)
 
+    main_engine = app.state.engine
     hello = Status(
         seq=_next_seq(),
         timestamp=_now_iso(),
         payload=StatusPayload(
             state="ready",
-            model_loaded=settings.model_path,
+            model_loaded=getattr(main_engine, "model_name", settings.model_path),
             listeners_active=list(app.state.listener_names),
         ),
     )

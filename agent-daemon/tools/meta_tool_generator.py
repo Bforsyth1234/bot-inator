@@ -20,17 +20,20 @@ except ImportError:  # pragma: no cover - dep not installed during tests
         return fn
 
 if TYPE_CHECKING:  # pragma: no cover - type-only
-    from ai.mlx_engine import MLXEngine
     from ai.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
 
 # Populated by :func:`set_meta_tool_context` at lifespan startup.
+# ``_ENGINE`` and ``_DRAFT_ENGINE`` are duck-typed against the
+# :class:`~ai.mlx_engine.MLXEngine` surface (``generate_chat_sync`` is
+# the only method called here); a :class:`~ai.groq_engine.GroqEngine`
+# instance is equally accepted when ``settings.provider == "groq"``.
 _ORCHESTRATOR: "Optional[Orchestrator]" = None
-_ENGINE: "Optional[MLXEngine]" = None
+_ENGINE: Optional[Any] = None
 # Code-specialist engine used exclusively for drafting. Falls back to
 # ``_ENGINE`` when the lifespan didn't wire a dedicated drafting model.
-_DRAFT_ENGINE: "Optional[MLXEngine]" = None
+_DRAFT_ENGINE: Optional[Any] = None
 _GENERATED_DIR: Optional[Path] = None
 
 # Bare module imports we refuse to accept from drafted code. Anything outside
@@ -47,9 +50,28 @@ _ALLOWED_STDLIB: frozenset[str] = frozenset({
     "zipfile",
 })
 _ALLOWED_THIRD_PARTY: frozenset[str] = frozenset({"smolagents"})
+# In-tree packages drafted tools are allowed to import from. Needed so
+# composition works: ``from tools.show_notification import show_notification``
+# must pass the import check, since the system prompt mandates that
+# pattern for reusing built-in tools instead of reinventing primitives.
+_ALLOWED_INTERNAL: frozenset[str] = frozenset({"tools"})
 _BANNED_SUBSTRINGS: tuple[str, ...] = (
     "__import__(", "eval(", "exec(", "compile(",
     "os.system(", "os.popen(", "pty.spawn(",
+)
+# Placeholder/reserved domains the model likes to hallucinate when it
+# doesn't know a real endpoint. Matched case-insensitively against the
+# draft source so the validator catches them before the user ever sees
+# the approval dialog. Keep the entries narrow (hostnames, not bare
+# words like "example") to avoid false positives in legitimate prose.
+_PLACEHOLDER_DOMAINS: tuple[str, ...] = (
+    "example.com", "example.org", "example.net",
+    "api.example.com", "api.example.org",
+    "yourapi.com", "your-api.com",
+    "yourdomain.com", "your-domain.com",
+    "yourservice.com", "api.yourservice.com",
+    "myapi.com", "my-api.com",
+    "placeholder.com",
 )
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
@@ -63,6 +85,12 @@ Hard rules:
 * Use ONLY the Python standard library and `smolagents`. No third-party packages.
 * For HTTP calls, use `urllib.request` from the standard library. Do NOT import `requests`, `httpx`, `aiohttp`, `urllib3`, or any other third-party HTTP client.
 * Read credentials (API tokens, keys) from `os.environ`; never hard-code them.
+
+Endpoint rules (CRITICAL — read before writing any HTTP code):
+* NEVER invent URLs. Every URL you write must be one the user explicitly specified in ``expected_logic``, or a well-known public API on a real domain (e.g. ``api.github.com``, ``api.openweathermap.org``, ``api.openai.com``).
+* The following placeholder domains DO NOT EXIST and MUST NOT appear in your draft under any circumstance: ``example.com``, ``example.org``, ``example.net``, ``yourapi.com``, ``api.example.com``, ``api.yourservice.com``, ``localhost`` (unless the user asked for it), ``your-domain.com``, ``your-api.com``. A draft that hits one of these will fail DNS or 404 at runtime and the user will see a silent error.
+* If the task requires an HTTP endpoint and you do NOT know a real, verifiable URL for it, DO NOT invent one. Instead, structure the tool to return ``{"status": "error", "message": "<concrete reason this cannot be done without a real endpoint>"}`` so the caller sees a useful failure.
+* If the task is fundamentally natural-language (classify, summarize, "understand this message"), and no existing built-in tool covers it, DO NOT fake it with an HTTP call. Return ``{"status": "error", "message": "no local primitive for text analysis is available"}``.
 * The function docstring MUST describe what the tool does, its Args, and its Returns.
 * Never call exec, eval, __import__, compile, os.system, os.popen, or pty.spawn.
 * Return a dict with a `status` key of either "ok" or "error".
@@ -82,9 +110,41 @@ Background work rules:
 * Prefer `threading.Timer(interval, callback).start()` over hand-rolled `time.sleep` countdown loops when the only goal is "fire once after N seconds".
 * Do not tight-loop on `time.sleep(1)` just to decrement a counter — it wastes cycles and produces no useful output.
 
-Composition rules:
-* Prefer composing the BUILT-IN TOOLS below over reinventing their functionality. If a built-in does what you need, import and call it directly rather than re-implementing.
-* Do not duplicate built-in tool names. The orchestrator will reject drafts whose name collides with a built-in.
+Composition rules (IMPORTANT — read carefully):
+* Your tool SHOULD call other tools whenever they do part of what you need. Tools that compose other tools are strongly preferred over tools that re-implement primitives.
+* The AVAILABLE TOOLS list below shows every tool currently registered. Each entry gives the `import path` you use to bring the tool into your module and call it.
+* Built-in tools live under `tools.<name>` (e.g. `from tools.show_notification import show_notification`).
+* Previously-generated tools live under `tools.generated.<name>` (e.g. `from tools.generated.fetch_weather import fetch_weather`).
+* Imported tools are invoked as normal Python callables: `show_notification(title="Done", message="...")`. Check each tool's description for its arguments before calling it.
+* MANDATORY: If you call a tool anywhere in your module (including inside nested functions, closures, or threads), you MUST write its exact `from tools.X import X` line at the top of the file with the other imports. Calling a tool that is not imported will raise `NameError` at runtime — the error will be swallowed inside background threads and your tool will appear to succeed while doing nothing.
+* Before you emit the module, scan every function call in your body. For each call whose name appears in AVAILABLE TOOLS, verify there is a matching import at the top. If one is missing, add it.
+* Do NOT duplicate any existing tool's name. The orchestrator will reject drafts whose name collides with one already registered.
+* If the task can be fully accomplished by chaining existing tools, your tool body should consist almost entirely of those calls.
+
+Worked example (structure to mirror when composing built-ins):
+    \"\"\"Fire a macOS notification after a delay.\"\"\"
+    from __future__ import annotations
+    from smolagents import tool
+    from tools.show_notification import show_notification
+    import threading
+
+    @tool
+    def alert_in(seconds: int, title: str, message: str) -> dict:
+        \"\"\"Schedule a notification to fire after ``seconds`` seconds.
+
+        Args:
+            seconds: Delay before the notification fires.
+            title: Notification title.
+            message: Notification body.
+
+        Returns:
+            dict with ``status`` set to "ok" once the timer is scheduled.
+        \"\"\"
+        threading.Timer(
+            seconds,
+            lambda: show_notification(title=title, message=message),
+        ).start()
+        return {"status": "ok"}
 """
 
 
@@ -95,9 +155,9 @@ class ToolGenerationError(RuntimeError):
 def set_meta_tool_context(
     *,
     orchestrator: "Orchestrator",
-    engine: "MLXEngine",
+    engine: Any,
     generated_dir: Path,
-    drafting_engine: "Optional[MLXEngine]" = None,
+    drafting_engine: Optional[Any] = None,
 ) -> None:
     """Wire the module-level singletons the @tool relies on at runtime.
 
@@ -158,12 +218,19 @@ def _validate_source(tool_name: str, source: str) -> None:
     for banned in _BANNED_SUBSTRINGS:
         if banned in source:
             raise ToolGenerationError(f"draft contains banned token: {banned}")
+    lowered = source.lower()
+    for domain in _PLACEHOLDER_DOMAINS:
+        if domain in lowered:
+            raise ToolGenerationError(
+                f"draft references placeholder/fake domain {domain!r}; "
+                "tools must use real endpoints or return a structured error"
+            )
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
         raise ToolGenerationError(f"draft is not valid Python: {exc}") from exc
 
-    allowed = _ALLOWED_STDLIB | _ALLOWED_THIRD_PARTY
+    allowed = _ALLOWED_STDLIB | _ALLOWED_THIRD_PARTY | _ALLOWED_INTERNAL
     found_tool_fn = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -224,51 +291,82 @@ def _decorator_name(dec: ast.expr) -> str:
     return ""
 
 
-def _format_builtin_tools_context() -> str:
-    """Render a concise ``BUILT-IN TOOLS`` section for the system prompt.
+def _format_available_tools_context() -> str:
+    """Render the ``AVAILABLE TOOLS`` section for the drafter's system prompt.
 
-    Pulls ``name`` + ``description`` from every built-in tool currently
-    registered on the orchestrator so the drafter knows what it can
-    compose with. Falls back to a short note when the orchestrator is
-    unavailable (e.g. in unit tests).
+    Enumerates every tool registered on the orchestrator — both the
+    static built-ins and any previously-generated tools — annotating
+    each with its import path so the drafter can compose against them.
+    Falls back to a short note when the orchestrator is unavailable
+    (e.g. in unit tests).
     """
     if _ORCHESTRATOR is None:
-        return "BUILT-IN TOOLS\n(unavailable in this context)\n"
+        return "AVAILABLE TOOLS\n(unavailable in this context)\n"
 
     builtin_names = getattr(_ORCHESTRATOR, "_builtin_tool_names", frozenset())
-    lines: list[str] = ["BUILT-IN TOOLS (prefer composing these; do not duplicate their names):"]
+    dynamic_names = getattr(_ORCHESTRATOR, "_dynamic_tool_names", set())
+
+    builtin_lines: list[str] = []
+    dynamic_lines: list[str] = []
     for tool_obj in getattr(_ORCHESTRATOR, "tools", []):
         name = getattr(tool_obj, "name", getattr(tool_obj, "__name__", ""))
-        if not name or name not in builtin_names:
+        if not name:
             continue
         desc = (
             getattr(tool_obj, "description", None)
             or getattr(tool_obj, "__doc__", None)
             or ""
         )
-        first_line = desc.strip().splitlines()[0] if desc.strip() else "(no description)"
-        lines.append(f"- {name}: {first_line[:180]}")
-    if len(lines) == 1:
-        lines.append("(no built-in tools registered)")
-    return "\n".join(lines) + "\n"
+        first_line = (
+            desc.strip().splitlines()[0]
+            if desc.strip()
+            else "(no description)"
+        )
+        if name in builtin_names:
+            path = f"tools.{name}"
+            builtin_lines.append(
+                f"- {name}  (import: from {path} import {name})\n"
+                f"    {first_line[:220]}"
+            )
+        elif name in dynamic_names:
+            path = f"tools.generated.{name}"
+            dynamic_lines.append(
+                f"- {name}  (import: from {path} import {name})\n"
+                f"    {first_line[:220]}"
+            )
+
+    sections: list[str] = [
+        "AVAILABLE TOOLS (call these from your tool body whenever they help):"
+    ]
+    if builtin_lines:
+        sections.append("Built-in tools:")
+        sections.extend(builtin_lines)
+    if dynamic_lines:
+        sections.append("Previously-generated tools:")
+        sections.extend(dynamic_lines)
+    if not builtin_lines and not dynamic_lines:
+        sections.append("(no tools currently registered)")
+    return "\n".join(sections) + "\n"
 
 
 def _draft_with_engine(
-    engine: "MLXEngine",
+    engine: Any,
     tool_name: str,
     description: str,
     expected_logic: str,
 ) -> str:
-    """Drive the main engine to write a @tool module synchronously.
+    """Drive the configured drafting engine to write a @tool module synchronously.
 
     Called from the smolagents agent worker thread (spawned by
     ``asyncio.to_thread`` in :meth:`Orchestrator._run_agent`), so we drop
-    into the engine's sync API directly — this routes through the shared
-    :attr:`MLXEngine.generation_lock`, serializing against the agent's own
-    inference loop instead of racing it on the Metal heap.
+    into the engine's sync API directly. For MLX engines this routes
+    through the shared :attr:`MLXEngine.generation_lock`, serializing
+    against the agent's own inference loop instead of racing it on the
+    Metal heap; for :class:`~ai.groq_engine.GroqEngine` the call is a
+    network round-trip with no shared resource to guard.
     """
     system_prompt = (
-        _SYSTEM_PROMPT_BASE + "\n" + _format_builtin_tools_context()
+        _SYSTEM_PROMPT_BASE + "\n" + _format_available_tools_context()
     )
     user_msg = (
         f"tool_name: {tool_name}\n"
@@ -309,6 +407,55 @@ def _atomic_write(path: Path, source: str) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+# Tokens that carry no semantic weight for duplicate detection. Dropping
+# them avoids matching every tool against every other tool just because
+# they share filler words like "tool" or "auto".
+_DUP_STOPWORDS: frozenset[str] = frozenset({
+    "a", "an", "and", "auto", "automate", "automatic", "automation",
+    "custom", "for", "from", "handler", "helper", "manager", "me", "my",
+    "new", "of", "on", "or", "that", "the", "this", "to", "tool", "tools",
+    "user", "users", "util", "utility", "with",
+})
+
+
+def _dup_tokens(text: str) -> set[str]:
+    """Lowercase, split on non-alphanumerics, drop stopwords + short tokens."""
+    raw = re.split(r"[^a-z0-9]+", text.lower())
+    return {t for t in raw if t and len(t) > 2 and t not in _DUP_STOPWORDS}
+
+
+def _find_similar_existing_tool(
+    tool_name: str, description: str
+) -> Optional[str]:
+    """Return an existing tool name that likely covers the requested task.
+
+    Matches when any significant token from the requested ``tool_name``
+    or ``description`` also appears in an existing tool's name or
+    description. Used as a semantic-duplicate guard in
+    :func:`generate_custom_tool` — exact-name duplicates are caught
+    earlier by the on-disk path check.
+    """
+    if _ORCHESTRATOR is None:
+        return None
+    request_tokens = _dup_tokens(tool_name) | _dup_tokens(description)
+    if not request_tokens:
+        return None
+
+    for tool_obj in getattr(_ORCHESTRATOR, "tools", []):
+        name = getattr(tool_obj, "name", getattr(tool_obj, "__name__", ""))
+        if not name:
+            continue
+        desc = (
+            getattr(tool_obj, "description", None)
+            or getattr(tool_obj, "__doc__", None)
+            or ""
+        )
+        existing_tokens = _dup_tokens(name) | _dup_tokens(desc)
+        if request_tokens & existing_tokens:
+            return name
+    return None
 
 
 def _git_identity_args() -> list[str]:
@@ -413,6 +560,27 @@ def generate_custom_tool(
         _validate_identifier(tool_name)
     except ToolGenerationError as exc:
         return {"status": "error", "tool_name": tool_name, "error": str(exc)}
+
+    # Semantic-duplicate guard: if an existing tool's name/description
+    # shares a significant keyword with the requested one (e.g. a pattern
+    # recognizer proposal for ``auto_screenshot`` when ``screenshot_tool``
+    # already exists), skip drafting and route the turn to the existing
+    # tool via the auto-rerun flag. The exact-name path below still
+    # handles identical names for the cheapest short-circuit.
+    similar = _find_similar_existing_tool(tool_name, description)
+    if similar:
+        _mark_for_rerun(similar)
+        return {
+            "status": "similar_exists",
+            "tool_name": tool_name,
+            "existing_tool": similar,
+            "message": (
+                f"The existing tool {similar!r} already covers this task. "
+                "Do NOT create a duplicate. Emit final_answer acknowledging "
+                f"this; the orchestrator will invoke {similar!r} "
+                "automatically."
+            ),
+        }
 
     # Skip drafting if a tool with this name already lives on disk. The
     # orchestrator hot-loads ``tools/generated/*.py`` at startup, so the
