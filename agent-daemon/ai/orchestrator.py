@@ -211,6 +211,16 @@ class Orchestrator:
         # that already tried ``generate_custom_tool`` and a second
         # ``generate_custom_tool`` call in one turn is refused (#38).
         self._turn_tool_calls: set[str] = set()
+        # What started the current agent turn: "chat", "pattern" or
+        # "event". generate_custom_tool is only allowed for chat and
+        # pattern turns (a background event must not open a build card).
+        self._turn_kind: str = "event"
+        # Side-effecting calls already run this turn, keyed by tool + args,
+        # so a model that repeats a call can't run it twice.
+        self._turn_done: dict[str, Any] = {}
+        # ``ai.idea_match.DeclinedIdeaMatcher`` set by main.py: catches
+        # reworded repeats of a declined tool idea.
+        self.declined_matcher: Optional[Any] = None
         # Metadata of the built-in follow-up idea being acted on this turn
         # (#32), so a declined built-in call is remembered as a rejection.
         self._current_builtin_idea: Optional[dict[str, Any]] = None
@@ -746,6 +756,8 @@ class Orchestrator:
             return
         event_id = event.metadata.get("event_id") or f"evt_{uuid.uuid4().hex[:12]}"
         self._turn_tool_calls = set()
+        self._turn_done = {}
+        self._turn_kind = "event"
         # Personal text an idea may quote later (#51).
         privacy.note_personal_event(event)
         await self._emit_thought(event_id, "event_received", self._describe_event(event))
@@ -771,6 +783,7 @@ class Orchestrator:
             )
             meta = event.metadata or {}
             self._current_builtin_idea = meta if meta.get("builtin_tool") else None
+            self._turn_kind = "pattern"
             try:
                 result = await self._run_agent(event_id, prompt, max_steps=4)
             finally:
@@ -846,6 +859,8 @@ class Orchestrator:
         # allow a moderate budget without leaving the loop unbounded.
         self._pending_rerun_tool = None
         self._turn_tool_calls = set()
+        self._turn_done = {}
+        self._turn_kind = "chat"
         result = await self._run_agent(event_id, prompt, max_steps=6)
         reply = str(result) if result is not None else ""
 
@@ -1083,6 +1098,44 @@ class Orchestrator:
                     loop,
                 )
                 return result
+            refusal: Optional[dict[str, Any]] = None
+            if tool_name == "generate_custom_tool":
+                declined = orchestrator._previously_declined(call_args, call_kwargs)
+                if declined:
+                    # The user denied this tool idea before: don't ask again
+                    # (live check: one card per incoming iMessage asking to
+                    # build a send-iMessage tool).
+                    refusal = {
+                        "status": "error",
+                        "error": "user_declined_before",
+                        "declined_tool": declined,
+                        "message": (
+                            "The user already declined this tool. Do not "
+                            "ask again; reply 'no action' or answer without it."
+                        ),
+                    }
+            done_key = ""
+            if not is_read_only and refusal is None:
+                done_key = tool_name + json.dumps(
+                    {"a": call_args, "k": call_kwargs}, sort_keys=True, default=str,
+                )
+                done = getattr(orchestrator, "_turn_done", {})
+                if done_key in done:
+                    refusal = {
+                        "skipped": True,
+                        "reason": "already_done_this_turn",
+                        "result": done[done_key],
+                        "message": "This exact call already ran this turn; "
+                        "don't repeat it. Emit final_answer.",
+                    }
+            if refusal is not None:
+                asyncio.run_coroutine_threadsafe(
+                    orchestrator._emit_thought(
+                        event_id, "tool_result", f"{tool_name}: {refusal}"
+                    ),
+                    loop,
+                )
+                return refusal
             orchestrator._turn_tool_calls.add(tool_name)
             if not is_read_only:
                 coro = orchestrator._request_approval(
@@ -1106,6 +1159,9 @@ class Orchestrator:
             )
             if tool_name == "generate_custom_tool":
                 result = orchestrator._flag_quarantined_install(result)
+            done_store = getattr(orchestrator, "_turn_done", None)
+            if done_key and done_store is not None:
+                done_store[done_key] = result
             if tool_name == "read_email":
                 # The result goes back into the main engine's prompt (#31).
                 result = privacy.redact_email_result(result, "main")
@@ -1222,6 +1278,37 @@ class Orchestrator:
                 bool(resp.approved),
             )
         return bool(resp.approved), resp.edited_args
+
+    def _previously_declined(self, args: list[Any], kwargs: dict[str, Any]) -> str:
+        """Name of a declined tool idea this generate_custom_tool call
+        matches (same name, or close enough by words), else "".
+
+        Uses the shared ``IdeaFeedback`` the idea sources hold, so a Deny on
+        any build card is remembered across turns and restarts.
+        """
+        name = str(kwargs.get("tool_name") or (args[0] if args else "") or "")
+        desc = str(kwargs.get("description") or (args[1] if len(args) > 1 else "") or "")
+        if not name:
+            return ""
+        matcher = getattr(self, "declined_matcher", None)
+        if matcher is not None:
+            try:
+                return matcher.match(name, desc)
+            except Exception:
+                logger.exception("declined_matcher failed")
+        seen: set[int] = set()
+        for source in self.idea_sources:
+            feedback = getattr(source, "feedback", None)
+            check = getattr(feedback, "resembles_rejected", None)
+            if check is None or id(feedback) in seen:
+                continue
+            seen.add(id(feedback))
+            try:
+                if check(name, desc):
+                    return name
+            except Exception:
+                logger.exception("resembles_rejected failed")
+        return ""
 
     def _record_idea_feedback(self, tool_args: dict[str, Any], approved: bool) -> None:
         """Tell idea sources the user approved or rejected a tool idea.
@@ -1545,6 +1632,16 @@ def _allow_null_optionals(spec: dict[str, Any]) -> None:
             prop["type"] = kind + ["null"]
 
 
+def _has_tool_result(messages: Any) -> bool:
+    """True when the conversation already contains a tool's observation."""
+    for msg in messages or []:
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        role = getattr(role, "value", role)
+        if role in ("tool-response", "tool"):
+            return True
+    return False
+
+
 def _make_groq_model_class(base: type) -> type:
     """``OpenAIServerModel`` that tolerates a plain-text reply on Groq.
 
@@ -1587,6 +1684,15 @@ def _make_groq_model_class(base: type) -> type:
                         continue
                     raise
             content = (message.content or "").strip() if isinstance(message.content, str) else ""
+            if (
+                tools_to_call_from and not message.tool_calls and not content
+                and _has_tool_result(messages)
+            ):
+                # Reasoning models sometimes answer a tool result with no
+                # visible text. smolagents then retried and the model
+                # called the same tool again (live check: one 'open
+                # goole.com' opened it 3 times). End the turn instead.
+                content = "Done."
             if tools_to_call_from and not message.tool_calls and content:
                 from smolagents.models import (  # type: ignore
                     ChatMessageToolCall,

@@ -47,7 +47,7 @@ checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
 ============================================================ -->
 
-Next ID: #56
+Next ID: #58
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -166,6 +166,7 @@ to see.
 - #37 — Clear test entries from idea_feedback.json · 2026-11-09 · [DONE.md](DONE.md)
 - #54 — Judge replies came back empty on Groq reasoning models · 2026-11-09 · [DONE.md](DONE.md)
 - #55 — Chat and event turns failed on Groq (tool-call rejections) · 2026-11-09 · [DONE.md](DONE.md)
+- #57 — Repeated approved calls; declined tool ideas asked again · 2026-11-09 · [DONE.md](DONE.md)
 
 ---
 
@@ -799,6 +800,30 @@ Editor in the profile; route osascript/open through a daemon-side allow-list
 of verbs (notify, open URL/file); or accept it as covered by human review of
 the source (rule 7b). Decide with the user.
 Verify: a generated tool that tries `osascript -e 'tell application "Terminal" to do script "touch ~/x"'` is blocked (or the decision to accept is recorded).
+Deviations:
+
+---
+
+#56 — Review and remove remembered denials [ ]
+Wave: — · Agent: _ · Added: 2026-11-09 · Source: user
+Ask: "I need a way to remove the denials too." Declined tool ideas are now
+remembered and block reworded repeats (`ai/idea_match.py`, the shared
+`IdeaFeedback` in `~/.bot-inator/idea_feedback.json`). The user needs to see
+what's remembered and un-decline an idea (e.g. after changing their mind
+about an iMessage send tool) without editing the JSON by hand.
+Approach: `GET /api/ideas/declined` (token-protected, #27) listing each
+declined idea (name, description, when, how many times); `DELETE
+/api/ideas/declined/{name}` removing every entry with that name (and
+`POST .../clear` for all), saved atomically through `IdeaFeedback`. A
+"Declined ideas" section in the Tool Manager (or Settings) with a Remove
+button per row and "Clear all" with a confirmation. Also clear the
+matcher's embedding cache so a removed idea stops matching at once.
+Verify:
+⚬ Remove `send_imessage` in the app → the next send-iMessage build card is
+  shown again (one card), and `idea_feedback.json` no longer has it.
+⚬ pytest: list/remove/clear routes (401 without token), matcher no longer
+  matches after removal; non-vacuity: skip the cache clear → test fails.
+⚬ swiftc typecheck.
 Deviations:
 
 ---

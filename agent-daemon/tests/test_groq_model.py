@@ -101,3 +101,17 @@ def test_tool_call_rejection_is_retried_once() -> None:
     with pytest.raises(RuntimeError):
         other.generate([], tools_to_call_from=[object()])
     assert other.calls == 1
+
+
+def test_empty_reply_after_tool_result_ends_the_turn() -> None:
+    m = _model(ChatMessage(role="assistant", content=""))
+    history = [{"role": "user", "content": "open x"}, {"role": "tool-response", "content": "ok"}]
+    out = m.generate(history, tools_to_call_from=[object()])
+    assert out.tool_calls[0].function.name == "final_answer"
+    assert out.tool_calls[0].function.arguments == {"answer": "Done."}
+
+
+def test_empty_reply_before_any_tool_is_left_alone() -> None:
+    m = _model(ChatMessage(role="assistant", content=""))
+    out = m.generate([{"role": "user", "content": "hi"}], tools_to_call_from=[object()])
+    assert not out.tool_calls

@@ -51,6 +51,7 @@ from ai.open_help import (
 # boots cleanly when ``settings.provider == "local"`` and the optional
 # Groq dependency tree is missing.
 from config import GROQ_DEFAULT_MODELS, settings
+from ai.idea_match import DeclinedIdeaMatcher, make_sync_judge
 from ai.friction import (
     FRICTION_JUDGE_SYSTEM_PROMPT,
     FRICTION_SYSTEM_PROMPT,
@@ -317,6 +318,9 @@ async def lifespan(app: FastAPI):
         generated_tools_dir=settings.generated_tools_dir,
         pattern_recognizer=pattern_recognizer,
         idea_sources=idea_sources,
+    )
+    orchestrator.declined_matcher = DeclinedIdeaMatcher(
+        idea_feedback, judge=make_sync_judge(detection_engine),
     )
     set_meta_tool_context(
         orchestrator=orchestrator,

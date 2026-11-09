@@ -101,3 +101,73 @@ def test_null_kwargs_are_dropped_so_defaults_apply() -> None:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=2)
         loop.close()
+
+
+@tool
+def poke_tool(target: str) -> str:
+    """Do something with side effects.
+
+    Args:
+        target: What to poke.
+    """
+    return f"poked:{target}"
+
+
+def _running_loop():
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    return loop, thread
+
+
+def _stop(loop, thread) -> None:
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(timeout=2)
+    loop.close()
+
+
+def test_same_side_effect_runs_once_per_turn() -> None:
+    """Live check: one "open goole.com" opened it 3 times in one turn."""
+    loop, thread = _running_loop()
+    requests: list[str] = []
+    try:
+        orch = _fake_orchestrator(loop, requests)
+        orch._turn_done = {}
+        wrapped = orch._wrap_tool_for_approval(poke_tool)
+        assert wrapped.forward(target="a") == "poked:a"
+        again = wrapped.forward(target="a")
+        assert again["reason"] == "already_done_this_turn"
+        assert again["result"] == "poked:a"
+        assert wrapped.forward(target="b") == "poked:b"  # different args run
+        assert requests == ["poke_tool", "poke_tool"]
+        orch._turn_done = {}  # next turn
+        assert wrapped.forward(target="a") == "poked:a"
+    finally:
+        _stop(loop, thread)
+
+
+def test_declined_tool_idea_is_not_asked_again() -> None:
+    """Live check: the user kept denying a "send iMessage" build card."""
+    from types import SimpleNamespace
+
+    from ai.open_help import IdeaFeedback
+    from tools import AVAILABLE_TOOLS
+
+    feedback = IdeaFeedback()
+    feedback.record("send_imessage", "Send an iMessage to a phone number with text.", False)
+    meta = next(t for t in AVAILABLE_TOOLS if t.name == "generate_custom_tool")
+    loop, thread = _running_loop()
+    requests: list[str] = []
+    try:
+        orch = _fake_orchestrator(loop, requests)
+        orch.idea_sources = [SimpleNamespace(feedback=feedback)]
+        wrapped = orch._wrap_tool_for_approval(meta)
+        out = wrapped.forward(
+            tool_name="send_imessage_reply",
+            description="Send an iMessage reply to a phone number with the given text.",
+            expected_logic="osascript",
+        )
+        assert out["error"] == "user_declined_before"
+        assert requests == []
+    finally:
+        _stop(loop, thread)

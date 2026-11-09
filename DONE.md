@@ -902,3 +902,34 @@ Results: `tests/test_groq_model.py` (5) and a null-argument test in
 → "Your shortcuts are: Open App, What's a shortcut?, Take a Break, Text Last
 Image, Shazam shortcut"; no 400s in the log.
 Deviations: none.
+
+---
+
+#57 — Repeated approved calls; declined tool ideas asked again [x]
+Wave: live checks (runner) · Added: 2026-11-09 · Source: user ("it opened goole.com 3 times"; "i keep denying send imessage … it should just remember i denied it and stop asking me"; "we should not let a reworded one be asked")
+Cause 1: after `open_url` ran, GPT-OSS replied with no visible text;
+smolagents treated that as a parse error and the model called `open_url`
+again, three times in one turn.
+Cause 2: `send_imessage` was never registered (since April), so for every
+incoming iMessage the responder asked to *generate* a send tool: one build
+card per message, and denials were not consulted.
+Fix (`ai/orchestrator.py`, new `ai/idea_match.py`):
+- An empty reply after a tool result ends the turn ("Done.").
+- A side-effecting call with the same tool and arguments runs at most once
+  per turn (`_turn_done`); a repeat returns the first result, no approval.
+- Before any `generate_custom_tool` approval, `_previously_declined` asks
+  `DeclinedIdeaMatcher`: same name / word overlap → declined; model2vec
+  (`minishlab/potion-base-8M`, local) cosine ≥0.80 → declined; 0.55–0.80 →
+  one judge call ("is this the same tool?"). Declined → error
+  `user_declined_before`, no card. Without model2vec only names/word overlap
+  count. `model2vec` added to requirements.
+- `send_imessage` stays unregistered (the user doesn't want it; others
+  might, and their own approve/deny now sticks). iMessages still reach the
+  agent.
+Results: tests `test_tool_wrapping.py` (+3), `test_groq_model.py` (+2),
+`test_idea_match.py` (5). Real check (user's 7 send_imessage denials, Groq
+judge): 8/8: "send a text message", "reply to the iMessage sender", "text
+someone", a reworded Chrome↔Claude switcher → declined; "read my
+iMessages", "send an email", "add a calendar event", "file invoices" →
+allowed. Removing denials is #56.
+Deviations: none.
