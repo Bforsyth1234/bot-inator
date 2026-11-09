@@ -47,7 +47,7 @@ checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
 ============================================================ -->
 
-Next ID: #58
+Next ID: #59
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -595,6 +595,8 @@ Results (wave 1, 2026-11-09):
 Deviations: `shortcuts run` has no stdin input, so `input_text` goes to a temp file
 passed as `--input-path` (deleted after). Output is read from stdout; the live
 check confirms that.
+Live (2026-11-09): "list my shortcuts" → the 5 Shortcuts, no card (after
+#55). Still to do: run one, and one that returns text.
 
 ---
 
@@ -626,6 +628,8 @@ Deviations: Kind filters use `kMDItemContentTypeTree` (matches subtypes). Only t
 1,000 matches are stat'ed, so "newest first" is within those. The runner
 changed the test to import the module via `importlib` (the package attribute
 `tools.find_files` is the tool once registered).
+Live (2026-11-09): "find my latest invoice PDF" → `find_files` ran and
+answered with no card. ✔
 
 ---
 
@@ -734,6 +738,72 @@ Results (wave 1, 2026-11-09):
 Deviations: `open_app` passes the resolved bundle path to `open -a`, not the raw name.
 Found: the drafting prompt printed `from tools.<tool name> import …`, wrong for
 tools in shared modules; fixed by the runner at wave close (see #48).
+Live (2026-11-09): "what windows do I have open?" → windows with titles
+(Screen Recording already granted), no card. Still to do: "open Numbers".
+
+---
+
+#58 — Read the active browser tab's page text [ ]
+Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
+Ask: "does the app see whats in the browser?" Today `read_active_tab`
+returns only the URL and title. The user wants the agent to read what is
+on the page (option 1 of three offered: page text via AppleScript, not a
+server-side fetch and not tab-change events).
+DECISIONS (user + assistant, 2026-11-09):
+1. NEW READ-ONLY TOOL `read_active_tab_text(max_chars: int = 8000) -> dict`
+   in `tools/read_active_tab.py`, beside `read_active_tab`. Goes in
+   `READ_ONLY_TOOL_NAMES` (it only reads; rule 7a).
+2. HOW: AppleScript `execute javascript "document.body.innerText"` on the
+   active tab (Chrome: `execute front window's active tab javascript …`;
+   Safari: `do JavaScript … in current tab of front window`). Logged-in
+   pages work because it reads the user's own tab. No server-side fetch.
+3. SETUP THE USER DOES ONCE: Chrome → View → Developer → Allow JavaScript
+   from Apple Events; Safari → Develop → Allow JavaScript from Apple
+   Events. When it is off, return an `error` that names the exact menu
+   item, so the agent can tell the user.
+4. FRONTMOST BROWSER FIRST: both tools ask the browser that is frontmost
+   (or most recently active) first, then fall back to Chrome → Safari.
+   Today Chrome always wins even when the user is looking at Safari.
+5. TRUNCATE to `max_chars` (cap 20,000), collapse whitespace, and return
+   `{"url", "title", "browser", "text", "truncated": bool}`.
+6. PRIVACY (invariant 7c, same rule as #31): with a cloud provider on the
+   main engine, `text` is replaced by the #31 placeholder unless
+   `AGENT_CLOUD_PERSONAL_TEXT=1`. URL and title are unchanged (they
+   already go to the cloud today).
+7. SENSITIVE SITES ARE NEVER READ: a fixed blocklist of host patterns
+   (banks, password managers such as `*.1password.com`, `vault.bitwarden.com`,
+   `accounts.google.com`, `*.okta.com`, any `chrome://` / `about:` page)
+   returns `{"error": "page is on the sensitive-site list"}` without
+   running JavaScript.
+8. Only the agent calls it, on demand. No event, no polling (that was
+   option 3, not chosen).
+Files:
+⚬ OWNED: agent-daemon/tools/read_active_tab.py,
+  agent-daemon/tests/test_read_active_tab_text.py
+⚬ EDITED (additive): agent-daemon/ai/privacy.py (reuse the placeholder
+  and `personal_text_allowed()`; add nothing else).
+⚬ Runner registers at wave close (rule 9): `read_active_tab_text` in
+  `AVAILABLE_TOOLS` and `READ_ONLY_TOOL_NAMES`; LIVING_SPEC §6 row
+  "`read_active_tab_text` ✅ AppleScript JS → innerText of the active tab,
+  truncated; cloud placeholder per #31".
+Approach: Run the script through the existing `_run_osascript` with the JS
+passed as an argv item, not interpolated. Detect the "JavaScript from Apple
+Events is turned off" error text from each browser and map it to decision 3.
+Fallback if `execute javascript` proves unreliable in Chrome: read the
+selection-free `innerText` via `osascript -l JavaScript` (JXA), same output.
+Verify:
+⚬ Tests with `subprocess.run` mocked: Chrome text returned and truncated;
+  Safari when it is frontmost; JS-disabled error names the menu item;
+  blocklisted host never calls osascript; cloud provider without opt-in →
+  placeholder, with `AGENT_CLOUD_PERSONAL_TEXT=1` → text; gate check (in
+  `READ_ONLY_TOOL_NAMES`) with the rule-5 non-vacuity flip.
+⚬ pytest gate (rule 8).
+⚬ Live: turn on the Chrome setting, open a news article, ask "summarize
+  the page I'm on" → summary of that page, no approval card. With the
+  setting off → the agent says which menu item to turn on. Safari in
+  front with Chrome also open → Safari's page.
+Time: about 1 hour.
+Deviations:
 
 ---
 
@@ -1118,6 +1188,8 @@ Results (wave 4, 2026-11-09):
   already Deny. swiftc clean.
 Deviations: when a new request replaces an open window, the old one isn't denied; it
 times out as before.
+Live (2026-11-09): red X on an open_url card → `user_denied`, nothing
+opened. ✔ Still to do: the code review window's red X.
 
 ---
 
@@ -1141,6 +1213,8 @@ Results (wave 4, 2026-11-09):
   the real file passed (mutation of the changed-only guard failed 2 checks).
 Deviations: send_imessage now sends `edited_args` only when something changed (same
 daemon result).
+Live (2026-11-09): open_url card edited example.com → example.org →
+example.org opened once. ✔ Other cards still to check.
 
 ### Memory
 
