@@ -124,6 +124,24 @@ class DeclinedIdeaMatcher:
                 self._cache[text] = arr / norm
         return [self._cache[t] for t in texts]
 
+    def forget(self, entries: Sequence[dict[str, Any]]) -> int:
+        """Drop cached vectors of removed (un-declined) ideas (#56).
+
+        Returns how many cache entries were dropped.
+        """
+        dropped = 0
+        with self._lock:
+            for entry in entries:
+                text = idea_text(str(entry.get("tool_name") or ""),
+                                 str(entry.get("description") or ""))
+                if self._cache.pop(text, None) is not None:
+                    dropped += 1
+        return dropped
+
+    def clear_cache(self) -> None:
+        with self._lock:
+            self._cache.clear()
+
     # ---- matching -----------------------------------------------------
 
     def _declined(self) -> list[dict[str, Any]]:

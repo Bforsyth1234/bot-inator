@@ -359,3 +359,189 @@ return out
     assert proxy.forward() == {
         "status": "ok", "osascript": "2", "ls": "PermissionError", "sh": "PermissionError",
     }
+
+
+# ---- #53: Apple Events and LaunchServices -----------------------------------
+
+import json as _json
+import subprocess as _subprocess
+
+_RUN_BODY = """
+import json, subprocess
+try:
+    p = subprocess.run(json.loads(arg), capture_output=True, text=True, timeout=40)
+    return {"rc": p.returncode, "out": p.stdout, "err": p.stderr}
+except OSError as exc:
+    return {"rc": None, "err": type(exc).__name__}
+"""
+
+_LSOPEN_BODY = """
+import ctypes
+cf = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+cs = ctypes.CDLL('/System/Library/Frameworks/CoreServices.framework/CoreServices')
+cf.CFURLCreateWithBytes.restype = ctypes.c_void_p
+cf.CFURLCreateWithBytes.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long,
+                                    ctypes.c_uint32, ctypes.c_void_p]
+cs.LSOpenCFURLRef.restype = ctypes.c_int32
+cs.LSOpenCFURLRef.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+b = b'botinator-no-such-scheme:x'
+return {"status": cs.LSOpenCFURLRef(cf.CFURLCreateWithBytes(None, b, len(b), 0x08000100, None), None)}
+"""
+
+
+@pytest.fixture()
+def opened(monkeypatch) -> list[list[str]]:
+    """Record what the daemon-side open proxy would run; never open anything."""
+    calls: list[list[str]] = []
+
+    def fake_run_open(argv: list[str]) -> dict:
+        calls.append(list(argv))
+        return {"rc": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(tool_sandbox, "_run_open", fake_run_open)
+    return calls
+
+
+def _run(proxy: Any, *cmd: str) -> dict:
+    return proxy.forward(arg=_json.dumps(list(cmd)))
+
+
+def _app_running(name: str) -> bool:
+    return _subprocess.run(["/usr/bin/pgrep", "-xq", name]).returncode == 0
+
+
+def test_profile_denies_risky_apple_events_and_lsopen(tmp_path) -> None:
+    work = tmp_path / "w"
+    text = tool_sandbox.build_profile(home=tmp_path, work=work, python=sys.executable,
+                                      network=False, proxy_socket=Path("/tmp/x/p.sock"))
+    assert "(deny lsopen)" in text
+    deny_ae = next(line for line in text.splitlines() if line.startswith("(deny appleevent-send"))
+    for bid in ("com.apple.Terminal", "com.googlecode.iterm2", "com.apple.ScriptEditor2",
+                "com.apple.systemevents"):
+        assert f'(appleevent-destination "{bid}")' in deny_ae
+    for bid in ("com.apple.Notes", "com.apple.reminders", "com.apple.iCal"):
+        assert bid not in text  # built-ins drive these from generated tools
+    exec_allow = next(line for line in text.splitlines() if line.startswith("(allow process-exec"))
+    assert "/usr/bin/open" not in exec_allow
+    assert f'(literal "{work / "bin" / "open"}")' in exec_allow
+    assert f'(subpath "{work / "bin"}")' in text  # shims are not writable
+    assert '(remote unix-socket (path-literal "/tmp/x/p.sock"))' in text
+
+
+@needs_sandbox
+def test_terminal_do_script_is_blocked(tmp_path, home, opened) -> None:
+    marker = tmp_path / "terminal-escape-marker"
+    proxy = _proxy(tmp_path, "term_tool", _RUN_BODY)
+    script = (f'with timeout of 10 seconds\ntell application "Terminal" to do script '
+              f'"touch {marker}"\nend timeout')
+    out = _run(proxy, "osascript", "-e", script)
+    time.sleep(1)
+    assert not marker.exists()
+    assert out["rc"] != 0
+    # Running: the Apple Event is denied (-600). Not running: launching it is (-54).
+    assert ("-600" if _app_running("Terminal") else "-54") in out["err"]
+    assert opened == []  # the osascript shim did not launch Terminal
+
+
+@needs_sandbox
+def test_system_events_is_blocked(tmp_path, home, opened) -> None:
+    proxy = _proxy(tmp_path, "sysev_tool", _RUN_BODY)
+    # A read-only event: nothing is typed even if the deny were missing.
+    out = _run(proxy, "osascript", "-e",
+               'with timeout of 10 seconds\ntell application "System Events" to count processes\nend timeout')
+    assert out["rc"] != 0
+    assert ("-600" if _app_running("System Events") else "-54") in out["err"]
+    assert opened == []
+
+
+@needs_sandbox
+def test_lsopen_is_denied_even_through_ctypes(tmp_path, home) -> None:
+    proxy = _proxy(tmp_path, "ls_tool", _LSOPEN_BODY)
+    assert proxy.forward() == {"status": -54}       # permission error
+
+
+@needs_sandbox
+def test_lsopen_deny_is_non_vacuous(tmp_path, home, monkeypatch) -> None:
+    """Without ``(deny lsopen)`` LaunchServices answers (no app for the scheme)."""
+    real = tool_sandbox.build_profile
+    monkeypatch.setattr(tool_sandbox, "build_profile",
+                        lambda **kw: real(**kw).replace("(deny lsopen)\n", ""))
+    proxy = _proxy(tmp_path, "ls_tool", _LSOPEN_BODY)
+    assert proxy.forward() == {"status": -10814}    # kLSApplicationNotFoundErr
+
+
+@needs_sandbox
+def test_open_goes_through_the_checked_proxy(tmp_path, home, opened) -> None:
+    proxy = _proxy(tmp_path, "open_tool", _RUN_BODY)
+    doc = home / "Documents" / "note.txt"
+    doc.write_text("hi")
+    cmd_file = home / "evil.command"
+    cmd_file.write_text(f"#!/bin/sh\ntouch {tmp_path / 'opened-marker'}\n")
+    bare_exec = home / "evil"
+    bare_exec.write_text("#!/bin/sh\n")
+    bare_exec.chmod(0o755)
+    fake_app = home / "Applications" / "Evil.app"
+    (fake_app / "Contents" / "MacOS").mkdir(parents=True)
+
+    assert _run(proxy, "open", "https://example.com/a")["rc"] == 0
+    assert _run(proxy, "open", "Documents/note.txt")["rc"] == 0     # relative to the child's cwd
+    assert opened == [["https://example.com/a"], [str(doc)]]
+    opened.clear()
+
+    refused = [
+        ("open", str(cmd_file)),
+        ("open", "-a", "TextEdit", str(cmd_file)),
+        ("open", f"file://{cmd_file}"),
+        ("open", str(bare_exec)),
+        ("open", "-a", "Terminal", str(doc)),
+        ("open", "-b", "com.apple.Terminal", str(doc)),
+        ("open", "-a", "iTerm"),
+        ("open", "ssh://localhost"),
+        ("open", "-a", str(fake_app)),
+        ("open", str(fake_app)),
+        ("open", "-a", "TextEdit", "--args", "x"),
+    ]
+    for cmd in refused:
+        out = _run(proxy, *cmd)
+        assert out["rc"] == 1 and "refused by the tool sandbox" in out["err"], (cmd, out)
+    assert opened == []
+    assert not (tmp_path / "opened-marker").exists()
+    # The real binary cannot be run directly from the child.
+    assert _run(proxy, "/usr/bin/open", "https://example.com")["err"] == "PermissionError"
+
+
+def test_check_open_args_rewrites_apps_to_checked_paths(tmp_path) -> None:
+    writable = (tmp_path,)
+    assert tool_sandbox.check_open_args(["-g", "-a", "TextEdit", "https://x.org"], str(tmp_path),
+                                        writable) == \
+        ["-g", "-a", "/System/Applications/TextEdit.app", "https://x.org"]
+    with pytest.raises(tool_sandbox.OpenRefused):
+        tool_sandbox.check_open_args(["-a", "No Such App 53"], str(tmp_path), writable)
+    with pytest.raises(tool_sandbox.OpenRefused):   # handler is Terminal
+        tool_sandbox.check_open_args(["x-man-page://ls"], str(tmp_path), writable)
+
+
+def test_launch_requests_skip_denied_apps(tmp_path, opened, monkeypatch) -> None:
+    monkeypatch.setattr(tool_sandbox, "_is_running", lambda path: False)
+    proxy = tool_sandbox._OpenProxy(tmp_path, tmp_path / "w")
+    try:
+        out = proxy.answer({"cmd": "launch", "cwd": str(tmp_path),
+                            "apps": ["Notes", "Terminal", "System Events", "Script Editor"],
+                            "ids": ["com.apple.reminders", "com.googlecode.iterm2"]})
+    finally:
+        proxy.close()
+    assert out["launched"] == ["/System/Applications/Notes.app",
+                               "/System/Applications/Reminders.app"]
+    assert opened == [["-g", "-a", "/System/Applications/Notes.app"],
+                      ["-g", "-a", "/System/Applications/Reminders.app"]]
+
+
+@needs_sandbox
+def test_osascript_shim_asks_to_launch_and_still_runs(tmp_path, home, opened, monkeypatch) -> None:
+    monkeypatch.setattr(tool_sandbox, "_is_running", lambda path: False)
+    script = home / "s.applescript"
+    script.write_text('-- tell application "Notes"\nreturn 1 + 1\n')
+    proxy = _proxy(tmp_path, "osa_tool", _RUN_BODY)
+    out = _run(proxy, "osascript", str(script))
+    assert out["rc"] == 0 and out["out"].strip() == "2"
+    assert opened == [["-g", "-a", "/System/Applications/Notes.app"]]

@@ -181,6 +181,96 @@ def set_meta_tool_context(
     _GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# ---- idea provenance (#61) -------------------------------------------------
+#
+# At install time ``generate_custom_tool`` writes
+# ``<generated>/.provenance/<tool_name>.json``: where the idea came from, so
+# the Tool Manager detail view can say WHEN a generated tool runs. The dot
+# directory is skipped by ``Orchestrator.load_dynamic_tools`` (it ignores
+# every dot-name and directory) and is never added to the nested git repo
+# (``_git_commit`` stages explicit paths only): provenance can quote local
+# event text, and it is metadata, not reviewed code. Tools installed before
+# #61 have no file and show "unknown".
+
+PROVENANCE_DIRNAME = ".provenance"
+_EVIDENCE_MAX_CHARS = 1000
+# The idea behind the current pattern turn, set by the orchestrator's
+# ``pattern_detected`` branch via :func:`set_current_idea`. Paired with the
+# turn's event id so a stale idea from an earlier turn is never attached.
+_CURRENT_IDEA: Optional[tuple[str, dict[str, Any]]] = None
+
+
+def set_current_idea(idea: Optional[dict[str, Any]], *, event_id: str) -> None:
+    """Record the ``pattern_detected`` metadata driving turn ``event_id``.
+
+    ``None`` clears it. Only the idea fields provenance needs are kept.
+    """
+    global _CURRENT_IDEA
+    if not idea:
+        _CURRENT_IDEA = None
+        return
+    keep = ("source", "trigger", "tool_name", "description", "expected_logic", "evidence")
+    _CURRENT_IDEA = (str(event_id), {k: idea[k] for k in keep if idea.get(k) is not None})
+
+
+def clear_current_idea() -> None:
+    set_current_idea(None, event_id="")
+
+
+def provenance_path(generated_dir: Path, tool_name: str) -> Path:
+    return Path(generated_dir) / PROVENANCE_DIRNAME / f"{tool_name}.json"
+
+
+def _current_idea_for_turn(event_id: Optional[str]) -> Optional[dict[str, Any]]:
+    if _CURRENT_IDEA is None or event_id is None:
+        return None
+    idea_event, idea = _CURRENT_IDEA
+    return dict(idea) if idea_event == event_id else None
+
+
+def _build_provenance(
+    tool_name: str, description: str, expected_logic: str, user_edited: bool,
+) -> dict[str, Any]:
+    from datetime import datetime, timezone
+
+    orch = _ORCHESTRATOR
+    event_id = getattr(orch, "_current_event_id", None)
+    turn_kind = getattr(orch, "_turn_kind", None) or "unknown"
+    idea = _current_idea_for_turn(event_id)
+    if idea and isinstance(idea.get("evidence"), str):
+        idea["evidence"] = idea["evidence"][:_EVIDENCE_MAX_CHARS]
+    return {
+        "version": 1,
+        "tool_name": tool_name,
+        "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "turn_kind": turn_kind,
+        "event_id": event_id,
+        "source": (idea or {}).get("source") or ("chat" if turn_kind == "chat" else None),
+        "trigger": (idea or {}).get("trigger"),
+        "idea": idea,
+        "requested": {"description": description, "expected_logic": expected_logic},
+        "user_edited": bool(user_edited),
+    }
+
+
+def _save_provenance(
+    tool_name: str, description: str, expected_logic: str, user_edited: bool,
+) -> Optional[Path]:
+    """Best-effort: a provenance failure never fails the install."""
+    if _GENERATED_DIR is None:
+        return None
+    import json
+
+    try:
+        record = _build_provenance(tool_name, description, expected_logic, user_edited)
+        path = provenance_path(_GENERATED_DIR, tool_name)
+        _atomic_write(path, json.dumps(record, indent=2, default=str))
+        return path
+    except Exception:
+        logger.exception("Failed to save provenance for %s", tool_name)
+        return None
+
+
 def _strip_fences(text: str) -> str:
     """Pull Python source out of a fenced markdown block if the model added one.
 
@@ -931,6 +1021,9 @@ def generate_custom_tool(
     except Exception as exc:
         logger.exception("Failed to install generated tool")
         return {"status": "error", "tool_name": tool_name, "error": str(exc)}
+    _save_provenance(
+        tool_name, description, expected_logic, bool(response.edited_code),
+    )
 
     git_ok, git_summary = _git_commit(
         _GENERATED_DIR,

@@ -784,6 +784,10 @@ class Orchestrator:
             meta = event.metadata or {}
             self._current_builtin_idea = meta if meta.get("builtin_tool") else None
             self._turn_kind = "pattern"
+            # #61: a tool installed this turn records which idea led to it.
+            from tools import meta_tool_generator
+
+            meta_tool_generator.set_current_idea(meta, event_id=event_id)
             try:
                 result = await self._run_agent(event_id, prompt, max_steps=4)
             finally:

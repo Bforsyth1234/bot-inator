@@ -22,7 +22,22 @@ Sandbox profile (:func:`build_profile`):
   as ``network_allowed`` / ``sandbox_note`` on the proxy). A dynamic import
   cannot grant network: the profile is fixed when the tool loads;
 * exec: only the Python interpreter, ``/usr/bin/osascript``,
-  ``/usr/bin/open``, ``/usr/bin/shortcuts`` and ``/usr/bin/mdfind``.
+  ``/usr/bin/shortcuts``, ``/usr/bin/mdfind`` and two shims on ``PATH``
+  (``open``, ``osascript``; see below);
+* Apple Events (todo #53): denied to Terminal, iTerm, Script Editor, System
+  Events and Finder (:data:`DENIED_APPLE_EVENT_TARGETS`), so ``osascript``
+  can still notify and drive Notes / Reminders / Calendar but cannot make
+  another app run a shell command;
+* LaunchServices opens (``lsopen``): denied. Every open/launch of a URL,
+  file or app (``/usr/bin/open``, ``NSWorkspace``, ctypes ``LSOpen*``,
+  AppleScript ``open location``) fails inside the child. ``open`` on
+  ``PATH`` is a shim that asks the daemon over a per-call unix socket; the
+  daemon checks the arguments (:func:`check_open_args`: no Terminal-like
+  apps, no ``.command``/``.sh``/``.app``/executable targets, no ``ssh:``
+  URLs, no apps the child could have written) and runs ``/usr/bin/open``.
+  The ``osascript`` shim asks the daemon to launch the apps a script
+  ``tell``s (the child cannot launch them itself) and then runs
+  ``/usr/bin/osascript``.
 
 The child gets a minimal environment (no API keys) and ``dotenv`` is
 disabled inside it, so importing ``config`` cannot pull the daemon's
@@ -49,14 +64,18 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +99,37 @@ NETWORK_MODULES: frozenset[str] = frozenset({
     "poplib", "xmlrpc",
 })
 ALLOWED_EXECUTABLES: tuple[str, ...] = (
-    "/usr/bin/osascript", "/usr/bin/open", "/usr/bin/shortcuts", "/usr/bin/mdfind",
+    "/usr/bin/osascript", "/usr/bin/shortcuts", "/usr/bin/mdfind",
 )
+# Apple Events the child may not send (todo #53): apps that run a shell
+# command for the sender (or open a .command file in one).
+DENIED_APPLE_EVENT_TARGETS: tuple[str, ...] = (
+    "com.apple.Terminal", "com.googlecode.iterm2", "com.apple.ScriptEditor2",
+    "com.apple.systemevents", "com.apple.finder",
+)
+# Apps the open proxy will not open anything with or launch.
+DENIED_OPEN_APPS: frozenset[str] = frozenset({
+    "com.apple.terminal", "com.googlecode.iterm2", "com.apple.scripteditor2",
+    "com.apple.systemevents", "com.apple.automator", "com.apple.automator.automator",
+})
+# Targets the open proxy refuses by suffix: scripts, apps, bundles that
+# install or run, Terminal settings files, and location files (an .inetloc
+# can hold an ssh: URL, a .fileloc a .command path).
+DENIED_OPEN_SUFFIXES: frozenset[str] = frozenset({
+    ".command", ".tool", ".sh", ".bash", ".zsh", ".csh", ".tcsh", ".ksh",
+    ".fish", ".py", ".pyw", ".pl", ".rb", ".php", ".js", ".jxa", ".app",
+    ".terminal", ".term", ".scpt", ".scptd", ".applescript", ".workflow",
+    ".action", ".prefpane", ".saver", ".bundle", ".plugin", ".kext", ".pkg",
+    ".mpkg", ".appex", ".xpc", ".itermcolors", ".inetloc", ".webloc",
+    ".fileloc", ".url", ".shortcut", ".mobileconfig",
+})
+DENIED_URL_SCHEMES: frozenset[str] = frozenset({
+    "ssh", "telnet", "rlogin", "sftp", "x-man-page", "iterm", "iterm2",
+    "applescript", "terminal", "shortcuts", "vnc",
+})
+# ``open`` flags the proxy passes on (no --args, --env, --stdin, -f, ...).
+_OPEN_PLAIN_FLAGS = frozenset("gjnFRWet")
+OPEN_TIMEOUT_SECONDS = 30.0
 # Under $HOME: writable except these (relative to $HOME).
 _WRITE_DENIED_IN_HOME: tuple[str, ...] = ("Library", ".ssh", ".bot-inator")
 _SHELL_STARTUP_FILES: tuple[str, ...] = (
@@ -172,12 +220,15 @@ def _protected_repo_dir(home: Path) -> Path:
 def build_profile(
     *, home: Path, work: Path, python: str, network: bool,
     extra_read_denied: tuple[Path, ...] = (),
+    proxy_socket: Optional[Path] = None,
 ) -> str:
     base = os.path.realpath(sys.base_prefix)
     daemon = Path(os.path.realpath(_DAEMON_ROOT))
+    shims = work / "bin"
     write_denied = [home / d for d in _WRITE_DENIED_IN_HOME]
     write_denied.append(_protected_repo_dir(home))
     write_denied.append(daemon / "tools" / "generated")
+    write_denied.append(shims)
     write_literals = [home / f for f in _SHELL_STARTUP_FILES]
     read_denied = [home / d for d in _READ_DENIED_IN_HOME]
     read_literals = [daemon / ".env", *extra_read_denied]
@@ -200,10 +251,26 @@ def build_profile(
     ]
     if not network:
         lines.append("(deny network*)")
+        if proxy_socket is not None:
+            lines.append(
+                "(allow network-outbound (remote unix-socket (path-literal "
+                f"{_q(proxy_socket)})))"
+            )
+    # #53: no opening/launching through LaunchServices (the daemon's open
+    # proxy does it after checking the arguments) and no Apple Events to
+    # apps that would run a shell command for the tool.
+    lines.append("(deny lsopen)")
+    lines.append(
+        "(deny appleevent-send "
+        + " ".join(f"(appleevent-destination {_q(b)})" for b in DENIED_APPLE_EVENT_TARGETS)
+        + ")"
+    )
     lines.append("(deny process-exec)")
     lines.append(
         f"(allow process-exec (literal {_q(python)}) (subpath {_q(base)}) "
         + " ".join(f"(literal {_q(p)})" for p in ALLOWED_EXECUTABLES)
+        + " "
+        + " ".join(f"(literal {_q(shims / n)})" for n in _SHIM_NAMES)
         + ")"
     )
     return "\n".join(lines) + "\n"
@@ -215,6 +282,342 @@ def _extra_read_denied() -> tuple[Path, ...]:
     if not override:
         return ()
     return (Path(os.path.realpath(Path(override).expanduser())),)
+
+
+# ---- open / launch proxy (todo #53) ----------------------------------------
+
+_SHIM_NAMES: tuple[str, ...] = ("open", "osascript")
+
+_SHIM_COMMON = r'''
+import json, os, re, socket, sys
+SOCK = %(sock)r
+def _ask(req):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(%(timeout)r)
+    s.connect(SOCK)
+    s.sendall(json.dumps(req).encode("utf-8") + b"\n")
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    s.close()
+    return json.loads(buf.decode("utf-8") or "{}")
+'''
+
+_OPEN_SHIM = r'''
+def main():
+    try:
+        resp = _ask({"cmd": "open", "argv": sys.argv[1:], "cwd": os.getcwd()})
+    except (OSError, ValueError) as exc:
+        sys.stderr.write("open: sandbox open proxy unavailable: %s\n" % exc)
+        return 1
+    sys.stdout.write(resp.get("stdout") or "")
+    sys.stderr.write(resp.get("stderr") or "")
+    return int(resp.get("rc", 1))
+sys.exit(main())
+'''
+
+# The child cannot launch apps (lsopen is denied), so before running a
+# script the shim asks the daemon to launch the apps it talks to.
+_OSASCRIPT_SHIM = r'''
+_APP = re.compile(r'application\s+(id\s+)?"([^"]+)"|Application\(\s*[\'"]([^\'"]+)[\'"]', re.I)
+def _scan(args):
+    texts, apps, ids = [], [], []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "-e" and i + 1 < len(args):
+            texts.append(args[i + 1]); i += 2; continue
+        if a in ("-l", "-s") and i + 1 < len(args):
+            i += 2; continue
+        if a == "--":
+            break
+        if not a.startswith("-"):
+            try:
+                if os.path.getsize(a) < 1 << 20:
+                    with open(a, "r", encoding="utf-8", errors="replace") as fh:
+                        texts.append(fh.read())
+            except OSError:
+                pass
+            break
+        i += 1
+    for text in texts:
+        for m in _APP.finditer(text):
+            if m.group(1):
+                ids.append(m.group(2))
+            else:
+                apps.append(m.group(2) or m.group(3))
+    return sorted(set(apps)), sorted(set(ids))
+apps, ids = _scan(sys.argv[1:])
+if apps or ids:
+    try:
+        _ask({"cmd": "launch", "apps": apps, "ids": ids})
+    except (OSError, ValueError):
+        pass
+os.execv("/usr/bin/osascript", ["osascript"] + sys.argv[1:])
+'''
+
+
+def _write_shims(bin_dir: Path, sock: Path, python: str) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    common = _SHIM_COMMON % {"sock": str(sock), "timeout": OPEN_TIMEOUT_SECONDS + 15}
+    for name, body in (("open", _OPEN_SHIM), ("osascript", _OSASCRIPT_SHIM)):
+        path = bin_dir / name
+        path.write_text(f"#!{python} -IS\n{common}{body}", encoding="utf-8")
+        path.chmod(0o755)
+
+
+class OpenRefused(ValueError):
+    """The open proxy refused the arguments (the reason is the message)."""
+
+
+def _workspace() -> Any:
+    try:
+        from AppKit import NSWorkspace  # type: ignore
+    except ImportError:  # pragma: no cover - pyobjc ships with the daemon
+        return None
+    return NSWorkspace.sharedWorkspace()
+
+
+def _bundle_id(app_path: str) -> str:
+    try:
+        from Foundation import NSBundle  # type: ignore
+        bundle = NSBundle.bundleWithPath_(app_path)
+        return str(bundle.bundleIdentifier() or "") if bundle is not None else ""
+    except ImportError:  # pragma: no cover
+        return ""
+
+
+def _url_path(url: Any) -> Optional[str]:
+    if url is None:
+        return None
+    path = url.path()
+    return os.path.realpath(str(path)) if path else None
+
+
+def _inside(path: str, roots: tuple[Path, ...]) -> bool:
+    p = Path(os.path.realpath(path))
+    return any(p == r or r in p.parents for r in roots)
+
+
+def _check_app(app_path: Optional[str], what: str, writable: tuple[Path, ...]) -> str:
+    """Refuse a denied app or one the sandboxed child could have written."""
+    if not app_path:
+        raise OpenRefused(f"{what}: application not found")
+    if _bundle_id(app_path).lower() in DENIED_OPEN_APPS:
+        raise OpenRefused(f"{what}: {Path(app_path).name} is not allowed from a sandboxed tool")
+    if _inside(app_path, writable):
+        raise OpenRefused(f"{what}: {app_path} is in a folder the tool can write")
+    return app_path
+
+
+def _resolve_app_name(name: str, cwd: str) -> Optional[str]:
+    if "/" in name:
+        path = os.path.realpath(os.path.join(cwd, os.path.expanduser(name)))
+        return path if os.path.exists(path) else None
+    ws = _workspace()
+    found = ws.fullPathForApplication_(name) if ws is not None else None
+    return os.path.realpath(str(found)) if found else None
+
+
+def _resolve_bundle_id(bid: str) -> Optional[str]:
+    if bid.lower() in DENIED_OPEN_APPS:
+        raise OpenRefused(f"-b {bid} is not allowed from a sandboxed tool")
+    ws = _workspace()
+    return _url_path(ws.URLForApplicationWithBundleIdentifier_(bid)) if ws is not None else None
+
+
+def _default_handler(url_string: str) -> Optional[str]:
+    ws = _workspace()
+    if ws is None:
+        return None
+    from Foundation import NSURL  # type: ignore
+    url = NSURL.URLWithString_(url_string)
+    return _url_path(ws.URLForApplicationToOpenURL_(url)) if url is not None else None
+
+
+def _check_path(path: str, *, explicit_app: bool, writable: tuple[Path, ...]) -> None:
+    name = Path(path).name
+    suffix = Path(path.rstrip("/")).suffix.lower()
+    if suffix in DENIED_OPEN_SUFFIXES:
+        raise OpenRefused(f"refusing to open {name}: {suffix} files can run code")
+    try:
+        st = os.stat(path)
+    except OSError:
+        return  # /usr/bin/open reports the missing file
+    if stat.S_ISREG(st.st_mode) and st.st_mode & 0o111:
+        raise OpenRefused(f"refusing to open {name}: it is executable")
+    ws = _workspace()
+    if not explicit_app and ws is not None:
+        from Foundation import NSURL  # type: ignore
+        handler = _url_path(ws.URLForApplicationToOpenURL_(NSURL.fileURLWithPath_(path)))
+        if handler:
+            _check_app(handler, f"opening {name}", writable)
+
+
+def check_open_args(argv: list[str], cwd: str, writable: tuple[Path, ...]) -> list[str]:
+    """Validate a sandboxed tool's ``open`` arguments; return the argv to run.
+
+    Raises :class:`OpenRefused`. Paths are made absolute (the daemon's cwd is
+    not the child's) and ``-a``/``-b`` become ``-a <checked app path>``.
+    """
+    flags: list[str] = []
+    app: Optional[str] = None
+    targets: list[tuple[str, bool]] = []  # (target, forced URL)
+    i, url_next, rest = 0, False, False
+    while i < len(argv):
+        a = str(argv[i])
+        i += 1
+        if rest or not a.startswith("-") or a == "-":
+            targets.append((a, url_next))
+            url_next = False
+            continue
+        if a == "--":
+            rest = True
+            continue
+        if a.startswith("--") or len(a) != 2:
+            raise OpenRefused(f"open option {a} is not allowed from a sandboxed tool")
+        flag = a[1]
+        if flag in "ab":
+            if i >= len(argv):
+                raise OpenRefused(f"open {a} needs a value")
+            value = str(argv[i])
+            i += 1
+            if app is not None:
+                raise OpenRefused("only one -a/-b is allowed")
+            path = _resolve_app_name(value, cwd) if flag == "a" else _resolve_bundle_id(value)
+            app = _check_app(path, f"open {a} {value}", writable)
+        elif flag == "u":
+            url_next = True
+        elif flag in _OPEN_PLAIN_FLAGS:
+            flags.append(a)
+        else:
+            raise OpenRefused(f"open option {a} is not allowed from a sandboxed tool")
+    out_targets: list[str] = []
+    for target, forced_url in targets:
+        m = re.match(r"^([A-Za-z][A-Za-z0-9+.\-]*):", target)
+        is_url = forced_url or (m is not None and not os.path.exists(os.path.join(cwd, target)))
+        if is_url:
+            scheme = (m.group(1) if m else urlparse(target).scheme).lower()
+            if scheme == "file":
+                path = os.path.realpath(unquote(urlparse(target).path))
+                _check_path(path, explicit_app=app is not None, writable=writable)
+                out_targets.append(path)
+                continue
+            if scheme in DENIED_URL_SCHEMES:
+                raise OpenRefused(f"refusing to open a {scheme}: URL from a sandboxed tool")
+            if app is None:
+                handler = _default_handler(target)
+                if handler:
+                    _check_app(handler, f"opening a {scheme}: URL", writable)
+            out_targets.append(target)
+        else:
+            path = os.path.realpath(os.path.join(cwd, os.path.expanduser(target)))
+            _check_path(path, explicit_app=app is not None, writable=writable)
+            out_targets.append(path)
+    # Targets are absolute paths or scheme: URLs, so none can pass as a flag.
+    return flags + (["-a", app] if app else []) + out_targets
+
+
+def _run_open(argv: list[str]) -> dict:
+    """Run ``/usr/bin/open`` unsandboxed (tests replace this)."""
+    try:
+        done = subprocess.run(
+            ["/usr/bin/open", *argv], capture_output=True, text=True,
+            timeout=OPEN_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return {"rc": 1, "stdout": "", "stderr": "open: timed out\n"}
+    return {"rc": done.returncode, "stdout": done.stdout, "stderr": done.stderr}
+
+
+def _is_running(app_path: str) -> bool:
+    bid = _bundle_id(app_path)
+    if not bid:
+        return False
+    try:
+        from AppKit import NSRunningApplication  # type: ignore
+    except ImportError:  # pragma: no cover
+        return False
+    return len(NSRunningApplication.runningApplicationsWithBundleIdentifier_(bid) or []) > 0
+
+
+def _launch_apps(names: list[str], ids: list[str], cwd: str, writable: tuple[Path, ...]) -> list[str]:
+    """Launch (in the background) the allowed apps an osascript call targets."""
+    launched: list[str] = []
+    for kind, value in [("a", n) for n in names[:8]] + [("b", b) for b in ids[:8]]:
+        try:
+            path = _resolve_app_name(str(value), cwd) if kind == "a" else _resolve_bundle_id(str(value))
+            path = _check_app(path, f"launch {value}", writable)
+        except OpenRefused as exc:
+            logger.info("sandbox launch refused: %s", exc)
+            continue
+        if not _is_running(path):
+            _run_open(["-g", "-a", path])
+            launched.append(path)
+    return launched
+
+
+class _OpenProxy:
+    """Per-call unix socket the child's ``open``/``osascript`` shims talk to."""
+
+    def __init__(self, home: Path, work: Path) -> None:
+        self.writable = (home, work)
+        # AF_UNIX paths are capped at 104 bytes: keep it short, under /tmp.
+        self.dir = Path(os.path.realpath(tempfile.mkdtemp(prefix="tsb-", dir="/tmp")))
+        self.path = self.dir / "p.sock"
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.bind(str(self.path))
+        self._sock.listen(8)
+        threading.Thread(target=self._serve, daemon=True, name="sandbox-open-proxy").start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
+
+    def _handle(self, conn: socket.socket) -> None:
+        try:
+            conn.settimeout(10)
+            data = b""
+            while not data.endswith(b"\n") and len(data) < 1 << 20:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            conn.settimeout(OPEN_TIMEOUT_SECONDS + 10)
+            conn.sendall(json.dumps(self.answer(json.loads(data or b"{}"))).encode("utf-8") + b"\n")
+        except Exception as exc:  # noqa: BLE001 - never kill the proxy thread
+            logger.debug("sandbox open proxy: %s", exc)
+        finally:
+            conn.close()
+
+    def answer(self, req: dict) -> dict:
+        cwd = str(req.get("cwd") or self.writable[0])
+        if req.get("cmd") == "open":
+            try:
+                argv = check_open_args([str(a) for a in req.get("argv") or []], cwd, self.writable)
+            except OpenRefused as exc:
+                logger.info("sandboxed open refused: %s", exc)
+                return {"rc": 1, "stdout": "", "stderr": f"open: refused by the tool sandbox: {exc}\n"}
+            return _run_open(argv)
+        if req.get("cmd") == "launch":
+            names = [str(a) for a in req.get("apps") or []]
+            ids = [str(a) for a in req.get("ids") or []]
+            return {"rc": 0, "launched": _launch_apps(names, ids, cwd, self.writable)}
+        return {"rc": 1, "stderr": "unknown request\n"}
+
+    def close(self) -> None:
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        shutil.rmtree(self.dir, ignore_errors=True)
 
 
 # ---- child ----------------------------------------------------------------
@@ -284,7 +687,7 @@ def _child_env(home: Path, work: Path) -> dict[str, str]:
     env = {
         "HOME": str(home),
         "TMPDIR": str(work / "tmp") + "/",
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PATH": f"{work / 'bin'}:/usr/bin:/bin:/usr/sbin:/sbin",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1",
         "HF_HUB_OFFLINE": "1",
@@ -316,10 +719,12 @@ def _spawn(
     work = Path(os.path.realpath(tempfile.mkdtemp(prefix="tool-sandbox-")))
     (work / "tmp").mkdir()
     python = sys.executable
+    proxy = _OpenProxy(home, work)
+    _write_shims(work / "bin", proxy.path, python)
     profile = work / "profile.sb"
     profile.write_text(build_profile(
         home=home, work=work, python=python, network=network,
-        extra_read_denied=_extra_read_denied(),
+        extra_read_denied=_extra_read_denied(), proxy_socket=proxy.path,
     ), encoding="utf-8")
     stderr_path = work / "stderr.txt"
     stderr_file = open(stderr_path, "wb")
@@ -332,6 +737,7 @@ def _spawn(
         )
     except BaseException:
         stderr_file.close()
+        proxy.close()
         shutil.rmtree(work, ignore_errors=True)
         raise
     lines: "queue.Queue[Optional[str]]" = queue.Queue()
@@ -355,7 +761,7 @@ def _spawn(
         line = lines.get(timeout=timeout)
     except queue.Empty:
         _kill(proc)
-        _cleanup(proc, stderr_file, work, 5.0)
+        _cleanup(proc, stderr_file, work, 5.0, proxy)
         raise ToolSandboxTimeout(
             f"TimeoutError: {tool_name} did not finish within {timeout:g}s (sandboxed)"
         )
@@ -363,6 +769,7 @@ def _spawn(
         proc.wait(timeout=5)
         stderr_file.close()
         tail = stderr_path.read_text("utf-8", "replace").strip().splitlines()
+        proxy.close()
         shutil.rmtree(work, ignore_errors=True)
         raise ToolSandboxError(
             f"SandboxError: {tool_name} exited without a result "
@@ -370,7 +777,7 @@ def _spawn(
         )
     # The child may linger for background threads; reap it off-thread.
     threading.Thread(
-        target=_cleanup, args=(proc, stderr_file, work, linger + 10.0),
+        target=_cleanup, args=(proc, stderr_file, work, linger + 10.0, proxy),
         daemon=True, name=f"sandbox-reap-{tool_name}",
     ).start()
     out = json.loads(line)
@@ -379,7 +786,10 @@ def _spawn(
     return out
 
 
-def _cleanup(proc: subprocess.Popen, stderr_file: Any, work: Path, wait: float) -> None:
+def _cleanup(
+    proc: subprocess.Popen, stderr_file: Any, work: Path, wait: float,
+    proxy: Optional["_OpenProxy"] = None,
+) -> None:
     try:
         proc.wait(timeout=wait)
     except subprocess.TimeoutExpired:
@@ -395,6 +805,8 @@ def _cleanup(proc: subprocess.Popen, stderr_file: Any, work: Path, wait: float) 
             logger.debug("sandboxed tool stderr: %s", text[-2000:])
     except OSError:
         pass
+    if proxy is not None:
+        proxy.close()
     shutil.rmtree(work, ignore_errors=True)
 
 
@@ -518,7 +930,8 @@ def load_sandboxed_tool(
 
 
 __all__ = [
-    "NETWORK_MODULES", "SandboxedTool", "ToolSandboxError", "ToolSandboxTimeout",
+    "DENIED_APPLE_EVENT_TARGETS", "NETWORK_MODULES", "OpenRefused", "SandboxedTool",
+    "check_open_args", "ToolSandboxError", "ToolSandboxTimeout",
     "build_profile", "load_sandboxed_tool", "network_reason", "reset_sandbox_cache",
     "sandbox_available", "sandbox_enabled", "sandbox_problem",
 ]

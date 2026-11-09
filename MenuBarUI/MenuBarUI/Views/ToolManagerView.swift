@@ -117,14 +117,22 @@ final class ToolManagerViewModel: ObservableObject {
 struct ToolManagerView: View {
     @StateObject private var viewModel = ToolManagerViewModel()
     @State private var pendingDelete: AgentTool?
+    /// The row the user clicked; its detail (#61) shows in a sheet.
+    @State private var selectedTool: AgentTool?
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
             content
+            // DECLINED IDEAS (#56): review and remove remembered denials.
+            Divider()
+            DeclinedIdeasView()
         }
         .frame(minWidth: 440, minHeight: 420)
+        .sheet(item: $selectedTool) { tool in
+            ToolDetailView(toolName: tool.name)
+        }
         .task { await viewModel.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: .toolsChanged)) { _ in
             viewModel.refreshSoon()
@@ -164,6 +172,9 @@ struct ToolManagerView: View {
         List {
             ForEach(viewModel.tools) { tool in
                 row(for: tool)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedTool = tool }
+                    .help("Show what \(tool.name) does, when it runs and its source")
             }
         }
         .listStyle(.inset)
@@ -218,6 +229,13 @@ struct ToolManagerView: View {
                 }
             }
             Spacer()
+            Button {
+                selectedTool = tool
+            } label: {
+                Image(systemName: "info.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("Details and source")
             if tool.isGenerated {
                 Toggle("", isOn: .init(
                     get: { tool.isEnabled },

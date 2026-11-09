@@ -217,6 +217,12 @@ removal to the nested git repo (DONE.md #8), and returns 200 with
 |                               | never content).                                    |
 | `ai/privacy.py`               | Replaces personal text (iMessage, mail) in cloud   |
 |                               | engines' prompts unless AGENT_CLOUD_PERSONAL_TEXT=1|
+| `ai/permissions.py`           | Permission table + never-prompting checks (#59);   |
+|                               | `GET /api/permissions` in `routes/permissions.py`. |
+| `ai/idea_match.py`            | Declined-idea matching (names, model2vec, judge);  |
+|                               | review/remove via `routes/ideas.py` (#56).         |
+| `routes/tool_detail.py`       | `GET /api/tools/{name}`: summary, when it runs,    |
+|                               | gate, inputs, sandbox, source (#61).               |
 | `ai/orchestrator.py`          | Event loop, tool gating, subscriber fan-out,       |
 |                               | dynamic-tool hot-reload (`load_dynamic_tools`).    |
 | `ai/pattern_recognizer.py`    | Rolling 50-event deque fed by the orchestrator;    |
@@ -311,7 +317,11 @@ bypass the approval gate and run inline; all other tools still emit an
 
 | Tool               | Read-only | Effect                                            |
 |--------------------|-----------|---------------------------------------------------|
-| `read_active_tab`  | ✅         | AppleScript → Chrome, then Safari; URL/title.    |
+| `read_active_tab`  | ✅         | AppleScript; most recently active browser, then  |
+|                    |           | Chrome, then Safari; URL/title.                   |
+| `read_active_tab_text`| ✅      | AppleScript JS → innerText of the active tab,     |
+|                    |           | truncated; sensitive sites refused; cloud         |
+|                    |           | placeholder per #31.                              |
 | `open_url`         |           | Opens a URL with `open`.                          |
 | `show_notification`|           | Posts a macOS notification via `osascript`.       |
 | `read_clipboard`   | ✅         | `pbpaste` → string.                              |

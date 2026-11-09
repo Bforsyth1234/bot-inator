@@ -358,6 +358,7 @@ async def lifespan(app: FastAPI):
     app.state.drafting_engine = drafting_engine
     app.state.memory = memory
     app.state.orchestrator = orchestrator
+    app.state.idea_feedback = idea_feedback
     app.state.pattern_recognizer = pattern_recognizer
     app.state.listeners = listeners
     app.state.listener_names = listener_names
@@ -394,6 +395,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="agent-daemon", version="0.1.0", lifespan=lifespan)
 # Origin check, then bearer token, on every HTTP route and the WS (#27).
 app.add_middleware(AuthMiddleware)
+# Wave 8 routers (todo rule 12): declined ideas (#56), permissions (#59),
+# tool detail (#61). The app-wide AuthMiddleware covers them.
+from routes import ideas as ideas_routes  # noqa: E402
+from routes import permissions as permissions_routes  # noqa: E402
+from routes.tool_detail import router as tool_detail_router  # noqa: E402
+
+app.include_router(ideas_routes.router)
+app.include_router(permissions_routes.router)
+app.include_router(tool_detail_router)
 
 
 def _next_seq() -> int:
@@ -557,7 +567,12 @@ class SettingsUpdate(BaseModel):
     groq_main_model: Optional[str] = None
     groq_analysis_model: Optional[str] = None
     groq_drafting_model: Optional[str] = None
+    # Let cloud engines see email and message text (#52). Applies at once.
+    cloud_personal_text: Optional[bool] = None
 
+
+# Settings-file key for ``cloud_personal_text`` (same name as the env var).
+_PERSONAL_TEXT_KEY = "AGENT_CLOUD_PERSONAL_TEXT"
 
 _ENGINE_ROLES = ("main", "analysis", "drafting")
 # (request field, env/settings-file key, engine role) for the #26 overrides.
@@ -644,13 +659,18 @@ def _settings_view() -> dict[str, Any]:
         "groq_main_model": saved["groq_main_model"],
         "groq_analysis_model": saved["groq_analysis_model"],
         "groq_drafting_model": saved["groq_drafting_model"],
+        # Read live by ai.privacy, so it is not part of restart_required.
+        "cloud_personal_text": personal_text_allowed(),
         "restart_required": saved != running,
         "can_restart": _can_self_restart(),
         # Fields the UI can't change because they're exported in the shell.
         "locked_fields": [
             field_name for field_name, env_key in _SETTING_FIELDS
             if env_key in user_settings.shell_exported
-        ],
+        ] + (
+            ["cloud_personal_text"]
+            if _PERSONAL_TEXT_KEY in user_settings.shell_exported else []
+        ),
     }
 
 
@@ -668,7 +688,8 @@ async def get_settings() -> dict[str, Any]:
 
 @app.put("/api/settings")
 async def put_settings(body: SettingsUpdate) -> dict[str, Any]:
-    """Save provider settings from the UI. Takes effect after a restart."""
+    """Save settings from the UI. Provider/model changes take effect after
+    a restart; ``cloud_personal_text`` applies to the next prompt (#52)."""
     updates: dict[str, str] = {}
     if body.provider is not None:
         provider = body.provider.strip().lower()
@@ -698,6 +719,10 @@ async def put_settings(body: SettingsUpdate) -> dict[str, Any]:
             if value == GROQ_DEFAULT_MODELS[env_key]:
                 value = ""
             updates[env_key] = value
+    if body.cloud_personal_text is not None:
+        # Stored as "1"/"0" (never removed) so an explicit "off" beats a
+        # ``=1`` left in .env. A shell export still wins (locked in the UI).
+        updates[_PERSONAL_TEXT_KEY] = "1" if body.cloud_personal_text else "0"
 
     # Refuse to save a Groq engine without a key, or the next start would
     # fail. The key is required only if some engine uses Groq (#26).
