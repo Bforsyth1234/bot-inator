@@ -194,6 +194,8 @@ removal to the nested git repo (DONE.md #8), and returns 200 with
 | `events/calendar_watcher.py`  | Upcoming meetings → event_starting_soon.           |
 | `events/clipboard_watcher.py` | Clipboard changes → clipboard_changed (app + kind, |
 |                               | never content).                                    |
+| `ai/privacy.py`               | Replaces personal text (iMessage, mail) in cloud   |
+|                               | engines' prompts unless AGENT_CLOUD_PERSONAL_TEXT=1|
 | `ai/orchestrator.py`          | Event loop, tool gating, subscriber fan-out,       |
 |                               | dynamic-tool hot-reload (`load_dynamic_tools`).    |
 | `ai/pattern_recognizer.py`    | Rolling 50-event deque fed by the orchestrator;    |

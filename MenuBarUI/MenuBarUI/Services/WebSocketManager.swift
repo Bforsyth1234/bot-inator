@@ -9,6 +9,14 @@ final class WebSocketManager: ObservableObject {
     @Published private(set) var pendingCodeApproval: (seq: Int, payload: CodeApprovalRequestPayload)?
     @Published private(set) var lastStatus: StatusPayload?
     @Published private(set) var debug: DebugStats = DebugStats()
+    /// Active daemon notices (#19), minus the ones the user dismissed.
+    @Published private(set) var notices: [NoticePayload] = []
+    /// Bumped on every `tools_changed` frame (#29); views can also listen
+    /// for `Notification.Name.toolsChanged`.
+    @Published private(set) var toolsChangedCount: Int = 0
+    /// Dismissed notice ids, kept for the app's lifetime so a reconnect's
+    /// replay doesn't bring a dismissed banner back.
+    private var dismissedNoticeIds: Set<String> = []
 
     private let url: URL
     private let session: URLSession
@@ -75,6 +83,20 @@ final class WebSocketManager: ObservableObject {
         reconnectDelay = 1.0
         debug.connectAttempts += 1
         receiveTask = Task { [weak self] in await self?.receiveLoop() }
+    }
+
+    func dismissNotice(id: String) {
+        dismissedNoticeIds.insert(id)
+        notices.removeAll { $0.id == id }
+    }
+
+    private func showNotice(_ notice: NoticePayload) {
+        guard !dismissedNoticeIds.contains(notice.id) else { return }
+        if let index = notices.firstIndex(where: { $0.id == notice.id }) {
+            notices[index] = notice
+        } else {
+            notices.append(notice)
+        }
     }
 
     func resetDebugStats() {
@@ -229,6 +251,15 @@ final class WebSocketManager: ObservableObject {
                 pendingCodeApproval = (seq, payload)
             case .status(_, _, let payload):
                 lastStatus = payload
+            case .notice(_, _, let payload):
+                showNotice(payload)
+            case .toolsChanged(_, _, let payload):
+                toolsChangedCount += 1
+                NotificationCenter.default.post(
+                    name: .toolsChanged, object: self,
+                    userInfo: ["reason": payload.reason,
+                               "tool_names": payload.toolNames ?? []]
+                )
             default:
                 break
             }
@@ -253,6 +284,11 @@ final class WebSocketManager: ObservableObject {
             await MainActor.run { self?.connect() }
         }
     }
+}
+
+extension Notification.Name {
+    /// Posted by `WebSocketManager` on a `tools_changed` frame (#29).
+    static let toolsChanged = Notification.Name("botinator.toolsChanged")
 }
 
 // MARK: - Debug
@@ -294,6 +330,8 @@ struct DebugStats {
         case .codeApprovalRequest: key = "code_approval_request"
         case .codeApprovalResponse: key = "code_approval_response"
         case .status: key = "status"
+        case .notice: key = "notice"
+        case .toolsChanged: key = "tools_changed"
         case .command: key = "command"
         case .userMessage: key = "user_message"
         }

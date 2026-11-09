@@ -58,6 +58,7 @@ struct RootPopoverView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            NoticeBanner()
             TabView {
                 ThoughtStreamView()
                     .tabItem { Label("Thoughts", systemImage: "brain") }

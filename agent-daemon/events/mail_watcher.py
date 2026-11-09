@@ -18,7 +18,8 @@ and idles. To record the real layout, run (with Full Disk Access)::
 .. note::
 
     Reading ``~/Library/Mail`` requires macOS **Full Disk Access** for the
-    process hosting the daemon. Without it the watcher logs a warning and
+    process hosting the daemon. Without it the watcher logs a warning,
+    publishes a "Full Disk Access needed" ``notice`` once (todo #19) and
     stays idle without crashing the daemon.
 """
 
@@ -33,6 +34,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
+
+from schemas.ws_messages import NOTICE_EVENT_TYPE, full_disk_access_notice
 
 from .event_bus import ContextEvent, EventBus
 
@@ -89,6 +92,20 @@ def find_index(mail_root: Path | str = DEFAULT_MAIL_ROOT) -> Optional[Path]:
         return None
     newest = max(versions, key=lambda p: int(p.name[1:]))
     return newest / INDEX_RELATIVE_PATH
+
+
+def root_unreadable(mail_root: Path | str = DEFAULT_MAIL_ROOT) -> bool:
+    """True when ``mail_root`` exists but can't be listed (no Full Disk Access)."""
+    root = Path(mail_root).expanduser()
+    try:
+        if not root.exists():
+            return False
+        next(root.iterdir(), None)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def table_columns(conn: sqlite3.Connection) -> dict[str, list[str]]:
@@ -179,6 +196,7 @@ class MailWatcher:
         self._last_rowid: int = 0
         self._sql: str = ""
         self._poll_error_logged = False
+        self._access_reported = False
 
     def start(self) -> None:
         if self._thread is not None:
@@ -200,6 +218,13 @@ class MailWatcher:
 
     def _open(self) -> Optional[sqlite3.Connection]:
         path = self._db_path or find_index(self._mail_root)
+        if path is None and root_unreadable(self._mail_root):
+            logger.warning(
+                "Cannot list %s. The daemon process likely needs macOS "
+                "Full Disk Access; MailWatcher idle.", self._mail_root,
+            )
+            self._report_no_access()
+            return None
         if path is None or not path.exists():
             logger.warning(
                 "Mail Envelope Index not found under %s; watcher idle "
@@ -215,9 +240,24 @@ class MailWatcher:
                 "Could not open %s read-only (%s). The daemon process "
                 "likely needs macOS Full Disk Access.", path, exc,
             )
+            self._report_no_access()
             return None
         self._db_path = path
         return conn
+
+    def _report_no_access(self) -> None:
+        """Publish the Full Disk Access notice, once per watcher (#19)."""
+        if self._access_reported:
+            return
+        self._access_reported = True
+        notice = full_disk_access_notice("mail_watcher", "Mail")
+        try:
+            self._bus.push_threadsafe(ContextEvent(
+                event_type=NOTICE_EVENT_TYPE,
+                metadata={"notice": notice.model_dump()},
+            ))
+        except Exception:  # pragma: no cover - loop not bound / shutting down
+            logger.exception("Failed to publish the Full Disk Access notice")
 
     def _prepare(self, conn: sqlite3.Connection) -> bool:
         columns = table_columns(conn)

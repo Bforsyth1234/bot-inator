@@ -23,6 +23,7 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 import user_settings
 
 from ai.memory import Memory, set_default_memory
+from ai.privacy import personal_text_allowed
 from ai.mlx_engine import MLXEngine
 from ai.orchestrator import Orchestrator
 from ai.pattern_recognizer import PatternRecognizer, make_detection_evaluator
@@ -792,6 +793,9 @@ async def delete_tool(tool_name: str) -> dict[str, Any]:
     _commit_tool_paths(
         generated_dir, present, f"Removed generated tool: {tool_name}"
     )
+    if not unloaded:
+        # A disabled or quarantined copy: unload sent no tools_changed (#29).
+        orchestrator.notify_tools_changed("deleted", [tool_name])
     return {"status": "ok", "tool_name": tool_name, "unloaded": unloaded}
 
 
@@ -905,6 +909,68 @@ async def _handle_command(app: FastAPI, msg: Command) -> None:
             logger.exception("Failed to reload dynamic tools")
 
 
+def _listener_health() -> dict[str, dict[str, Any]] | None:
+    """Liveness per supervised listener (#16/#19); ``None`` when none run."""
+    mac = getattr(app.state, "mac_listener", None)
+    if mac is None:
+        return None
+    try:
+        return {"nsworkspace": mac.status()}
+    except Exception:
+        logger.exception("mac_listener.status() failed")
+        return None
+
+
+def _status_frame() -> Status:
+    main_engine = app.state.engine
+    return Status(
+        seq=_next_seq(),
+        timestamp=_now_iso(),
+        payload=StatusPayload(
+            state="ready",
+            model_loaded=getattr(main_engine, "model_name", settings.model_path),
+            listeners_active=list(app.state.listener_names),
+            listener_health=_listener_health(),
+            engine_providers=settings.engine_providers(),
+            cloud_personal_text=personal_text_allowed(),
+        ),
+    )
+
+
+# Fields that make a listener-health change worth a new status frame
+# (``uptime_s`` changes every second and is left out).
+_HEALTH_KEYS = ("alive", "pid", "restart_count", "last_error", "last_exit_code")
+LISTENER_HEALTH_POLL_SECONDS = 5.0
+
+
+def _health_signature(health: dict[str, dict[str, Any]] | None) -> Any:
+    if not health:
+        return None
+    return {
+        name: tuple(entry.get(k) for k in _HEALTH_KEYS)
+        for name, entry in health.items()
+    }
+
+
+async def _push_listener_health(
+    websocket: WebSocket, initial: dict[str, dict[str, Any]] | None
+) -> None:
+    """Send a fresh status frame when a listener dies or restarts."""
+    last = _health_signature(initial)
+    try:
+        while True:
+            await asyncio.sleep(LISTENER_HEALTH_POLL_SECONDS)
+            sig = _health_signature(_listener_health())
+            if sig == last:
+                continue
+            last = sig
+            await websocket.send_text(_status_frame().model_dump_json())
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.debug("listener health push stopped", exc_info=True)
+
+
 @app.websocket("/ws/stream")
 async def ws_stream(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -920,17 +986,15 @@ async def ws_stream(websocket: WebSocket) -> None:
 
     orchestrator.add_subscriber(_ws_send)
 
-    main_engine = app.state.engine
-    hello = Status(
-        seq=_next_seq(),
-        timestamp=_now_iso(),
-        payload=StatusPayload(
-            state="ready",
-            model_loaded=getattr(main_engine, "model_name", settings.model_path),
-            listeners_active=list(app.state.listener_names),
-        ),
-    )
+    hello = _status_frame()
     await websocket.send_text(hello.model_dump_json())
+    # Notices published before this client connected (#19).
+    for frame in orchestrator.notice_frames():
+        await websocket.send_text(frame.model_dump_json())
+    health_task = asyncio.create_task(
+        _push_listener_health(websocket, hello.payload.listener_health),
+        name="ws-listener-health",
+    )
 
     try:
         while True:
@@ -962,4 +1026,5 @@ async def ws_stream(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         return
     finally:
+        health_task.cancel()
         orchestrator.remove_subscriber(_ws_send)

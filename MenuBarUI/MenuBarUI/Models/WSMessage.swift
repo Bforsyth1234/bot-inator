@@ -73,12 +73,85 @@ struct StatusPayload: Codable, Hashable {
     let modelLoaded: String?
     let listenersActive: [String]?
     let version: String?
+    /// Liveness per supervised listener (e.g. `nsworkspace`), #19.
+    let listenerHealth: [String: ListenerHealth]?
+    /// Provider per engine role (`main`, `analysis`, `drafting`), #31.
+    let engineProviders: [String: String]?
+    /// True when personal text may reach cloud engines
+    /// (`AGENT_CLOUD_PERSONAL_TEXT=1`), #31.
+    let cloudPersonalText: Bool?
+
+    init(state: DaemonState, modelLoaded: String? = nil,
+         listenersActive: [String]? = nil, version: String? = nil,
+         listenerHealth: [String: ListenerHealth]? = nil,
+         engineProviders: [String: String]? = nil,
+         cloudPersonalText: Bool? = nil) {
+        self.state = state
+        self.modelLoaded = modelLoaded
+        self.listenersActive = listenersActive
+        self.version = version
+        self.listenerHealth = listenerHealth
+        self.engineProviders = engineProviders
+        self.cloudPersonalText = cloudPersonalText
+    }
 
     enum CodingKeys: String, CodingKey {
         case state
         case modelLoaded = "model_loaded"
         case listenersActive = "listeners_active"
         case version
+        case listenerHealth = "listener_health"
+        case engineProviders = "engine_providers"
+        case cloudPersonalText = "cloud_personal_text"
+    }
+}
+
+struct ListenerHealth: Codable, Hashable {
+    let alive: Bool?
+    let pid: Int?
+    let restartCount: Int?
+    let lastError: String?
+    let lastExitCode: Int?
+    let uptimeS: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case alive, pid
+        case restartCount = "restart_count"
+        case lastError = "last_error"
+        case lastExitCode = "last_exit_code"
+        case uptimeS = "uptime_s"
+    }
+}
+
+/// Server→client banner (#19). The daemon publishes each `id` once per run
+/// and replays active notices on connect; a newer notice with the same id
+/// replaces the old one.
+struct NoticePayload: Codable, Hashable, Identifiable {
+    let id: String
+    let level: NoticeLevel?
+    let title: String
+    let body: String
+    let action: NoticeAction?
+}
+
+enum NoticeLevel: String, Codable, Hashable {
+    case info, warning, error
+}
+
+struct NoticeAction: Codable, Hashable {
+    /// Only `open_settings` today: opens `url` (a System Settings pane).
+    let kind: String
+    let url: String
+}
+
+/// Server→client hint that `GET /api/tools` changed (#29).
+struct ToolsChangedPayload: Codable, Hashable {
+    let reason: String
+    let toolNames: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case reason
+        case toolNames = "tool_names"
     }
 }
 
@@ -170,6 +243,8 @@ enum WSMessage: Codable, Hashable {
     case codeApprovalRequest(seq: Int, timestamp: Date, payload: CodeApprovalRequestPayload)
     case codeApprovalResponse(seq: Int, timestamp: Date, payload: CodeApprovalResponsePayload)
     case status(seq: Int, timestamp: Date, payload: StatusPayload)
+    case notice(seq: Int, timestamp: Date, payload: NoticePayload)
+    case toolsChanged(seq: Int, timestamp: Date, payload: ToolsChangedPayload)
     case command(seq: Int, timestamp: Date, payload: CommandPayload)
     case userMessage(seq: Int, timestamp: Date, payload: UserMessagePayload)
 
@@ -179,7 +254,8 @@ enum WSMessage: Codable, Hashable {
              .approvalResponse(let seq, _, _),
              .codeApprovalRequest(let seq, _, _),
              .codeApprovalResponse(let seq, _, _),
-             .status(let seq, _, _), .command(let seq, _, _),
+             .status(let seq, _, _), .notice(let seq, _, _),
+             .toolsChanged(let seq, _, _), .command(let seq, _, _),
              .userMessage(let seq, _, _):
             return seq
         }
@@ -191,7 +267,8 @@ enum WSMessage: Codable, Hashable {
              .approvalResponse(_, let ts, _),
              .codeApprovalRequest(_, let ts, _),
              .codeApprovalResponse(_, let ts, _),
-             .status(_, let ts, _), .command(_, let ts, _),
+             .status(_, let ts, _), .notice(_, let ts, _),
+             .toolsChanged(_, let ts, _), .command(_, let ts, _),
              .userMessage(_, let ts, _):
             return ts
         }
@@ -208,6 +285,8 @@ enum WSMessage: Codable, Hashable {
         case codeApprovalRequest = "code_approval_request"
         case codeApprovalResponse = "code_approval_response"
         case status
+        case notice
+        case toolsChanged = "tools_changed"
         case command
         case userMessage = "user_message"
     }
@@ -237,6 +316,12 @@ enum WSMessage: Codable, Hashable {
         case .status:
             self = .status(seq: seq, timestamp: timestamp,
                            payload: try container.decode(StatusPayload.self, forKey: .payload))
+        case .notice:
+            self = .notice(seq: seq, timestamp: timestamp,
+                           payload: try container.decode(NoticePayload.self, forKey: .payload))
+        case .toolsChanged:
+            self = .toolsChanged(seq: seq, timestamp: timestamp,
+                                 payload: try container.decode(ToolsChangedPayload.self, forKey: .payload))
         case .command:
             self = .command(seq: seq, timestamp: timestamp,
                             payload: try container.decode(CommandPayload.self, forKey: .payload))
@@ -268,6 +353,12 @@ enum WSMessage: Codable, Hashable {
             try container.encode(payload, forKey: .payload)
         case .status(_, _, let payload):
             try container.encode(MessageType.status, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .notice(_, _, let payload):
+            try container.encode(MessageType.notice, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .toolsChanged(_, _, let payload):
+            try container.encode(MessageType.toolsChanged, forKey: .type)
             try container.encode(payload, forKey: .payload)
         case .command(_, _, let payload):
             try container.encode(MessageType.command, forKey: .type)

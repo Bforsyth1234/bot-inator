@@ -30,6 +30,7 @@ import time
 from collections import deque
 from typing import Any, Awaitable, Callable, Deque, Optional
 
+from ai.privacy import redact_event
 from events.event_bus import ContextEvent, EventBus
 
 logger = logging.getLogger(__name__)
@@ -161,7 +162,9 @@ class PatternRecognizer:
         # Agent-internal events never re-enter the window.
         if event.event_type == "pattern_detected":
             return None
-        self._window.append(self._describe(event))
+        # The window goes to the detection engine: no personal text
+        # when that engine is a cloud one (#31).
+        self._window.append(self._describe(redact_event(event, "detection")))
         self._signatures.append(self._signature(event))
         self._since_last_eval += 1
         now = self._clock()

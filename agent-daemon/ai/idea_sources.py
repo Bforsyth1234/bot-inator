@@ -38,6 +38,7 @@ from pathlib import Path, PurePath
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
 from ai.pattern_recognizer import PatternRecognizer
+from ai.privacy import redact_event, redacted_event
 from events.event_bus import ContextEvent, EventBus
 
 logger = logging.getLogger(__name__)
@@ -477,6 +478,9 @@ class NextStepSuggester(_CooldownSource):
             "expected_logic": f"{follow_up}\n{details}",
             "builtin_tool": tool,
             "event_details": details,
+            # The orchestrator sends this one instead when the main engine
+            # is a cloud one (#31).
+            "event_details_redacted": cls.details(redacted_event(event)),
             "source": cls.source_name,
             "trigger": kind,
         }
@@ -505,7 +509,10 @@ class NextStepSuggester(_CooldownSource):
         # produces one suggestion, not one per file.
         self._start_cooldown(kind)
         return asyncio.create_task(
-            self._suggest(self.describe(event, kind), kind), name="next-step"
+            self._suggest(
+                self.describe(redact_event(event, "detection"), kind), kind,
+            ),
+            name="next-step",
         )
 
 

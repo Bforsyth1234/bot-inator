@@ -47,7 +47,7 @@ checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
 ============================================================ -->
 
-Next ID: #51
+Next ID: #52
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -70,9 +70,9 @@ API auth → sandbox for installed tools → live checks.
 | 2 | A: #20 #21 · B: #24 · C: #25 · D: #14 · E: #16 #17 · F: #36 | A `ai/memory.py` · B `tools/meta_tool_generator.py` · C `ai/pattern_recognizer.py` · D `events/file_watcher.py` · E `events/mac_listeners.py`, `events/_mac_app_helper.py` · F `ai/open_help.py` | [x] closed 2026-11-09 (all `[~] live`) |
 | 3 | A: #23 #28 #38 · B: #41 · C: #42 · D: #33 #35 · E: #34 | A `ai/orchestrator.py`, tool routes in `main.py`, `ToolManagerView.swift` · B `events/mail_watcher.py`, `tools/read_email.py` · C `tools/calendar_access.py`, `tools/list_events.py`, `tools/create_event.py`, `events/calendar_watcher.py`, `requirements.txt` · D `ai/setup_scan.py`, `ai/starter_catalog.json` · E `events/clipboard_watcher.py`, `ai/friction.py` | [x] closed 2026-11-09 (all `[~] live`) |
 | 4 | A: #32 · B: #45 · C: #15 #18 · D: #26 | A `ai/idea_sources.py`, `ai/open_help.py` · B `tools/reminders.py` (+ additive `tools/calendar_access.py`) · C `ApprovalAlert.swift`, `ApprovalPresenter.swift`, `CodeReviewAlert.swift` · D `config.py`, engine setup + settings routes in `main.py`, `SettingsView.swift` | [x] closed 2026-11-09 (all `[~] live`) |
-| 5 | A: #19 #29 #31 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `DebugView.swift`, `ToolManagerView.swift`, `ai/orchestrator.py`, `events/imessage_watcher.py` | [ ] |
+| 5 | A: #19 #29 #31 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `DebugView.swift`, `ToolManagerView.swift`, `ai/orchestrator.py`, `events/imessage_watcher.py` | [x] closed 2026-11-09 (all `[~] live`) |
 | 6 | A: #27 (alone) | `main.py` (all routes + WS), every Swift HTTP/WS client | [ ] |
-| 7 | A: #22 (alone) | `ai/orchestrator.py` tool execution, new `tools/tool_sandbox.py` | [ ] |
+| 7 | A: #22 #51 (alone) | `ai/orchestrator.py` tool execution, new `tools/tool_sandbox.py` | [ ] |
 | — | #37 + every `[~] live` item | Live checks list (below) — needs the user at the Mac | [ ] |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -91,7 +91,8 @@ network module; no writes to `~/Library`, `~/.ssh`, `~/.bot-inator`),
 with an error naming the existing one · #25 double the interval after
 each NO_PATTERN up to 10 min, reset on a match · #26 per-engine
 `AGENT_PROVIDER_{MAIN,ANALYSIS,DRAFTING}` override, also in Settings ·
-#27 random per-install token in `~/.bot-inator/token` (0600), required by
+#27 (user: Origin check + token) reject browser-originated requests, plus a
+random per-install token in `~/.bot-inator/token` (0600), required by
 every HTTP route and the WS handshake · #28 on any load failure move the
 file to `generated/quarantine/` with a `.error.txt` and report it · #29
 broadcast `tools_changed` after load/unload · #31 show the active
@@ -132,6 +133,9 @@ to see.
 - #15 Red X: close the approval window → one deny in the daemon log, tool skipped; Approve then close → one response; close the code review window → one `code_approval_response` denial.
 - #18 Cards: for each card (open_url, show_notification, move_file, create_event, create_reminder, create_note, append_note, run_shortcut, open_app) change a field → Approve → the tool ran with the edit; Approve unchanged → no `edited_args`; clear a required field → Approve disabled.
 - #26 Providers: Settings → Drafting = Groq, default Local → save, restart → "Running now" lists each engine; a tool draft goes to Groq while per-event analysis stays on MLX.
+- #19 Notices: start the daemon without Full Disk Access → two banners (iMessages, Mail); "Open Settings" opens Privacy → Full Disk Access; dismiss hides them; a new client sees the replay. With access granted + restart → no banner. Debug "Listener health": nsworkspace alive, restarts 0; `kill <helper pid>` → restarts 1 within ~5 s.
+- #29 tools_changed: with Manage Tools open, `curl -X POST http://127.0.0.1:8000/api/tools/<t>/disable` → the row updates without refresh (after #27, add the token header).
+- #31 Privacy: `AGENT_PROVIDER_MAIN=groq` → Debug shows "main: groq (cloud)" and "Personal text to cloud: kept on this Mac"; an inbound iMessage's reasoning prompt shows `[personal text kept on this Mac]`.
 
 ---
 
@@ -464,12 +468,51 @@ the old short-circuit: handed to #38.
 
 ---
 
-#29 — Tool manager: refresh on a tools_changed broadcast [ ] [Q16]
+#29 — Tool manager: refresh on a tools_changed broadcast [~] live [Q16]
 Wave: 5 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q16)
 Ask: The view fetches once on appear and on manual refresh. Should it
 also listen for a new `tools_changed` WS broadcast emitted by the
 orchestrator after `load_dynamic_tools` / `unload_dynamic_tool`, so
 multiple open windows stay consistent without polling?
+Verify:
+Results (wave 5, 2026-11-09):
+⚬ One `tools_changed{reason, tool_names}` frame per change from
+  `load_dynamic_tools` (loaded/quarantined) and `unload_dynamic_tool`, sent
+  after the route's file moves; ToolManagerView refreshes 300 ms after it.
+Deviations: DELETE also notifies (deleting a disabled/quarantined copy sent nothing).
+
+---
+
+#51 — Tool detail view: summary, run conditions, and source for every tool [ ]
+Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
+Ask: The app should show detailed data on every tool it has, both the
+built-ins it shipped with and the ones it generated. For each tool:
+1. A plain-language SUMMARY of what it does.
+2. WHEN IT RUNS: the conditions that make the agent call it (the event
+   or pattern that led to it, for generated tools; the situations it is
+   meant for, for built-ins), and whether it needs approval or runs
+   freely (in `READ_ONLY_TOOL_NAMES` or not, rule 7a).
+3. A way to READ THE CODE: a button that opens the tool's source file.
+Today `GET /api/tools` (`main.py` ~line 447) returns only name and a
+description from the docstring, and `ToolManagerView.swift` shows a
+list with enable/disable and delete.
+DECISIONS (user, 2026-11-09):
+1. GENERATED-TOOL CONDITIONS: if the idea that produced a tool (source,
+   triggering event, pattern text) isn't saved at install time, start
+   saving it in `meta_tool_generator.py`; tools installed before show
+   "unknown".
+2. BUILT-INS: generate the summary and conditions from the tool's schema
+   + docstring, not hand-written per tool.
+3. CODE: an "Open in editor" button that opens the tool's source file
+   (e.g. `NSWorkspace.open` / `open -t`), not an in-app code viewer.
+4. DISABLED AND QUARANTINED tools are shown too, with their source file
+   and, for quarantined ones, the `.error.txt` contents.
+Likely files: tool routes in `main.py` (new `GET /api/tools/{name}`
+returning summary, conditions, gate, source path, error text),
+`ToolManagerView.swift` (+ a new detail view), `tools/meta_tool_generator.py`
+(save idea provenance), each built-in in `tools/`. Overlaps wave 5
+(`ToolManagerView.swift`) and wave 6 (`main.py` routes, auth): schedule
+after wave 6 so the new route gets the auth token.
 Verify:
 Deviations:
 
@@ -668,6 +711,24 @@ Results (wave 1, 2026-11-09):
 Deviations: `open_app` passes the resolved bundle path to `open -a`, not the raw name.
 Found: the drafting prompt printed `from tools.<tool name> import …`, wrong for
 tools in shared modules; fixed by the runner at wave close (see #48).
+
+---
+
+### Privacy
+
+#51 — Idea text from a local engine can quote personal text into a cloud prompt [ ]
+Wave: 7 (with #22) · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 5 report)
+Ask: #31 redacts personal text at each source, but when the detection engine
+is local and the main engine is cloud, the idea the local engine writes
+(`description`, `expected_logic`) can quote an iMessage or email subject,
+and `_build_pattern_prompt` sends it to the cloud main engine.
+Approach: when `is_cloud("main")` and redaction is on, scan idea text for
+substrings of the personal text in the triggering window (or simply strip
+quoted strings longer than N chars) before building the pattern prompt;
+test with a fake idea that quotes an iMessage.
+Verify: a test where a local idea quotes "dinner at 7 with Sam" and the cloud
+main prompt contains the placeholder instead.
+Deviations:
 
 ---
 
@@ -941,7 +1002,7 @@ not helper: the helper is AppKit-only and loses state on every restart.
 
 ---
 
-#19 — First-run Full Disk Access prompt for the iMessage watcher [ ] [Q6]
+#19 — First-run Full Disk Access prompt for the iMessage watcher [~] live [Q6]
 Wave: 5 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q6)
 Ask: `IMessageWatcher` relies on Full Disk Access being pre-granted.
 Should the daemon detect the `OperationalError` and surface a first-run
@@ -953,7 +1014,18 @@ FROM WAVE 2 #16 (2026-11-09): add `listener_health: dict[str, dict] |
 None` to `StatusPayload` (filled from `app.state.mac_listener.status()`)
 and show `alive` / `restart_count` in the Debug tab. `/health` already has it.
 Verify:
-Deviations:
+Results (wave 5, 2026-11-09):
+⚬ New `notice` frame (`NoticePayload{id, level, title, body, action}`,
+  `full_disk_access_notice()`). iMessage and mail watchers detect missing Full
+  Disk Access and push one `system_notice` each; the orchestrator publishes
+  each id once per run and `ws_stream` replays active notices after hello.
+  `NoticeBanner.swift` (top of the popover) with "Open Settings" (only
+  `x-apple.systempreferences:` URLs), dismissible.
+⚬ `StatusPayload` gains `listener_health`, `engine_providers`,
+  `cloud_personal_text`; a fresh status is sent when listener health changes
+  (checked every 5 s); the Debug tab shows alive / restarts.
+Deviations: edited outside the slot list: `main.py` DELETE route (`tools_changed`),
+`MenuBarUIApp.swift` (banner wiring).
 
 ### Approvals and UI
 
@@ -1050,12 +1122,37 @@ Ask: The daemon binds `127.0.0.1`, so any local process can hit
 `DELETE /api/tools` and wipe the agent's learned behaviour. Same threat
 model as the WS channel; deferred unless we add a process-local token
 shared via keychain.
+DECISIONS (user, 2026-11-09): Origin check AND token, Origin check first.
+Why (assistant, from main.py at wave 4): no route or the WS checks who is
+calling. Browsers apply no CORS to WebSockets, so any web page can open
+`ws://127.0.0.1:8000/ws/stream`, read the thought stream (iMessage text,
+paths, subjects) and send `approval_response` / `code_approval_response`
+(approving a pending send or generated code with its own `edited_code`).
+Simple cross-site POSTs also reach `/api/restart` and `/api/tools/*/disable`.
+Not tested as an attack; nothing in the code blocks it.
+1. ORIGIN CHECK: reject any HTTP request or WS handshake that carries an
+   `Origin` header (browsers always send one on cross-site requests and on
+   WebSockets; pages can't remove it). The menu bar app sends none. If a
+   legitimate client needs one, allow-list it explicitly, never `*`.
+2. TOKEN: random per-install secret in `~/.bot-inator/token` (0600, created
+   on first start), required as `Authorization: Bearer <token>` on every
+   HTTP route except `GET /health`, and on the WS handshake (header, or a
+   first-frame/query fallback only if URLSessionWebSocketTask can't set
+   headers — check). Swift clients read the file. Wrong/missing → 401 /
+   WS close 1008.
+3. Tests and the integration `client` fixture get the token automatically.
 Verify:
+⚬ A WS handshake with `Origin: https://evil.example` is refused; one with
+  no Origin and the token is accepted; one without the token is refused.
+⚬ `POST /api/restart` with an Origin header → 403; without the token → 401.
+⚬ Non-vacuity: drop each check in turn, its test fails.
+⚬ Live: the menu bar app still connects, approves, lists tools and saves
+  settings after the change.
 Deviations:
 
 ---
 
-#31 — Groq privacy surface [ ] [Q18]
+#31 — Groq privacy surface [~] live [Q18]
 Wave: 5 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q18)
 Ask: With `AGENT_PROVIDER=groq`, window titles, file paths and iMessage
 text go to Groq inside prompts. Should the UI show which provider is
@@ -1066,7 +1163,25 @@ FROM WAVE 4 (2026-11-09): use `settings.is_cloud(role)` /
 also cover `event_details` in built-in follow-up prompts (#32), which hold
 mail subjects and iMessage text.
 Verify:
-Deviations:
+Results (wave 5, 2026-11-09):
+⚬ New `ai/privacy.py`. "Personal text" = iMessage text, mail subjects,
+  `read_email` subject and body, and the same inside built-in follow-up
+  `event_details`. Replaced by `[personal text kept on this Mac]` in a cloud
+  engine's prompts unless `AGENT_CLOUD_PERSONAL_TEXT=1`, per role: main
+  (iMessage/generic prompts, read_email results, event_details), analysis
+  (`evaluate_event`), detection (pattern recognizer, open-help and
+  next-step windows). Local classification still reads the real text.
+  Unchanged: sender handles/addresses, window titles, file paths, app names,
+  calendar titles, the user's own chat text.
+⚬ Debug tab shows each engine's provider and whether personal text goes to
+  the cloud.
+⚬ With a cloud main engine and redaction on, the iMessage responder sees
+  only sender + placeholder (can't write a useful reply); `plan_with_time` and
+  mail built-ins keep only ids and senders.
+⚬ Tests: `tests/test_notices_privacy.py` 16 + 3 round trips; non-vacuity:
+  `should_redact` always False fails 6, each of 7 call sites fails 1–2.
+Deviations: one redaction line each in `idea_sources.py`, `open_help.py`,
+`pattern_recognizer.py` (outside the slot list). Gap tracked as #51.
 
 ---
 

@@ -90,6 +90,70 @@ class StatusPayload(BaseModel):
     model_loaded: str | None = None
     listeners_active: list[str] = Field(default_factory=list)
     version: str = "0.1.0"
+    # Per-listener liveness (#16/#19), e.g. ``{"nsworkspace": {"alive":
+    # true, "restart_count": 0, ...}}``. ``None`` when listeners are off.
+    listener_health: dict[str, dict[str, Any]] | None = None
+    # Provider each engine runs on (#31): ``{"main": "local", ...}``.
+    engine_providers: dict[str, str] | None = None
+    # True when ``AGENT_CLOUD_PERSONAL_TEXT=1`` lets personal text reach
+    # cloud engines; False when it is replaced by a placeholder (#31).
+    cloud_personal_text: bool | None = None
+
+
+NoticeLevel = Literal["info", "warning", "error"]
+
+# System Settings → Privacy & Security → Full Disk Access.
+FULL_DISK_ACCESS_SETTINGS_URL = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+)
+# ``ContextEvent.event_type`` a listener thread uses to hand a notice to
+# the orchestrator through the event bus (``metadata={"notice": {...}}``).
+NOTICE_EVENT_TYPE = "system_notice"
+
+
+class NoticeAction(BaseModel):
+    kind: Literal["open_settings"]
+    url: str
+
+
+class NoticePayload(BaseModel):
+    """Server→client banner (#19). ``id`` is stable: a client replaces a
+    notice with the same id, and the daemon publishes each id once per run
+    and replays the active ones to every client that connects."""
+
+    id: str
+    level: NoticeLevel = "warning"
+    title: str
+    body: str
+    action: NoticeAction | None = None
+
+
+def full_disk_access_notice(source: str, feature: str) -> NoticePayload:
+    """The "grant Full Disk Access" notice for a listener (``source``)."""
+    return NoticePayload(
+        id=f"full_disk_access:{source}",
+        level="warning",
+        title="Full Disk Access needed",
+        body=(
+            f"{feature} can't be read because the app running the daemon "
+            "doesn't have Full Disk Access. Turn it on in System Settings → "
+            "Privacy & Security → Full Disk Access, then restart the daemon."
+        ),
+        action=NoticeAction(
+            kind="open_settings", url=FULL_DISK_ACCESS_SETTINGS_URL
+        ),
+    )
+
+
+class ToolsChangedPayload(BaseModel):
+    """Server→client hint that ``GET /api/tools`` would now differ (#29).
+
+    One frame per change (a load call, an unload, a quarantine), not one
+    per tool. ``tool_names`` lists the tools that changed.
+    """
+
+    reason: Literal["loaded", "unloaded", "quarantined", "deleted"]
+    tool_names: list[str] = Field(default_factory=list)
 
 
 CommandAction = Literal[
@@ -158,6 +222,16 @@ class Status(_BaseMessage):
     payload: StatusPayload
 
 
+class Notice(_BaseMessage):
+    type: Literal["notice"] = "notice"
+    payload: NoticePayload
+
+
+class ToolsChanged(_BaseMessage):
+    type: Literal["tools_changed"] = "tools_changed"
+    payload: ToolsChangedPayload
+
+
 class Command(_BaseMessage):
     type: Literal["command"] = "command"
     payload: CommandPayload
@@ -176,6 +250,8 @@ WSMessage = Annotated[
         CodeApprovalRequest,
         CodeApprovalResponse,
         Status,
+        Notice,
+        ToolsChanged,
         Command,
         UserMessage,
     ],

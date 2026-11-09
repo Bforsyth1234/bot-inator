@@ -12,7 +12,8 @@ so polling the ``message`` table never blocks the Messages app.
     that hosts the daemon (typically the terminal or IDE that launched
     ``uvicorn``). If FDA is not granted, ``sqlite3.connect`` will raise
     ``OperationalError: unable to open database file`` and this listener
-    will log a warning and stay idle without crashing the daemon.
+    will log a warning, publish a "Full Disk Access needed" ``notice``
+    once (todo #19), and stay idle without crashing the daemon.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import Optional
+
+from schemas.ws_messages import NOTICE_EVENT_TYPE, full_disk_access_notice
 
 from .event_bus import ContextEvent, EventBus
 
@@ -57,6 +60,7 @@ class IMessageWatcher:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._last_rowid: int = 0
+        self._access_reported = False
 
     def start(self) -> None:
         if self._thread is not None:
@@ -77,21 +81,45 @@ class IMessageWatcher:
     # ---- internal --------------------------------------------------
 
     def _open(self) -> Optional[sqlite3.Connection]:
-        if not self._db_path.exists():
+        try:
+            exists = self._db_path.exists()
+        except PermissionError:
+            self._report_no_access(f"cannot stat {self._db_path}")
+            return None
+        if not exists:
             logger.warning(
                 "iMessage chat.db not found at %s; watcher idle", self._db_path
             )
             return None
         uri = f"file:{self._db_path}?mode=ro"
         try:
-            return sqlite3.connect(uri, uri=True, timeout=2.0)
+            conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+            # ``connect`` can succeed lazily; the first read is what fails
+            # without Full Disk Access.
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            return conn
         except sqlite3.Error as exc:
-            logger.warning(
-                "Could not open %s read-only (%s). The daemon process "
-                "likely needs macOS Full Disk Access.",
-                self._db_path, exc,
-            )
+            self._report_no_access(str(exc))
             return None
+
+    def _report_no_access(self, reason: str) -> None:
+        """Log it and publish the Full Disk Access notice, once (#19)."""
+        logger.warning(
+            "Could not open %s read-only (%s). The daemon process "
+            "likely needs macOS Full Disk Access.",
+            self._db_path, reason,
+        )
+        if self._access_reported:
+            return
+        self._access_reported = True
+        notice = full_disk_access_notice("imessage_watcher", "iMessages")
+        try:
+            self._bus.push_threadsafe(ContextEvent(
+                event_type=NOTICE_EVENT_TYPE,
+                metadata={"notice": notice.model_dump()},
+            ))
+        except Exception:  # pragma: no cover - loop not bound / shutting down
+            logger.exception("Failed to publish the Full Disk Access notice")
 
     def _baseline_rowid(self, conn: sqlite3.Connection) -> int:
         try:
