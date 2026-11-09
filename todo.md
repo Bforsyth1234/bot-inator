@@ -45,6 +45,11 @@ Deviations, and the runner writes them into the item.
 permission, an approval click, a real model run) goes to the Live
 checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
+	12.	NEW HTTP ROUTES IN WAVE 8+ GO IN THEIR OWN MODULE (`agent-daemon/routes/
+<name>.py`, a FastAPI `APIRouter`); NEW SWIFT SCREENS GO IN THEIR OWN FILE.
+The runner adds `app.include_router(...)` in `main.py` and embeds new
+views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
+close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
 Next ID: #62
@@ -52,7 +57,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live
 
 ## Wave plan
 
-**Goal:** close every open item (#14–#47). Decided 2026-11-09 by the user:
+**Goal:** close every open item (#14–#47; waves 8–9 add #52, #53, #56, #58–#61, decided 2026-11-09). Decided 2026-11-09 by the user:
 the runner settles open design questions and records the choice in the
 item; live checks are batched at the end; one branch + PR to main per
 wave (`wave-N`, each branched from the previous wave); one subagent per
@@ -73,6 +78,8 @@ API auth → sandbox for installed tools → live checks.
 | 5 | A: #19 #29 #31 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `DebugView.swift`, `ToolManagerView.swift`, `ai/orchestrator.py`, `events/imessage_watcher.py` | [x] closed 2026-11-09 (all `[~] live`) |
 | 6 | A: #27 (alone) | `main.py` (all routes + WS), every Swift HTTP/WS client | [x] closed 2026-11-09 (`[~] live`) |
 | 7 | A: #22 #51 (alone) | `ai/orchestrator.py` tool execution, new `tools/tool_sandbox.py` | [x] closed 2026-11-09 (`[~] live`) |
+| 8 | A: #52 · B: #53 · C: #56 · D: #58 · E: #59 · F: #61 | A `ai/privacy.py`, `user_settings.py`, settings routes in `main.py`, `SettingsView.swift` · B `tools/tool_sandbox.py` · C new `routes/ideas.py`, `IdeaFeedback` in `ai/open_help.py`, `ai/idea_match.py`, new `DeclinedIdeasView.swift` · D `tools/read_active_tab.py` · E new `ai/permissions.py`, new `routes/permissions.py`, new `PermissionsView.swift` · F `ToolManagerView.swift`, new `ToolDetailView.swift`, new `routes/tool_detail.py`, provenance in `tools/meta_tool_generator.py` (+ each slot's new test file) | [ ] |
+| 9 | A: #60 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, new `CalendarBridge.swift`, `Info.plist`, `tools/calendar_access.py`, WS routing in `main.py` | [ ] |
 | — | #37 + every `[~] live` item | Live checks list (below) — needs the user at the Mac | [ ] |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -507,7 +514,7 @@ Deviations: DELETE also notifies (deleting a disabled/quarantined copy sent noth
 ---
 
 #61 — Tool detail view: summary, run conditions, and source for every tool [ ]
-Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: The app should show detailed data on every tool it has, both the
 built-ins it shipped with and the ones it generated. For each tool:
 1. A plain-language SUMMARY of what it does.
@@ -753,7 +760,7 @@ Live (2026-11-09): "what windows do I have open?" → windows with titles
 ---
 
 #58 — Read the active browser tab's page text [ ]
-Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "does the app see whats in the browser?" Today `read_active_tab`
 returns only the URL and title. The user wants the agent to read what is
 on the page (option 1 of three offered: page text via AppleScript, not a
@@ -840,7 +847,7 @@ Results (wave 7, 2026-11-09):
 Deviations: none.
 
 #52 — Settings toggle for sending personal text to cloud engines [ ]
-Wave: _ (after wave 6) · Agent: _ · Added: 2026-11-09 · Source: user
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "Is that a setting we should have in the app?" Today the only way to
 let Groq see email and iMessage text is `AGENT_CLOUD_PERSONAL_TEXT=1` in
 `agent-daemon/.env` (#31). The Debug tab shows it read-only
@@ -870,7 +877,7 @@ Deviations:
 ---
 
 #53 — Sandboxed tools can still reach outside via `open` / `osascript` [ ]
-Wave: — (after live checks) · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 7 report)
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 7 report)
 Ask: #22 allows `/usr/bin/osascript` and `/usr/bin/open` in the sandbox so
 generated tools can notify and open things. Both can ask another app (e.g.
 Terminal, via Apple Events) to run code outside the sandbox.
@@ -884,7 +891,7 @@ Deviations:
 ---
 
 #56 — Review and remove remembered denials [ ]
-Wave: — · Agent: _ · Added: 2026-11-09 · Source: user
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "I need a way to remove the denials too." Declined tool ideas are now
 remembered and block reworded repeats (`ai/idea_match.py`, the shared
 `IdeaFeedback` in `~/.bot-inator/idea_feedback.json`). The user needs to see
@@ -913,7 +920,7 @@ Deviations:
 ### Events and listeners
 
 #60 — Calendar through EventKit in the menu bar app [ ]
-Wave: — (not scheduled) · Agent: _ · Added: 2026-11-09 · Source: user (live check of #42)
+Wave: 9 · Agent: _ · Added: 2026-11-09 · Source: user (live check of #42)
 Ask: Calendar doesn't work from the daemon. Live check (2026-11-09):
 EventKit is silently denied to the daemon's Python (no prompt, status stays
 `not_determined`; a bare interpreter has no Info.plist usage string), and
@@ -1265,7 +1272,7 @@ Deviations: edited outside the slot list: `main.py` DELETE route (`tools_changed
 ---
 
 #59 — Permissions checklist: check and request every macOS permission [ ]
-Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "i need a list of check / request all the permissions needed." One
 place that shows every permission the app uses, whether each is granted,
 and a button to request or open the right Settings pane. Today only Full
