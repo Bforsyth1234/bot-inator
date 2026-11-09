@@ -47,7 +47,7 @@ checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
 ============================================================ -->
 
-Next ID: #59
+Next ID: #62
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -506,7 +506,7 @@ Deviations: DELETE also notifies (deleting a disabled/quarantined copy sent noth
 
 ---
 
-#51 — Tool detail view: summary, run conditions, and source for every tool [ ]
+#61 — Tool detail view: summary, run conditions, and source for every tool [ ]
 Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: The app should show detailed data on every tool it has, both the
 built-ins it shipped with and the ones it generated. For each tool:
@@ -668,6 +668,12 @@ Results (wave 4, 2026-11-09):
   and due parsing. Runner: registered (`list_reminders` read-only).
 Deviations: `AGENT_REMINDERS_BACKEND` (falls back to `AGENT_CALENDAR_BACKEND`); timed
 reminders get an alert; an unknown list name is an error.
+Live (2026-11-09): EventKit silently denied (as for Calendar);
+`--reminders --applescript` works: 2 lists (Reminders, To Do), 1 open
+reminder. Pinned `AGENT_REMINDERS_BACKEND=applescript` in
+`agent-daemon/.env`. Still to do: create and list from chat.
+Live (2026-11-09): "remind me to call the vet tomorrow at 9" → card →
+`create_reminder` {due: 2026-11-10T09:00} → ok (AppleScript backend). ✔
 
 ---
 
@@ -701,6 +707,9 @@ Results (wave 1, 2026-11-09):
   failed 3 tests; marking `append_note` read-only failed the gate test.
 Deviations: `append_note` also errors when more than one note has the exact title,
 rather than guessing.
+Live (2026-11-09): "save a note called Test with hello" → approval card →
+Notes Automation prompt → `create_note` {title: Test, body: hello} → ok;
+the model sent `folder: null`, dropped by #55. ✔ Still to do: append.
 
 ---
 
@@ -903,6 +912,73 @@ Deviations:
 
 ### Events and listeners
 
+#60 — Calendar through EventKit in the menu bar app [ ]
+Wave: — (not scheduled) · Agent: _ · Added: 2026-11-09 · Source: user (live check of #42)
+Ask: Calendar doesn't work from the daemon. Live check (2026-11-09):
+EventKit is silently denied to the daemon's Python (no prompt, status stays
+`not_determined`; a bare interpreter has no Info.plist usage string), and
+the AppleScript fallback times out (>60 s for one day's events across the
+user's calendars, even after the Automation prompt was allowed). The user
+chose to move EventKit into the menu bar app, which has an Info.plist and
+can get the normal "allow access to Calendar" prompt. Reminders works
+through AppleScript (pinned `AGENT_REMINDERS_BACKEND=applescript`) and is
+out of scope unless it also gets slow.
+DECISIONS (user + assistant, 2026-11-09):
+1. The app owns EventKit; the daemon asks it over the existing WebSocket
+   (token-protected, #27). No second server, no new port.
+2. Same daemon-side interface as #42: `calendar_access.list(...)` /
+   `create(...)` gain an `app` backend; `list_events`, `create_event`
+   (still approval-gated in the daemon, rule 7a) and `CalendarWatcher` are
+   unchanged above it. `AGENT_CALENDAR_BACKEND=app` selects it; `auto`
+   prefers `app` when the app is connected.
+3. When the app isn't connected, calendar tools return a clear error
+   ("open the bot-inator menu bar app to use Calendar") rather than
+   falling back to the slow AppleScript path.
+4. The app asks for Calendar access only when the daemon first needs it
+   (not at launch), using `requestFullAccessToEvents` (macOS 14+).
+Plan:
+1. Protocol (`schemas/ws_messages.py` + `Models/WSMessage.swift`): a
+   server→client `calendar_request {request_id, op: "list"|"create",
+   args}` and a client→server `calendar_response {request_id, ok,
+   events?|event_id?, error?}`; round-trip tests like the approval frames.
+2. App: `Services/CalendarBridge.swift`: an `EKEventStore`, access request,
+   list (predicate over all event calendars, recurrences expanded by
+   EventKit; map to the #42 event dict: id, title, start, end, calendar,
+   location, notes ≤500 chars, url, all_day) and create (default calendar
+   when empty). `WebSocketManager` routes `calendar_request` to it and
+   sends the response.
+3. Info.plist: `NSCalendarsFullAccessUsageDescription` (and the legacy
+   `NSCalendarsUsageDescription`) with a plain sentence about why.
+4. Daemon: an `AppCalendarBackend` in `tools/calendar_access.py` that sends
+   `calendar_request` to the connected app (orchestrator/WS subscriber
+   path), waits on a future with a timeout (~15 s), and maps errors;
+   `ready()` = app connected and access granted (reported in the app's
+   hello/status so the watcher doesn't poll blind).
+5. `CalendarWatcher` keeps polling every 60 s through the same interface;
+   `_calendar_reader_if_granted` (setup scan) uses it when ready.
+6. Docs: LIVING_SPEC §3 (new frames) and §6; README note that Calendar
+   needs the menu bar app running.
+Files: `schemas/ws_messages.py`, `MenuBarUI/MenuBarUI/Models/WSMessage.swift`,
+`MenuBarUI/MenuBarUI/Services/WebSocketManager.swift`, new
+`MenuBarUI/MenuBarUI/Services/CalendarBridge.swift`,
+`MenuBarUI/MenuBarUI/Info.plist`, `agent-daemon/tools/calendar_access.py`,
+`agent-daemon/main.py` (WS routing of `calendar_response`), tests.
+Verify:
+⚬ pytest: frame round trips; `AppCalendarBackend` with a fake app
+  connection (list, create, timeout, app not connected → clear error);
+  `list_events` / `create_event` unchanged above it; non-vacuity: drop the
+  response routing → the list test times out.
+⚬ swiftc typecheck.
+⚬ Live: first "what's on my calendar today?" → the app shows the macOS
+  Calendar prompt → Allow → today's events in seconds, no card. "Add lunch
+  with Sam tomorrow at noon" → approval card → event in Calendar. An event
+  10 minutes out → `event_starting_soon` in Debug. Quit the app → calendar
+  tools answer with the "open the app" error.
+Time: about half a day.
+Deviations:
+
+---
+
 #41 — Read email from Mail.app's local store [~] live
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "I want the app to be able to read email." New mail becomes an
@@ -1098,6 +1174,9 @@ Live (2026-11-09): `--check` → EventKit silently denied for the Python
 process (no prompt; status stays `not_determined`), as the spike feared.
 Same for Reminders (#45). Next: `--applescript`, then pin
 `AGENT_CALENDAR_BACKEND=applescript` / `AGENT_REMINDERS_BACKEND=applescript`.
+Live (2026-11-09, continued): `--applescript` also fails: listing one
+day timed out after 60 s, even after the Automation prompt was allowed.
+Calendar is blocked on #60 (EventKit inside the menu bar app).
 
 ---
 
@@ -1182,6 +1261,64 @@ Results (wave 5, 2026-11-09):
   (checked every 5 s); the Debug tab shows alive / restarts.
 Deviations: edited outside the slot list: `main.py` DELETE route (`tools_changed`),
 `MenuBarUIApp.swift` (banner wiring).
+
+---
+
+#59 — Permissions checklist: check and request every macOS permission [ ]
+Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
+Ask: "i need a list of check / request all the permissions needed." One
+place that shows every permission the app uses, whether each is granted,
+and a button to request or open the right Settings pane. Today only Full
+Disk Access gets a banner (#19); the rest fail silently or show a macOS
+prompt mid-task.
+Permissions found in the code (assistant, 2026-11-09):
+| Permission | Used by | Check | Request |
+| :--- | :--- | :--- | :--- |
+| Full Disk Access | `events/imessage_watcher.py` (chat.db), `events/mail_watcher.py`, `tools/read_email.py` (~/Library/Mail) | open chat.db / Mail dir read-only | can't prompt; open `Privacy_AllFiles` |
+| Screen Recording | `tools/windows.py` (window titles) | `CGPreflightScreenCaptureAccess` | `CGRequestScreenCaptureAccess`, else open `Privacy_ScreenCapture` |
+| Calendars | `tools/calendar_access.py`, `list_events`, `create_event`, `events/calendar_watcher.py` | `EKEventStore.authorizationStatus` | `requestFullAccessToEvents` |
+| Reminders | `tools/reminders.py` via `calendar_access.py` | `EKEventStore.authorizationStatus` (reminder) | `requestFullAccessToReminders` |
+| Automation → Messages | `tools/send_imessage.py` | `AEDeterminePermissionToAutomateTarget` | same call with ask = true |
+| Automation → Notes | `tools/notes.py` | same | same |
+| Automation → Google Chrome, Safari | `tools/read_active_tab.py` (and #58) | same | same |
+| Automation → Calendar, Reminders | AppleScript fallback in `calendar_access.py` | same | same |
+| Automation → System Events | generated `recent_apps_list.py` | same | same |
+| Browser setting (not TCC) | #58: "Allow JavaScript from Apple Events" in Chrome / Safari | try a no-op `execute javascript` | can't set; show the menu path |
+DECISIONS (assistant, 2026-11-09):
+1. ONE SOURCE OF TRUTH: new `agent-daemon/ai/permissions.py` with a
+   `PERMISSIONS` table (id, name, why, used_by, check(), request()) and
+   `check_all() -> list[dict]` returning `granted | denied | not_asked |
+   unknown` per row. A new built-in tool or watcher adds its row here.
+2. CHECKS NEVER PROMPT. `check_all()` must not trigger a macOS dialog;
+   only an explicit "Request" click does. Automation checks use
+   `AEDeterminePermissionToAutomateTarget` with ask = false, and report
+   `unknown` (not denied) when the target app isn't running.
+3. WHICH PROCESS: permissions attach to the process macOS sees (the
+   daemon's Python binary when started by the app). The list says which
+   binary it is, so the user grants the right entry in Settings.
+4. UI: a "Permissions" section in Settings (`SettingsView.swift`), one row
+   each: name, why, status dot, "Request" or "Open Settings" button.
+   Fed by a new `GET /api/permissions` and `POST /api/permissions/<id>/request`
+   (token-protected like every route, #27). #19's banners stay.
+5. Each row only requests when the user clicks (invariant 7a in spirit:
+   no permission dialogs in the background).
+Files:
+⚬ OWNED: agent-daemon/ai/permissions.py,
+  agent-daemon/tests/test_permissions.py, permissions routes in
+  agent-daemon/main.py, MenuBarUI `SettingsView.swift` (Permissions section)
+⚬ Do NOT touch: the tools/watchers themselves; they keep their own
+  fallbacks.
+Verify:
+⚬ Tests with pyobjc / osascript mocked: each row maps granted / denied /
+  not_asked correctly; `check_all()` never calls a request function
+  (non-vacuity: make one check call request() and confirm the test fails).
+⚬ pytest gate and the swiftc typecheck (rule 8).
+⚬ Live: Settings → Permissions lists every row above with the right
+  status; "Request" on Calendars shows the macOS prompt; "Open Settings"
+  on Full Disk Access opens that pane; after granting, the row turns
+  green without a restart.
+Time: about 3 hours (the Automation check is the fiddly part).
+Deviations:
 
 ### Approvals and UI
 
