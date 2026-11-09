@@ -29,21 +29,21 @@ def _patched_engine(monkeypatch: pytest.MonkeyPatch, return_text: str) -> tuple[
     fake_client.chat.completions.create.return_value = _fake_choice(return_text)
     fake_openai_module = SimpleNamespace(OpenAI=lambda **kwargs: fake_client)
     monkeypatch.setitem(sys.modules, "openai", fake_openai_module)
-    asyncio.get_event_loop().run_until_complete(engine.load())
+    asyncio.run(engine.load())
     return engine, fake_client
 
 
 def test_load_requires_api_key() -> None:
     engine = GroqEngine("test-model", api_key="")
     with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
-        asyncio.get_event_loop().run_until_complete(engine.load())
+        asyncio.run(engine.load())
     assert not engine.loaded
     assert engine.current_model is None
 
 
 def test_generate_routes_through_chat_completion(monkeypatch: pytest.MonkeyPatch) -> None:
     engine, client = _patched_engine(monkeypatch, "hello world")
-    out = asyncio.get_event_loop().run_until_complete(
+    out = asyncio.run(
         engine.generate("hi", max_tokens=10)
     )
     assert out == "hello world"
@@ -70,7 +70,7 @@ def test_evaluate_event_strips_think_blocks(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch,
         "<think>scratch reasoning</think>User opened a Jira ticket.",
     )
-    out = asyncio.get_event_loop().run_until_complete(
+    out = asyncio.run(
         engine.evaluate_event("app_activated: Chrome — Jira")
     )
     assert out == "User opened a Jira ticket."
@@ -79,7 +79,7 @@ def test_evaluate_event_strips_think_blocks(monkeypatch: pytest.MonkeyPatch) -> 
 def test_evaluate_event_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     engine, client = _patched_engine(monkeypatch, "")
     client.chat.completions.create.side_effect = RuntimeError("boom")
-    out = asyncio.get_event_loop().run_until_complete(
+    out = asyncio.run(
         engine.evaluate_event("anything")
     )
     assert out == ""
@@ -87,7 +87,7 @@ def test_evaluate_event_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_swap_updates_active_model_name(monkeypatch: pytest.MonkeyPatch) -> None:
     engine, _ = _patched_engine(monkeypatch, "x")
-    asyncio.get_event_loop().run_until_complete(engine.swap("other-model"))
+    asyncio.run(engine.swap("other-model"))
     assert engine.model_name == "other-model"
     assert engine.current_model == "other-model"
 
