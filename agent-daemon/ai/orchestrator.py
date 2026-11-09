@@ -965,7 +965,7 @@ class Orchestrator:
                     "Groq engine cannot drive the agent loop"
                 )
                 return None
-            return OpenAIServerModel(
+            return _make_groq_model_class(OpenAIServerModel)(
                 model_id=self.engine.model_name,
                 api_base=self.engine.api_base,
                 api_key=self.engine.api_key,
@@ -1056,7 +1056,11 @@ class Orchestrator:
             loop = orchestrator.event_bus.loop or asyncio.get_event_loop()
             event_id = getattr(orchestrator, "_current_event_id", "evt_unknown")
             call_args: list[Any] = list(args)
-            call_kwargs: dict[str, Any] = dict(kwargs)
+            # Models (GPT-OSS on Groq) send null for optional parameters;
+            # drop them so the tool's own defaults apply.
+            call_kwargs: dict[str, Any] = {
+                k: v for k, v in kwargs.items() if v is not None
+            }
             if (
                 tool_name == "generate_custom_tool"
                 and tool_name in orchestrator._turn_tool_calls
@@ -1505,6 +1509,99 @@ class Orchestrator:
             + (f" in {event.app_name}" if event.app_name else "")
             + (f" — {event.window_title}" if event.window_title else "")
         )
+
+
+_TOOL_CALL_REJECTIONS = (
+    "tool_use_failed",
+    "Failed to parse tool call",
+    "Tool call validation failed",
+    "Tool choice is required",
+    "which was not in request.tools",
+)
+
+
+def _is_tool_call_rejection(exc: Exception) -> bool:
+    """True for Groq 400s caused by a malformed or invalid tool call."""
+    text = str(exc)
+    return "400" in text and any(marker in text for marker in _TOOL_CALL_REJECTIONS)
+
+
+def _allow_null_optionals(spec: dict[str, Any]) -> None:
+    """Let optional parameters be null in a tool's JSON schema (in place).
+
+    GPT-OSS sends ``null`` for optional parameters it doesn't use; Groq then
+    rejects the call against a plain ``"type": "string"``. ``gated_forward``
+    drops null arguments so the tool's own defaults apply.
+    """
+    params = (spec.get("function") or {}).get("parameters") or {}
+    required = set(params.get("required") or [])
+    for name, prop in (params.get("properties") or {}).items():
+        if name in required or not isinstance(prop, dict):
+            continue
+        kind = prop.get("type")
+        if isinstance(kind, str) and kind != "null":
+            prop["type"] = [kind, "null"]
+        elif isinstance(kind, list) and "null" not in kind:
+            prop["type"] = kind + ["null"]
+
+
+def _make_groq_model_class(base: type) -> type:
+    """``OpenAIServerModel`` that tolerates a plain-text reply on Groq.
+
+    smolagents sends ``tool_choice="required"``. Groq enforces it server-side:
+    when a model (GPT-OSS) answers in plain text after a tool result, Groq
+    returns 400 "Tool choice is required, but model did not call a tool" and
+    the whole chat turn fails (found in the 2026-11-09 live checks: the user
+    asked "list my shortcuts", ``list_shortcuts`` ran, then no reply).
+    Ask for ``tool_choice="auto"`` and treat a plain-text reply as the final
+    answer, which is what the model meant.
+    """
+    from smolagents.models import (  # type: ignore
+        ChatMessageToolCall,
+        ChatMessageToolCallFunction,
+    )
+
+    class _GroqServerModel(base):  # type: ignore[misc, valid-type]
+        def _prepare_completion_kwargs(self, *args, **kwargs):
+            completion = super()._prepare_completion_kwargs(*args, **kwargs)
+            for spec in completion.get("tools") or []:
+                _allow_null_optionals(spec)
+            return completion
+
+        def generate(self, messages, stop_sequences=None, response_format=None,
+                     tools_to_call_from=None, **kwargs):
+            if tools_to_call_from:
+                kwargs.setdefault("tool_choice", "auto")
+            # Groq validates tool calls server-side and fails the whole turn
+            # with a 400 when the model emits bad JSON or a wrong tool name.
+            # The model is stochastic, so one retry usually succeeds.
+            for attempt in range(2):
+                try:
+                    message = super().generate(
+                        messages,
+                        stop_sequences=stop_sequences,
+                        response_format=response_format,
+                        tools_to_call_from=tools_to_call_from,
+                        **kwargs,
+                    )
+                    break
+                except Exception as exc:  # openai.BadRequestError, lazily typed
+                    if attempt == 0 and _is_tool_call_rejection(exc):
+                        logger.info("Groq rejected a tool call (%s); retrying once", exc)
+                        continue
+                    raise
+            content = (message.content or "").strip() if isinstance(message.content, str) else ""
+            if tools_to_call_from and not message.tool_calls and content:
+                message.tool_calls = [ChatMessageToolCall(
+                    id=f"call_{uuid.uuid4().hex[:12]}",
+                    type="function",
+                    function=ChatMessageToolCallFunction(
+                        name="final_answer", arguments={"answer": content},
+                    ),
+                )]
+            return message
+
+    return _GroqServerModel
 
 
 def _make_mlx_model_class() -> type:

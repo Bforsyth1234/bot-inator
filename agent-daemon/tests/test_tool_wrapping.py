@@ -87,3 +87,17 @@ def test_new_orchestrator_replaces_stale_loop() -> None:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=2)
         loop.close()
+
+
+def test_null_kwargs_are_dropped_so_defaults_apply() -> None:
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        orch = _fake_orchestrator(loop, [])
+        wrapped = orch._wrap_tool_for_approval(ping_tool)
+        assert wrapped.forward(text="hi", unused=None) == "pong:hi"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2)
+        loop.close()

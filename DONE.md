@@ -878,3 +878,27 @@ Results: `tests/test_judge_budget.py` (budget ≥400; no judge literal under
 400 in main.py / open_help.py); non-vacuity: old code → the test fails.
 Judge eval after the fix: 8/9 match (was 7/9, by accident). Full suite green.
 Deviations: none.
+
+---
+
+#55 — Chat and event turns failed on Groq (tool-call rejections) [x]
+Wave: live checks (runner) · Added: 2026-11-09 · Source: user ("it has not answered")
+Ask: "list my shortcuts" ran `list_shortcuts` and then the chat stayed
+silent. Groq validates tool calls server-side and failed the whole turn
+with a 400 in three ways seen in the log: (1) "Tool choice is required"
+(smolagents sends `tool_choice="required"`; the model answered in text after
+the tool result); (2) "Failed to parse tool call arguments as JSON"; (3)
+`create_reminder` "`/due`: expected string, but got null" (the model sends
+null for optional params; also "called tool 'answer' which was not in
+request.tools").
+Fix (`ai/orchestrator.py`): `_make_groq_model_class` wraps
+`OpenAIServerModel`: `tool_choice="auto"` and a plain-text reply becomes the
+`final_answer`; optional parameters are nullable in the schemas sent to Groq
+(`_allow_null_optionals`); one retry on a tool-call rejection 400
+(`_is_tool_call_rejection`), other errors raise. `gated_forward` drops
+null arguments so tool defaults apply. Local MLX is unchanged.
+Results: `tests/test_groq_model.py` (5) and a null-argument test in
+`tests/test_tool_wrapping.py`. Live: "list my shortcuts" → `list_shortcuts`
+→ "Your shortcuts are: Open App, What's a shortcut?, Take a Break, Text Last
+Image, Shazam shortcut"; no 400s in the log.
+Deviations: none.
