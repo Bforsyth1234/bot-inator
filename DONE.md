@@ -805,3 +805,34 @@ built-in is remembered as a rejection; conftest blanks `AGENT_PROVIDER_*`.
 Wave-close run: full suite 476 passed, 3 runs in a row; Swift type-check
 clean. #19, #29, #31 built and wait in todo.md as `[~] live`. New gap #51
 (local idea text quoting personal text into a cloud prompt) moved to wave 7.
+
+## Wave 6 — closed 2026-11-09
+
+Wave-close run: full suite 505 passed, 3 runs in a row; Swift type-check
+clean. #27 (Origin check + token) built and waits as `[~] live`.
+
+#50 — One unidentified full-suite failure in 12 runs [x]
+Wave: — (watch) · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 2 close)
+Ask: At wave 2 close one full run reported `1 failed, 286 passed`; the next
+11 full runs were all green, so the failing test wasn't captured. Suspects:
+the timing-based tests added in wave 2 (`test_mac_listeners.py` uses real
+subprocesses and sub-second timings).
+Approach: when it happens again, record the test id (run with
+`-p no:cacheprovider -rf`) and give that test timing headroom.
+FROM WAVE 3 close (2026-11-09): caught it:
+`test_mac_listeners.py::test_helper_restarts_after_crash_with_backoff` (4
+interpreter starts in a 2 s deadline). Deadline raised to 10 s; the gap
+assertions stay exact. Also seen: one full run took 108 s instead of ~36 s;
+found: `test_memory.py::test_close_while_searching_from_threads` (47 s to
+minutes: 4 spinning workers starved `close()` of the lock). Workers now
+yield and the close loop is time-boxed: ~3.5 s, still segfaults 3/3 with the
+lock removed. Suite back to 25–32 s, 361 passed ×3.
+Verify: 10 consecutive full runs green after the fix.
+Results (wave 6 close, 2026-11-09): the real cause was a bug, not only
+timing: `MacAppListener`'s supervisor recorded the SIGTERM from `stop()` as
+the helper's exit (`last_exit_code` -15), overwriting the last real crash.
+Fixed in `events/mac_listeners.py` (an intentional stop no longer updates
+`last_exit_code`). The test failed 3/8 and 1/8 before, passed 12/12 after.
+Also at wave 6 close: conftest pins `AGENT_CLOUD_PERSONAL_TEXT=0` so a
+developer `.env` opt-in doesn't change test results.
+Deviations:

@@ -49,6 +49,16 @@ back to the most recent memories.
 With the default local provider, the first start downloads three MLX models
 from Hugging Face (several GB) and can take a few minutes.
 
+The first start also creates `~/.bot-inator/token` (readable only by you).
+Every route except `GET /health`, and the WebSocket, needs it as a bearer
+token; the menu bar app reads it automatically. Requests that carry a
+browser `Origin` header are refused, so web pages can't reach the daemon.
+For `curl`:
+
+```bash
+curl -H "Authorization: Bearer $(cat ~/.bot-inator/token)" http://127.0.0.1:8000/api/tools
+```
+
 ### 2. Build and launch the menu bar app
 
 There is no Xcode project in the repo; build it straight from the sources:

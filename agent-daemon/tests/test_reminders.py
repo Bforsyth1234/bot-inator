@@ -158,9 +158,10 @@ def client():
     ), patch("ai.mlx_engine.MLXEngine.generate_chat_sync", return_value="NO_PATTERN"):
         from fastapi.testclient import TestClient
 
+        from auth import auth_header
         from main import app
 
-        with TestClient(app) as test_client:
+        with TestClient(app, headers=auth_header()) as test_client:
             yield test_client
 
 

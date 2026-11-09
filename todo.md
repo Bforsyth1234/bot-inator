@@ -47,7 +47,7 @@ checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
 ============================================================ -->
 
-Next ID: #52
+Next ID: #53
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -71,7 +71,7 @@ API auth → sandbox for installed tools → live checks.
 | 3 | A: #23 #28 #38 · B: #41 · C: #42 · D: #33 #35 · E: #34 | A `ai/orchestrator.py`, tool routes in `main.py`, `ToolManagerView.swift` · B `events/mail_watcher.py`, `tools/read_email.py` · C `tools/calendar_access.py`, `tools/list_events.py`, `tools/create_event.py`, `events/calendar_watcher.py`, `requirements.txt` · D `ai/setup_scan.py`, `ai/starter_catalog.json` · E `events/clipboard_watcher.py`, `ai/friction.py` | [x] closed 2026-11-09 (all `[~] live`) |
 | 4 | A: #32 · B: #45 · C: #15 #18 · D: #26 | A `ai/idea_sources.py`, `ai/open_help.py` · B `tools/reminders.py` (+ additive `tools/calendar_access.py`) · C `ApprovalAlert.swift`, `ApprovalPresenter.swift`, `CodeReviewAlert.swift` · D `config.py`, engine setup + settings routes in `main.py`, `SettingsView.swift` | [x] closed 2026-11-09 (all `[~] live`) |
 | 5 | A: #19 #29 #31 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `DebugView.swift`, `ToolManagerView.swift`, `ai/orchestrator.py`, `events/imessage_watcher.py` | [x] closed 2026-11-09 (all `[~] live`) |
-| 6 | A: #27 (alone) | `main.py` (all routes + WS), every Swift HTTP/WS client | [ ] |
+| 6 | A: #27 (alone) | `main.py` (all routes + WS), every Swift HTTP/WS client | [x] closed 2026-11-09 (`[~] live`) |
 | 7 | A: #22 #51 (alone) | `ai/orchestrator.py` tool execution, new `tools/tool_sandbox.py` | [ ] |
 | — | #37 + every `[~] live` item | Live checks list (below) — needs the user at the Mac | [ ] |
 
@@ -136,6 +136,7 @@ to see.
 - #19 Notices: start the daemon without Full Disk Access → two banners (iMessages, Mail); "Open Settings" opens Privacy → Full Disk Access; dismiss hides them; a new client sees the replay. With access granted + restart → no banner. Debug "Listener health": nsworkspace alive, restarts 0; `kill <helper pid>` → restarts 1 within ~5 s.
 - #29 tools_changed: with Manage Tools open, `curl -X POST http://127.0.0.1:8000/api/tools/<t>/disable` → the row updates without refresh (after #27, add the token header).
 - #31 Privacy: `AGENT_PROVIDER_MAIN=groq` → Debug shows "main: groq (cloud)" and "Personal text to cloud: kept on this Mac"; an inbound iMessage's reasoning prompt shows `[personal text kept on this Mac]`.
+- #27 Auth: build and launch the app → it connects, approves, lists tools, saves settings; `ls -l ~/.bot-inator/token` → `-rw-------`. Move the token away + restart the app → Offline with the hint; put it back → reconnects. Settings → Restart Daemon → comes back and reconnects. From a browser devtools console, `new WebSocket("ws://127.0.0.1:8000/ws/stream")` → refused; log "Refused websocket /ws/stream: Origin not allowed". Every curl in these checks now needs `-H "Authorization: Bearer $(cat ~/.bot-inator/token)"`.
 
 ---
 
@@ -159,6 +160,7 @@ to see.
 - #40 — test_dry_run order flake (not reproducible, closed) · 2026-11-09 · [DONE.md](DONE.md)
 - #48 — Approval wrapping stacked on every agent rebuild · 2026-11-09 · [DONE.md](DONE.md)
 - #49 — Drafting prompt printed wrong import paths for built-ins · 2026-11-09 · [DONE.md](DONE.md)
+- #50 — Flaky restart test: stop() overwrote the last exit code · 2026-11-09 · [DONE.md](DONE.md)
 
 ---
 
@@ -730,30 +732,38 @@ Verify: a test where a local idea quotes "dinner at 7 with Sam" and the cloud
 main prompt contains the placeholder instead.
 Deviations:
 
+#52 — Settings toggle for sending personal text to cloud engines [ ]
+Wave: _ (after wave 6) · Agent: _ · Added: 2026-11-09 · Source: user
+Ask: "Is that a setting we should have in the app?" Today the only way to
+let Groq see email and iMessage text is `AGENT_CLOUD_PERSONAL_TEXT=1` in
+`agent-daemon/.env` (#31). The Debug tab shows it read-only
+(`cloud_personal_text` in the status frame); Settings has no control.
+DECISIONS (user, 2026-11-09):
+1. The user turned the opt-in on (via `.env`) so the agent can read email
+   while every engine runs on Groq.
+Files:
+⚬ OWNED: MenuBarUI/MenuBarUI/Views/SettingsView.swift, agent-daemon/ai/privacy.py
+⚬ EDITED (additive): agent-daemon/user_settings.py (`ALLOWED_KEYS`),
+  agent-daemon/main.py (settings API), agent-daemon/.env.example (document it)
+Approach: add a persisted `cloud_personal_text` user setting, read by
+`privacy.personal_text_allowed()` (env var still wins when set). Settings
+gets a toggle next to the engine pickers, labeled e.g. "Let cloud models
+see email and message text", shown only when an engine uses Groq, off by
+default (invariant 7c). It applies without a restart (privacy reads it per
+call); the status frame updates so the Debug tab stays in sync.
+Verify:
+⚬ Toggle on/off in Settings → the next iMessage/email prompt to Groq
+  carries / omits the text (check the agent daemon log).
+⚬ pytest gate; Xcode/swiftc build for MenuBarUI.
+⚬ New test in `tests/test_settings_api.py`: PUT `cloud_personal_text`
+  flips `should_redact("main")` for a cloud main engine; non-vacuity:
+  ignore the setting in `personal_text_allowed()` → test fails.
+Deviations:
+
 ---
 
 ### Test hygiene
 
-#50 — One unidentified full-suite failure in 12 runs [ ]
-Wave: — (watch) · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 2 close)
-Ask: At wave 2 close one full run reported `1 failed, 286 passed`; the next
-11 full runs were all green, so the failing test wasn't captured. Suspects:
-the timing-based tests added in wave 2 (`test_mac_listeners.py` uses real
-subprocesses and sub-second timings).
-Approach: when it happens again, record the test id (run with
-`-p no:cacheprovider -rf`) and give that test timing headroom.
-FROM WAVE 3 close (2026-11-09): caught it:
-`test_mac_listeners.py::test_helper_restarts_after_crash_with_backoff` (4
-interpreter starts in a 2 s deadline). Deadline raised to 10 s; the gap
-assertions stay exact. Also seen: one full run took 108 s instead of ~36 s;
-found: `test_memory.py::test_close_while_searching_from_threads` (47 s to
-minutes: 4 spinning workers starved `close()` of the lock). Workers now
-yield and the close loop is time-boxed: ~3.5 s, still segfaults 3/3 with the
-lock removed. Suite back to 25–32 s, 361 passed ×3.
-Verify: 10 consecutive full runs green after the fix.
-Deviations:
-
----
 
 ### Events and listeners
 
@@ -1116,7 +1126,7 @@ Deviations: `clear_memory` keeps `chat_log`.
 
 ### Security and providers
 
-#27 — HTTP API has no authentication [ ] [Q14]
+#27 — HTTP API has no authentication [~] live [Q14]
 Wave: 6 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q14)
 Ask: The daemon binds `127.0.0.1`, so any local process can hit
 `DELETE /api/tools` and wipe the agent's learned behaviour. Same threat
@@ -1148,7 +1158,24 @@ Verify:
 ⚬ Non-vacuity: drop each check in turn, its test fails.
 ⚬ Live: the menu bar app still connects, approves, lists tools and saves
   settings after the change.
-Deviations:
+Results (wave 6, 2026-11-09):
+⚬ `agent-daemon/auth.py` ASGI middleware for HTTP and WS, registered in
+  `main.py`: (1) any request with an `Origin` header → 403 (WS close 1008
+  before accept), `/health` included; exact-match allow-list
+  `AGENT_ALLOWED_ORIGINS`, empty by default. (2) `~/.bot-inator/token`
+  (`secrets.token_urlsafe(32)`, file 0600, dir 0700, created at startup,
+  `AGENT_TOKEN_PATH` override, never logged), constant-time compare;
+  missing/wrong → 401 + `WWW-Authenticate: Bearer` or WS close 1008; only
+  `GET /health` exempt. `/api/restart` keeps the token file.
+⚬ Swift `Services/DaemonAuth.swift` reads the token on every connect/request;
+  the WS task is built from a `URLRequest` with the header. No token →
+  Offline + hint, retries with backoff; 401/403 → "token rejected" hint.
+⚬ Verified with a Swift probe: neither `URLSession` nor
+  `URLSessionWebSocketTask` sends `Origin`; `Authorization` arrives on both.
+⚬ `tests/test_auth.py` 22; conftest sets a temp `AGENT_TOKEN_PATH`; test
+  clients send `auth_header()`. Non-vacuity: no Origin check → 5 fail, no
+  token check → 12, no `/health` exemption → 1, no middleware → 16.
+Deviations: `scripts/chat_smoke.py` now sends the token (outside the slot).
 
 ---
 

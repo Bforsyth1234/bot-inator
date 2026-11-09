@@ -1,8 +1,13 @@
 """FastAPI entry point for the agent daemon.
 
 Exposes:
-- GET  /health      — liveness probe
+- GET  /health      — liveness probe (no token needed)
 - WS   /ws/stream   — bidirectional protocol for the SwiftUI MenuBar app
+- /api/*            — tools, chats, settings, restart
+
+Every route except ``GET /health``, and the WS handshake, needs
+``Authorization: Bearer <~/.bot-inator/token>``; any request carrying a
+browser ``Origin`` header is refused first (#27, see ``auth.py``).
 """
 from __future__ import annotations
 
@@ -21,6 +26,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 import user_settings
+from auth import AuthMiddleware, get_token
 
 from ai.memory import Memory, set_default_memory
 from ai.privacy import personal_text_allowed
@@ -155,6 +161,9 @@ def _select_detection_engine(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.seq = 0
+    # Create ~/.bot-inator/token on first start so clients can read it
+    # (#27). Never log the value.
+    get_token()
 
     bus = EventBus()
     bus.bind_loop(asyncio.get_running_loop())
@@ -378,6 +387,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="agent-daemon", version="0.1.0", lifespan=lifespan)
+# Origin check, then bearer token, on every HTTP route and the WS (#27).
+app.add_middleware(AuthMiddleware)
 
 
 def _next_seq() -> int:
