@@ -34,6 +34,11 @@ def client():
         "ai.mlx_engine.MLXEngine.evaluate_event",
         new_callable=AsyncMock,
         return_value="",
+    ), patch(
+        # Pattern detection calls ``generate_chat_sync`` directly; stub it
+        # so a test that pushes enough events never loads a real model.
+        "ai.mlx_engine.MLXEngine.generate_chat_sync",
+        return_value="NO_PATTERN",
     ):
         from main import app  # noqa: WPS433 - import after env/patch set up
 
@@ -623,9 +628,9 @@ def test_pattern_recognizer_publishes_on_match(tmp_path) -> None:
 
         rec = PatternRecognizer(
             event_bus=bus, evaluate=fake_eval,
-            trigger_every=2, trigger_interval=3600, cooldown_seconds=0.01,
+            trigger_every=3, trigger_interval=3600, cooldown_seconds=0.01,
         )
-        for _ in range(2):
+        for _ in range(3):
             task = rec.observe(ContextEvent(event_type="app_activated", app_name="X"))
         assert task is not None
         await task
@@ -653,9 +658,10 @@ def test_pattern_recognizer_ignores_no_pattern(tmp_path) -> None:
 
         rec = PatternRecognizer(
             event_bus=bus, evaluate=fake_eval,
-            trigger_every=1, trigger_interval=3600, cooldown_seconds=0.01,
+            trigger_every=3, trigger_interval=3600, cooldown_seconds=0.01,
         )
-        task = rec.observe(ContextEvent(event_type="file"))
+        for _ in range(3):
+            task = rec.observe(ContextEvent(event_type="file"))
         assert task is not None
         await task
         return bus.qsize() == 0
@@ -1012,3 +1018,208 @@ def test_metal_cache_clear_fires_on_interval(monkeypatch) -> None:
 
     # Ran 5 times with interval=2 → triggers at gen 2 and gen 4.
     assert calls["n"] == 2, f"expected 2 cache clears, got {calls['n']}"
+
+
+def test_detection_evaluator_uses_detection_system_prompt() -> None:
+    """Detection must send its own system prompt and a 512-token budget.
+
+    Regression: detection used to go through ``evaluate_event``, whose
+    event-summary system prompt forbids proposing actions and whose
+    128-token cap truncated the JSON proposal.
+    """
+    import asyncio as _asyncio
+
+    from ai.pattern_recognizer import (
+        DETECTION_MAX_TOKENS,
+        DETECTION_SYSTEM_PROMPT,
+        make_detection_evaluator,
+    )
+
+    calls: list[tuple[str, str, int]] = []
+
+    class FakeEngine:
+        loaded = True
+
+        def generate_chat_sync(self, system: str, user: str, max_tokens: int) -> str:
+            calls.append((system, user, max_tokens))
+            return "<think>hmm</think>NO_PATTERN"
+
+    evaluate = make_detection_evaluator(FakeEngine())
+    out = _asyncio.run(evaluate("Recent events (oldest first):\n- app_activated"))
+
+    assert out == "NO_PATTERN"
+    assert len(calls) == 1
+    system, user, max_tokens = calls[0]
+    assert system == DETECTION_SYSTEM_PROMPT
+    assert "do not propose actions" not in system.lower()
+    assert user.startswith("Recent events")
+    assert max_tokens == DETECTION_MAX_TOKENS >= 512
+
+
+def test_pattern_recognizer_end_to_end_with_detection_evaluator() -> None:
+    """A long proposal survives the real evaluator and reaches the bus."""
+    import asyncio as _asyncio
+    import json as _json
+
+    from ai.pattern_recognizer import PatternRecognizer, make_detection_evaluator
+    from events.event_bus import EventBus
+
+    long_logic = "Step. " * 120  # well past the old 128-token cap
+    proposal = _json.dumps({
+        "tool_name": "file_invoices",
+        "description": "Move downloaded invoice PDFs into ~/Documents/Invoices.",
+        "expected_logic": long_logic,
+    })
+    seen_users: list[str] = []
+
+    class FakeEngine:
+        loaded = True
+
+        def generate_chat_sync(self, system: str, user: str, max_tokens: int) -> str:
+            seen_users.append(user)
+            return proposal
+
+    async def scenario():
+        bus = EventBus()
+        bus.bind_loop(_asyncio.get_running_loop())
+        rec = PatternRecognizer(
+            event_bus=bus,
+            evaluate=make_detection_evaluator(FakeEngine()),
+            trigger_every=3, trigger_interval=3600, cooldown_seconds=0.01,
+        )
+        task = None
+        for _ in range(3):
+            task = rec.observe(ContextEvent(event_type="file_created", app_name="Finder"))
+        assert task is not None
+        await task
+        return await _asyncio.wait_for(bus.consume(), timeout=0.5)
+
+    event = _asyncio.run(scenario())
+    assert event.event_type == "pattern_detected"
+    assert event.metadata["tool_name"] == "file_invoices"
+    assert event.metadata["expected_logic"] == long_logic.strip()
+    assert "file_created" in seen_users[0]
+
+
+def test_select_detection_engine_defaults_to_main() -> None:
+    """Detection runs on the main engine unless configured otherwise."""
+    from config import Settings
+    from main import _select_detection_engine
+
+    main_e, analysis_e, drafting_e = object(), object(), object()
+
+    assert Settings().pattern_detection_engine == "main"
+    assert _select_detection_engine("main", main_e, analysis_e, drafting_e) is main_e
+    assert _select_detection_engine("ANALYSIS", main_e, analysis_e, drafting_e) is analysis_e
+    assert _select_detection_engine("drafting", main_e, analysis_e, drafting_e) is drafting_e
+    assert _select_detection_engine("typo", main_e, analysis_e, drafting_e) is main_e
+
+
+def test_pattern_parse_accepts_raw_newlines_in_strings() -> None:
+    """Models write numbered steps with literal newlines inside JSON strings."""
+    from ai.pattern_recognizer import PatternRecognizer
+
+    raw = (
+        '{"tool_name": "invoice_processor", "description": "File invoices.", '
+        '"expected_logic": "1. Find the PDF.\n2. Move it to ~/Invoices."}'
+    )
+    parsed = PatternRecognizer._parse(raw)
+    assert parsed is not None
+    assert parsed["tool_name"] == "invoice_processor"
+    assert "2. Move it" in parsed["expected_logic"]
+
+
+def test_pattern_recognizer_skips_llm_when_nothing_repeats() -> None:
+    """Ten unrelated app switches must not reach the model at all.
+
+    Regression: Hermes-3 8B proposed a ``daily_rituals`` tool for a
+    window of random app switches. The repeat gate stops that call.
+    """
+    import asyncio as _asyncio
+
+    from ai.pattern_recognizer import PatternRecognizer
+    from events.event_bus import EventBus
+
+    calls: list[str] = []
+
+    async def fake_eval(prompt: str) -> str:
+        calls.append(prompt)
+        return '{"tool_name": "daily_rituals", "description": "x", "expected_logic": "y"}'
+
+    async def scenario() -> list:
+        bus = EventBus()
+        bus.bind_loop(_asyncio.get_running_loop())
+        rec = PatternRecognizer(
+            event_bus=bus, evaluate=fake_eval,
+            trigger_every=10, trigger_interval=3600, cooldown_seconds=0.01,
+        )
+        apps = ["Safari", "Slack", "Xcode", "Spotify", "Notes",
+                "Terminal", "Calendar", "Safari", "Messages", "Figma"]
+        return [rec.observe(ContextEvent(event_type="app_activated", app_name=a)) for a in apps]
+
+    tasks = _asyncio.run(scenario())
+    assert all(t is None for t in tasks)
+    assert calls == []
+
+
+def test_pattern_recognizer_signature_ignores_titles_and_paths() -> None:
+    """Three rounds of the same step on different files share a signature."""
+    from ai.pattern_recognizer import PatternRecognizer
+
+    sigs = {
+        PatternRecognizer._signature(ContextEvent(
+            event_type="file",
+            metadata={"path": f"/Users/me/Downloads/inv{n}.pdf", "action": "created"},
+        ))
+        for n in (1041, 1042, 1043)
+    }
+    assert len(sigs) == 1
+    assert PatternRecognizer._signature(
+        ContextEvent(event_type="app_activated", app_name="Preview", window_title="a.pdf")
+    ) == PatternRecognizer._signature(
+        ContextEvent(event_type="app_activated", app_name="Preview", window_title="b.pdf")
+    )
+
+
+def test_load_dynamic_tools_ignores_imported_builtin_tools(tmp_path) -> None:
+    """A generated tool that imports a built-in must not re-register it.
+
+    Regression (2026-11-09 live run): ``recent_apps.py`` imported
+    ``show_notification`` and the loader picked that up instead of
+    ``recent_apps``, so the agent rebuild failed on duplicate names.
+    """
+    import asyncio as _asyncio
+    from unittest.mock import patch as _patch
+
+    from ai.mlx_engine import MLXEngine
+    from ai.orchestrator import Orchestrator
+    from events.event_bus import EventBus
+    from tools import AVAILABLE_TOOLS
+
+    (tmp_path / "recent_apps.py").write_text(
+        '"""Recent apps."""\n'
+        'from smolagents import tool\n'
+        'from tools.show_notification import show_notification\n\n'
+        '@tool\n'
+        'def recent_apps() -> dict:\n'
+        '    """List recent apps."""\n'
+        '    return {"status": "ok"}\n'
+    )
+
+    loop = _asyncio.new_event_loop()
+    try:
+        bus = EventBus()
+        bus.bind_loop(loop)
+        with _patch.object(Orchestrator, "_build_agent", return_value=None):
+            orch = Orchestrator(
+                engine=MLXEngine(), event_bus=bus, tools=list(AVAILABLE_TOOLS),
+                generated_tools_dir=tmp_path,
+            )
+            loaded = orch.load_dynamic_tools()
+            loaded_again = orch.load_dynamic_tools()
+    finally:
+        loop.close()
+    names = [t.name for t in orch.tools]
+    assert loaded == loaded_again == ["recent_apps"]
+    assert names.count("show_notification") == 1
+    assert names.count("recent_apps") == 1

@@ -6,9 +6,42 @@ phases supersede older ones where they conflict.
 
 ## 1. Goals
 
-A fully on-device macOS agent that observes system events, reasons about them
-with a local LLM, and proposes actions that the user approves or rejects from
-a MenuBar UI. No cloud inference, no background action without consent.
+A local-first macOS agent that builds agent workflows to help the user
+wherever it can. It observes system events, reasons about them with an
+LLM, and proposes tools and actions that the user approves or rejects
+from a MenuBar UI. No background action without consent.
+
+**Guiding question.** For every event, or window of events, the LLM asks:
+*"How could I possibly help the user here?"* That question is always
+asked. It is never gated on repetition or on a fixed list of event kinds.
+
+**Ask always, surface rarely.** Open-ended generation from a small model
+over-proposes (Phase 5.2: "add a screenshot to the calendar"). So the
+pipeline has two separate stages:
+
+1. **Generate.** Ask the guiding question freely and produce candidate
+   ideas. Generating is cheap and its output is never shown directly.
+2. **Filter.** A candidate reaches the user only if it passes a quality
+   bar: critic review, static draft checks and a dry run
+   (`tools/draft_critic.py`, `tools/draft_checks.py`,
+   `tools/draft_dry_run.py`). When in doubt, drop it.
+3. **Learn.** Approvals and rejections tune what passes the bar, so
+   suggestions fit this user over time.
+
+Known-good follow-ups (`FOLLOW_UPS` in `ai/idea_sources.py`) and the
+repeated-workflow detector (`ai/pattern_recognizer.py`) are seed sources
+of high-confidence ideas. They are not the only ideas allowed.
+
+Implemented by `ai/open_help.py` (`OpenHelpSuggester`, source
+`open_help`): it asks over a rolling window of events at most once per
+`AGENT_OPEN_HELP_INTERVAL`, a judge call scores each idea 0-10 against
+`AGENT_OPEN_HELP_MIN_SCORE`, and approve/reject answers on
+`generate_custom_tool` are kept in `~/.bot-inator/idea_feedback.json`.
+
+Inference runs on-device (MLX) by default. Groq cloud inference is an
+opt-in alternative (`AGENT_PROVIDER=groq`, Phase 4.7). With Groq selected,
+event summaries, chat and tool drafts leave the machine; nothing else
+about the consent model changes.
 
 ## 2. Topology
 
@@ -27,12 +60,14 @@ a MenuBar UI. No cloud inference, no background action without consent.
 │          ◄── IMessageWatcher (sqlite ro poll of chat.db) │
 │     │                                                    │
 │     ▼                                                    │
-│  Orchestrator ── smolagents(_MLXModel) ── MLXEngine      │
-│        │                                      │          │
+│  Orchestrator ── smolagents adapter ── engine triplet    │
+│        │          (_MLXModel |         (main, analysis,  │
+│        │           OpenAIServerModel)   drafting)        │
 │        └─ approval-gated tools                │          │
 │        └─ subscribers (WebSocket fan-out)     │          │
-│                                               ▼          │
-│                                       mlx-lm + Metal     │
+│        └─ idea sources → pattern_detected     ▼          │
+│                              AGENT_PROVIDER=local: mlx-lm│
+│                              AGENT_PROVIDER=groq:  Groq  │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -143,12 +178,21 @@ removal to the nested git repo (§8 Phase 4.6), and returns 200 with
 | `main.py`                     | FastAPI app, `/health`, `/ws/stream`,              |
 |                               | `GET /api/tools`, `DELETE /api/tools/{name}`,      |
 |                               | lifespan (orchestrator + listeners + memory).      |
-| `config.py`                   | `settings` (model path, watch dirs, timeouts).     |
+| `config.py`                   | `settings` (provider, model paths, Groq models,    |
+|                               | watch dirs). Loads `agent-daemon/.env` via         |
+|                               | `python-dotenv`; shell exports win.                |
 | `ai/mlx_engine.py`            | Async wrapper over `mlx_lm` (load/unload/swap).    |
+| `ai/groq_engine.py`           | `GroqEngine`: same duck-typed surface as           |
+|                               | `MLXEngine`, backed by Groq's OpenAI-compatible    |
+|                               | chat API. load/unload/swap are bookkeeping only.   |
+| `ai/idea_sources.py`          | `NextStepSuggester` (fixed `FOLLOW_UPS` list) and  |
+|                               | `ChatGapDetector`; both publish `pattern_detected` |
+|                               | with `metadata.source` (§8 Phase 5.2).             |
 | `ai/orchestrator.py`          | Event loop, tool gating, subscriber fan-out,       |
 |                               | dynamic-tool hot-reload (`load_dynamic_tools`).    |
 | `ai/pattern_recognizer.py`    | Rolling 50-event deque fed by the orchestrator;    |
-|                               | periodically prompts `analysis_engine` to identify |
+|                               | periodically prompts the main engine (configurable,|
+|                               | `AGENT_PATTERN_ENGINE`) to identify                |
 |                               | a repeating manual workflow and, when found, emits |
 |                               | a `pattern_detected` event back onto the bus.      |
 | `ai/memory.py`                | Long-term memory: SQLite + optional `sqlite-vec`   |
@@ -176,24 +220,40 @@ removal to the nested git repo (§8 Phase 4.6), and returns 200 with
 |                               | `generate_custom_tool` writes a new module.        |
 | `tools/meta_tool_generator.py`| Orchestrator-private `generate_custom_tool`        |
 |                               | (not in `AVAILABLE_TOOLS`; never exposed to the    |
-|                               | LLM). Drafts code → emits `code_approval_request`  |
+|                               | LLM). Drafts code → checks → critic → repair (≤3)  |
+|                               | → emits `code_approval_request`                    |
 |                               | → persists to `tools/generated/` → hot-reloads.    |
+| `tools/draft_checks.py`       | `check_draft`: staged static + import checks on a  |
+|                               | drafted module (§8 Phase 5.1).                     |
+| `tools/draft_critic.py`       | Grounded logic review of a draft against its spec; |
+|                               | advisory, `AGENT_DRAFT_CRITIC=0` disables.         |
 
-## 5. MLX inference
+## 5. Inference engines
 
-Two `MLXEngine` instances are kept warm in unified memory, each with its
-own `asyncio.Lock` so load/unload/swap are serialised against generation
-within that engine.
+`main._build_engines()` builds three engines from `settings.provider`
+(`AGENT_PROVIDER`): `local` (default) → `MLXEngine`, `groq` →
+`GroqEngine`. Each has its own `asyncio.Lock`. Eager-loading is
+serialised to avoid `huggingface_hub` lock contention.
 
-| Engine                | Model                                           | Used by                                       |
-|-----------------------|-------------------------------------------------|-----------------------------------------------|
-| `engine` (main)       | `settings.model_path` = Hermes-3-Llama-3.1-8B   | Orchestrator tool-calling loop (smolagents).  |
-| `analysis_engine`     | `settings.analysis_model_path` = Qwen2.5-1.5B   | `_analyse_event` → `evaluate_event` only.     |
+| Engine             | Local (MLX)                         | Groq (`GROQ_*_MODEL`)       | Used by                                         |
+|--------------------|-------------------------------------|-----------------------------|-------------------------------------------------|
+| `engine` (main)    | Hermes-3-Llama-3.1-8B-4bit          | `openai/gpt-oss-120b`       | smolagents tool loop; pattern detection and idea sources by default. |
+| `analysis_engine`  | Qwen2.5-1.5B-Instruct-4bit          | `openai/gpt-oss-20b`        | `_analyse_event` → `evaluate_event`.            |
+| `drafting_engine`  | Qwen2.5-Coder-14B-Instruct-4bit     | `openai/gpt-oss-120b`       | `generate_custom_tool` drafts + `draft_critic`. |
 
-Both are constructed in `main.py`'s lifespan and passed to the
-`Orchestrator`. When `analysis_engine` is not supplied the orchestrator
-falls back to the main engine, so tests and simpler deployments still
-work with a single model.
+The detection engine is picked by `main._select_detection_engine` from
+`AGENT_PATTERN_ENGINE` (`main` / `analysis` / `drafting`).
+
+smolagents adapter: MLX engines use the custom `_MLXModel` with the
+`<tool_call>` parser; Groq engines plug into `OpenAIServerModel`.
+
+When `analysis_engine` is not supplied the orchestrator falls back to
+the main engine, so tests and simpler deployments still work with a
+single model.
+
+`app_activated` events no longer start the tool-calling agent
+(`_AGENT_TRIGGER_EXCLUDED_EVENT_TYPES`); they still feed pattern
+detection.
 
 - `generate(prompt, max_tokens)` — the hot path driven by the orchestrator's
   smolagents adapter on the main engine.
@@ -204,8 +264,14 @@ work with a single model.
   one-to-two sentence summary. Runs **alongside** the orchestrator tool
   loop, not in place of it.
 
-Only `mlx-community/*` repos are supported; vanilla HF PyTorch checkpoints do
-not load under `mlx_lm.load`.
+Only `mlx-community/*` repos are supported locally; vanilla HF PyTorch
+checkpoints do not load under `mlx_lm.load`. `GroqEngine` implements the
+same methods over HTTP.
+
+Config lives in `agent-daemon/.env` (template: `.env.example`):
+`AGENT_PROVIDER`, `AGENT_PATTERN_ENGINE`, `AGENT_DRAFT_CRITIC`,
+`GROQ_API_KEY`, `GROQ_API_BASE`, `GROQ_MAIN_MODEL`,
+`GROQ_ANALYSIS_MODEL`, `GROQ_DRAFTING_MODEL`.
 
 ## 6. Tools (Phase 1 Sprint final)
 
@@ -426,10 +492,22 @@ Built ad-hoc via `swiftc` against macOS 14.0+ (arm64); artefact at
     events or 60 s**, whichever comes first (class attributes
     `trigger_every` / `trigger_interval`), followed by a 300 s
     cooldown and a "same tool name as last time" dedupe guard so
-    duplicate suggestions don't flood the user. Detection calls
-    `analysis_engine.evaluate_event` with a dedicated prompt that
-    requires either the literal string `NO_PATTERN` or a one-line
-    JSON object `{"tool_name","description","expected_logic"}`.
+    duplicate suggestions don't flood the user. Before any model
+    call, a **repeat gate** (`_has_repetition`) requires some event
+    signature (`event_type|app_name|metadata.action`, ignoring window
+    titles and paths) to occur `min_repeats` (default 3) times in the
+    window; otherwise detection is skipped, because models invent
+    patterns from unrelated events. Detection calls
+    `generate_chat_sync` on the engine named by
+    `settings.pattern_detection_engine` (`AGENT_PATTERN_ENGINE`:
+    `main` by default, or `analysis` / `drafting`; chosen by
+    `main._select_detection_engine`) via `make_detection_evaluator`, with `DETECTION_SYSTEM_PROMPT` as the
+    system role and a 512-token cap (`DETECTION_MAX_TOKENS`). It must
+    **not** go through `evaluate_event`: that wraps input in the
+    event-summary system prompt ("do not propose actions") and caps
+    replies at 128 tokens, which truncated proposals. The reply is
+    either the literal string `NO_PATTERN` or one JSON object
+    `{"tool_name","description","expected_logic"}`.
     A match is published as
     `ContextEvent(event_type="pattern_detected", metadata={…})`
     via the supplied `publish` coroutine (default:
@@ -689,19 +767,214 @@ Built ad-hoc via `swiftc` against macOS 14.0+ (arm64); artefact at
       to). Live exercise happens as soon as the user approves the
       first generated tool.
 
+- **Phase 4.7 — Groq cloud provider.** ✅ Complete (`e0f91ca`).
+  - `AGENT_PROVIDER=groq` swaps all three engines for `GroqEngine`
+    (`ai/groq_engine.py`); default stays `local`. See §5.
+  - Secrets come from `agent-daemon/.env` via `python-dotenv`; the
+    file is git-ignored and `.env.example` is the template.
+  - Orchestrator duck-types engines and picks the smolagents adapter
+    per provider (`_MLXModel` vs `OpenAIServerModel`).
+  - `app_activated` no longer starts the tool-calling agent (noise);
+    it still feeds pattern detection.
+  - Tests: `tests/test_groq_engine.py`; integration tests use `file`
+    events instead of `app_activated` to start the agent.
+  - Supersedes §1's original "no cloud inference" goal: cloud is
+    opt-in, local is the default.
+
+- **Phase 5 — Tool-idea quality.** 🚧 In progress.
+
+  Goal: the agent suggests a useful tool *before* the user thinks to
+  ask for one, and the drafted code works the first time it runs.
+  Review finding that started this phase: generated tools were poor
+  because (a) the idea stage was broken (detection ran through the
+  event-summary prompt with a 128-token cap on a 1.5B model) and
+  (b) drafting was single-shot with no feedback.
+
+  - **5.0 Detection fixes.** ✅ Complete.
+    - Detection has its own `DETECTION_SYSTEM_PROMPT` and a 512-token
+      cap via `make_detection_evaluator` (no longer `evaluate_event`).
+    - Detection runs on the main engine by default
+      (`AGENT_PATTERN_ENGINE`).
+    - `_parse` uses `json.loads(strict=False)`: models put raw
+      newlines in `expected_logic`.
+    - Repeat gate: no model call unless an event signature repeats
+      `min_repeats` (3) times. Real-model A/B (Hermes-3 8B): invoice
+      workflow ×3 → `invoice_processor`; 10 random app switches →
+      0 calls (previously a hallucinated `daily_rituals`).
+
+  - **5.1 Draft → check → repair loop.** ✅ Complete.
+    `meta_tool_generator._draft_until_clean` drafts, runs
+    `tools/draft_checks.check_draft`, and on failure re-prompts the
+    drafter with its previous draft plus the exact problems, up to
+    `MAX_DRAFT_ATTEMPTS` (3). Each failed draft is dumped to
+    `generated/_rejected/` and reported to the UI as a `tool_result`
+    thought. Draft cap raised 1200 → 2048 tokens. User-edited code
+    goes through the same checks (no repair). Checks, cheapest first,
+    stopping at the first failing stage:
+    1. `ast.parse` (syntax, with line number).
+    2. The existing `_validate_source` safety validator.
+    3. Inert top level: only imports, a docstring, literal constants,
+       and functions with the bare `@tool` decorator and literal
+       defaults. This is what makes step 5 safe.
+    4. Tool signature: type hints on every parameter and the return,
+       and an `Args:` entry per parameter (smolagents rejects these).
+    5. Undefined names via `symtable` (the "called `show_notification`
+       without importing it" bug).
+    6. Import in a fresh subprocess and confirm the attribute is a
+       smolagents `Tool`. The tool body is never called: its side
+       effects are the user's call.
+    Real-model check (Qwen2.5-Coder-14B): 4 of 5 specs passed on the
+    first draft; a spec that tempted `requests` + scraping failed and
+    was repaired on attempt 2 (stdlib `urllib`, env-var API key).
+    **Critic pass** (`tools/draft_critic.py`, on by default,
+    `AGENT_DRAFT_CRITIC=0` to disable). After a draft passes the
+    structural checks, the drafting engine reviews it against
+    `description` + `expected_logic`; problems go back into the same
+    repair loop. Design points, each from a failed real-model run:
+    - **Grounded problems only.** Each problem must quote the spec
+      sentence and the code it violates; `_grounded` drops any problem
+      whose quotes are not really in the spec and the code. Without
+      this the critic flagged every draft with invented "does not
+      handle permission errors" items and repairs never converged
+      (3 attempts, 61 s, for drafts that were fine).
+    - **Comments stripped** (`ast.unparse`) before review. A repair
+      added `# Case-insensitive search` above unchanged code, and the
+      critic believed the comment.
+    - **Literal pattern check** in the prompt: a glob that matches more
+      files than the spec names is a problem.
+    - **Advisory.** A critic error or unparseable reply counts as a
+      pass. If attempts run out with critic problems left, the last
+      structurally clean draft goes to review with the problems as a
+      `# REVIEW NOTES` comment header.
+    Real-model result (Qwen2.5-Coder-14B as drafter and critic):
+    `remind_me_in` and `tidy_dmg_downloads` passed review first time
+    (no false alarms). `file_invoices`: the critic caught `*.pdf`
+    (every PDF) on attempt 2 and the attempt-3 draft globbed
+    `inv*.pdf` + `*invoice*.pdf` as specified, about 60 s in total.
+    **Still missed:** that draft is case-sensitive, and a file matching
+    both patterns (`invoice1.pdf`) is moved twice, so the second
+    `shutil.move` raises. Human review is still the real gate.
+
+    **Sandboxed dry run** (`tools/draft_dry_run.py`, on by default,
+    `AGENT_DRAFT_DRY_RUN=0` to disable). Runs between the structural
+    checks and the critic, so the tool is actually executed before the
+    user sees it.
+    - **Plan** (`plan_dry_run`, once per tool, reused across attempts so
+      every attempt faces the same test): the drafting model writes up
+      to 8 fixture files for a fake home (optionally with `age_days` to
+      set mtime), 1-3 calls (kwargs), and expectations
+      (`expect_status`, `expect_exists`, `expect_missing`).
+      `expect_exists` is kept only for fixture files: names of files the
+      tool creates were guessed wrong (`inv1041_copy_1.pdf` with no name
+      clash).
+    - **Isolation**, because the code is not approved yet:
+      `sandbox-exec` profile (no network, no writes outside the per-call
+      temp dir, no exec except Python itself; child processes inherit
+      it); `HOME` = fake home; minimal environment (no API keys);
+      `subprocess` replaced by a recorder that reports success, and
+      `urlopen` refused. A self-test (write inside allowed, write to
+      `/tmp` blocked) runs once; if `sandbox-exec` is missing or the
+      self-test fails, the dry run is skipped. Unapproved code never
+      runs unsandboxed. Tested: writes to the real home, `/tmp`, running
+      `osascript`/`sh`, network, and reading `GROQ_API_KEY` are all
+      blocked.
+    - **Hard vs soft** (`DryRunResult`). Hard = observed facts:
+      exception (with the draft line), background-thread error, timeout,
+      or a return value that is not a status dict. Hard problems drive
+      repairs. Soft = mismatch with the planner's expectations; the
+      planner was wrong in about half the `file_invoices` runs (expected
+      `inv1041_copy.pdf` to stay although `inv*.pdf` matches it), so
+      soft problems only become `# REVIEW NOTES` for the human.
+    - Long timers do not block: the probe reports, flushes, and
+      `os._exit`s after joining threads for up to 3 s.
+    Real-model results (Qwen2.5-Coder-14B):
+    - Caught the double move: `FileNotFoundError` from the second
+      `shutil.move` of a file matching both `inv*.pdf` and
+      `*invoice*.pdf`.
+    - **Found a bug in the drafting prompt itself.** The prompt's
+      examples called `show_notification(title=..., message=...)`, but
+      the real argument is `body`. Every generated tool that notified
+      raised `TypeError` inside a background thread, so the
+      notification silently never appeared. That is likely a large part
+      of why generated tools seemed broken. Fixed in the prompt, and
+      the AVAILABLE TOOLS list now shows each tool's exact arguments
+      (`call: show_notification(title: string, body: string)`).
+    - Planner degenerated into a numbered series (`inv1041.dmg` …
+      `inv1070.dmg`) until the token cap; fixed by "at most 8 files,
+      never a numbered series".
+    - Final run: `file_invoices`, `remind_me_in`, `tidy_dmg_downloads`
+      each passed on attempt 1 (20-40 s); `file_invoices` carried one
+      soft note from a wrong planner expectation.
+    Also fixed on the way: `_validate_source` banned plain substrings,
+    so `re.compile(` and `ast.literal_eval(` were rejected as
+    `compile(` / `eval(`. Banned calls are now matched on the AST.
+
+  - **5.2 Idea sources.** Repetition only finds what the user already
+    does by hand, after three rounds. Other sources, ranked by value
+    for effort. Each publishes the same `pattern_detected` event, so
+    the approval → draft → review flow is shared; `metadata.source`
+    records which source produced the idea.
+
+    | # | Source | Signal | Example | Status |
+    |---|--------|--------|---------|--------|
+    | 1 | Next step | One high-signal event with an obvious follow-up; no repetition needed. | `.dmg` downloaded → install + delete. Message with a tracking number → track it. | ✅ Done |
+    | 2 | Chat capability gaps | The agent could not do what the user asked in chat. | "What's on my calendar?" → calendar tool. | ✅ Done |
+    | 3 | Setup scan | One-time scan: installed apps, `~/.zsh_history`, Downloads clutter, recurring calendar events. | Same long `docker` command run 40× → one-click tool. | Idea |
+    | 4 | Friction | Copy in app A → paste in app B; rapid ping-pong between two apps. | Mail → Numbers copy/paste ×5 → "pull invoice totals into my sheet". | Idea (needs clipboard listener) |
+    | 5 | Starter catalog | Curated, known-good tool ideas matched to the user's apps. | Uses Mail + Preview → "auto-file PDF attachments". | Idea |
+
+    The repeat gate applies only to source 0 (repetition). Other
+    sources bypass it.
+
+    **Implementation** (`ai/idea_sources.py`, wired in `main.py`, fed
+    by the orchestrator; both use the detection engine):
+    - `NextStepSuggester.observe(event)`: a deterministic `classify`
+      maps an event to a trigger kind, and only kinds listed in
+      `FOLLOW_UPS` qualify (finished `.dmg`/`.pkg`, `.zip`, `.ics`;
+      iMessages with a tracking number or a plan with a time). The
+      known follow-up is passed to the model, which only writes the
+      spec. Per-kind cooldown: 24 h, in memory.
+      Why a fixed list: with an open "what's the obvious next step?"
+      prompt, Hermes-3 8B proposed a tool for 7/7 events, several
+      nonsense ("add a screenshot to the calendar"), and prompt
+      tightening made it worse. With `FOLLOW_UPS`, 5/5 qualifying
+      events gave sensible specs and 3 non-qualifying events made no
+      model call. Adding a kind = adding a `FOLLOW_UPS` entry and a
+      classifier rule (merges in idea #5, the starter catalog).
+    - `ChatGapDetector.observe_chat(user_text, reply, tools_called)`:
+      runs after each chat turn; triggers when the reply admits it
+      could not help (`_GAP_RE`) and `generate_custom_tool` was not
+      already tried this turn (`Orchestrator._turn_tool_calls`). The
+      model turns the request into a proposal or `NO_SUGGESTION`.
+      Cooldown: 1 h per request (bag of words). Real-model check: 4/4
+      correct (calendar and disk-space gaps → tools; a trivia question
+      and a poem → `NO_SUGGESTION`).
+    - Both publish `pattern_detected` with `metadata.source`
+      (`next_step` / `chat_gap`) and `metadata.trigger`;
+      `_build_pattern_prompt` words the agent prompt per source.
+    - `FileWatcher` now handles `on_moved` (`action: "renamed"`, path
+      = destination). Browsers finish downloads with a rename from
+      `.crdownload`/`.download`, so finished downloads were previously
+      invisible.
+    - Open: cooldowns are in memory (lost on restart), and a declined
+      suggestion is not remembered; persist both in `memory.db`.
+
 ## 9. Open questions / follow-ups
 
 1. File-watcher noise: Chrome download churn (`.crdownload`) floods the
-   stream. Add debounce + extension filter?
+   stream. Add debounce + extension filter? (Phase 5.2 added `on_moved`,
+   so the finished download now arrives as a `renamed` event; the
+   in-progress churn is still unfiltered.)
 2. Closing the approval window via the red X currently no-ops; should we
    treat it as implicit deny?
 3. `MacAppListener` has no watchdog: if `_mac_app_helper` exits or
    crashes, the daemon stops receiving app activations silently. Add a
    supervisor that restarts the helper on exit and exposes liveness in
    the Debug tab?
-4. Rapid app switches each trigger a full two-engine LLM pipeline.
-   Consider debouncing `app_activated` (e.g. require sustained focus
-   ≥ 500 ms) or coalescing bursts before handing off to the orchestrator.
+4. ~~Rapid app switches each trigger a full two-engine LLM pipeline.~~
+   Partly addressed by Phase 4.7: `app_activated` no longer starts the
+   tool-calling agent. It still runs `evaluate_event` on the analysis
+   engine per switch; debounce (sustained focus ≥ 500 ms) is still open.
 5. Extend the editable-approval pattern to other tools: `open_url` (edit
    the URL), `show_notification` (edit title/body), `move_file` (edit
    destination). Current UI falls back to a read-only JSON view.
@@ -736,11 +1009,11 @@ Built ad-hoc via `swiftc` against macOS 14.0+ (arm64); artefact at
     `summarize_pdf` twice with different logic)? Current plan: reject
     the second with a surfaced error; alternative is to version the
     file (`summarize_pdf.v2.py`) and let both coexist.
-12. Pattern detection cost: every 10 events we hit the analysis
-    engine with a 50-event prompt, which is ~1-2 s of Metal time.
-    Worth it for a demo, but we may want an adaptive cadence (back
-    off when no new patterns are found for N cycles) before this
-    ships as a daily-driver feature.
+12. Pattern detection cost: every 10 events we hit the detection
+    engine with a 50-event prompt. Phase 5.0's repeat gate skips the
+    model call unless an event signature repeats 3×, which removes
+    most calls. Detection now defaults to the 8B main engine, so each
+    call that does run costs more. Adaptive cadence is still open.
 13. ~~Git scope for auto-commit.~~ Resolved by Phase 4.6: commits
     land in a nested repo rooted at `tools/generated/`, never in
     the main project repo, so scope can safely be the whole
@@ -767,3 +1040,14 @@ Built ad-hoc via `swiftc` against macOS 14.0+ (arm64); artefact at
     (host global → `bot-inator` fallback). Requires marking the case
     with `@pytest.mark.slow` or a `git`-on-PATH skip so the fast
     suite stays under a second.
+18. Groq privacy surface: with `AGENT_PROVIDER=groq`, window titles,
+    file paths and iMessage text go to Groq inside prompts. Should the
+    UI show which provider is active (e.g. Debug tab, or in the status
+    frame), and should iMessage content be redacted or kept local-only
+    when the provider is cloud?
+19. Mixed providers: the provider applies to all three engines. A
+    per-engine override (local analysis, cloud drafting) would keep the
+    per-event traffic on-device and send only tool drafts to Groq.
+20. Idea-source state: cooldowns and declined suggestions live in
+    memory and are lost on restart (Phase 5.2). Persist both in
+    `memory.db`.

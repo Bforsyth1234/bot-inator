@@ -45,6 +45,25 @@ class _FileChangeHandler(FileSystemEventHandler):
     def on_modified(self, event: FileSystemEvent) -> None:
         self._emit(event, "modified")
 
+    def on_moved(self, event: FileSystemEvent) -> None:
+        # Browsers download to a temp name (``.crdownload``, ``.download``,
+        # ``.part``) and rename on completion, so a finished download
+        # arrives only as a move. Report the destination path.
+        if event.is_directory:
+            return
+        try:
+            ctx = ContextEvent(
+                event_type="file",
+                metadata={
+                    "path": str(getattr(event, "dest_path", "") or event.src_path),
+                    "action": "renamed",
+                    "from": str(event.src_path),
+                },
+            )
+            self._bus.push_threadsafe(ctx)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to push move event for %s", event.src_path)
+
 
 class FileWatcher:
     """Watch one or more directories for file create/modify events."""

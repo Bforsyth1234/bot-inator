@@ -19,6 +19,10 @@ except ImportError:  # pragma: no cover - dep not installed during tests
         fn.is_tool = True  # type: ignore[attr-defined]
         return fn
 
+from tools.draft_checks import check_draft
+from tools.draft_critic import critic_enabled, critique, with_review_notes
+from tools.draft_dry_run import DryRunPlan, dry_run_enabled, plan_dry_run, run_dry_run
+
 if TYPE_CHECKING:  # pragma: no cover - type-only
     from ai.orchestrator import Orchestrator
 
@@ -74,6 +78,10 @@ _PLACEHOLDER_DOMAINS: tuple[str, ...] = (
     "placeholder.com",
 )
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+# Draft attempts before giving up: the first draft plus repair turns.
+MAX_DRAFT_ATTEMPTS = 3
+# 1200 tokens truncated longer modules mid-function.
+_DRAFT_MAX_TOKENS = 2048
 
 _SYSTEM_PROMPT_BASE = """You write a single Python module that defines ONE smolagents @tool.
 
@@ -115,7 +123,7 @@ Composition rules (IMPORTANT — read carefully):
 * The AVAILABLE TOOLS list below shows every tool currently registered. Each entry gives the `import path` you use to bring the tool into your module and call it.
 * Built-in tools live under `tools.<name>` (e.g. `from tools.show_notification import show_notification`).
 * Previously-generated tools live under `tools.generated.<name>` (e.g. `from tools.generated.fetch_weather import fetch_weather`).
-* Imported tools are invoked as normal Python callables: `show_notification(title="Done", message="...")`. Check each tool's description for its arguments before calling it.
+* Imported tools are invoked as normal Python callables: `show_notification(title="Done", body="...")`. Check each tool's description for its arguments before calling it.
 * MANDATORY: If you call a tool anywhere in your module (including inside nested functions, closures, or threads), you MUST write its exact `from tools.X import X` line at the top of the file with the other imports. Calling a tool that is not imported will raise `NameError` at runtime — the error will be swallowed inside background threads and your tool will appear to succeed while doing nothing.
 * Before you emit the module, scan every function call in your body. For each call whose name appears in AVAILABLE TOOLS, verify there is a matching import at the top. If one is missing, add it.
 * Do NOT duplicate any existing tool's name. The orchestrator will reject drafts whose name collides with one already registered.
@@ -142,7 +150,7 @@ Worked example (structure to mirror when composing built-ins):
         \"\"\"
         threading.Timer(
             seconds,
-            lambda: show_notification(title=title, message=message),
+            lambda: show_notification(title=title, body=message),
         ).start()
         return {"status": "ok"}
 """
@@ -215,9 +223,12 @@ def _validate_identifier(name: str) -> None:
 
 def _validate_source(tool_name: str, source: str) -> None:
     """Static safety checks on the drafted module. Raises on failure."""
-    for banned in _BANNED_SUBSTRINGS:
-        if banned in source:
-            raise ToolGenerationError(f"draft contains banned token: {banned}")
+    # ``__import__(`` stays a plain substring ban; the other banned calls
+    # are matched on the AST below. Substring matching rejected
+    # legitimate drafts: ``re.compile(`` contains ``compile(`` and
+    # ``ast.literal_eval(`` contains ``eval(`` (Phase 5.1 real-model runs).
+    if "__import__(" in source:
+        raise ToolGenerationError("draft contains banned token: __import__(")
     lowered = source.lower()
     for domain in _PLACEHOLDER_DOMAINS:
         if domain in lowered:
@@ -248,6 +259,10 @@ def _validate_source(tool_name: str, source: str) -> None:
                 raise ToolGenerationError(
                     f"disallowed import: {node.module}"
                 )
+        elif isinstance(node, ast.Call) and _banned_call(node):
+            raise ToolGenerationError(
+                f"draft calls banned function: {_banned_call(node)}"
+            )
         elif isinstance(node, ast.Call):
             # Block ``subprocess.<anything>(..., shell=True)``: subprocess is
             # allowlisted for legitimate uses (e.g. osascript notifications),
@@ -272,6 +287,24 @@ def _validate_source(tool_name: str, source: str) -> None:
         )
 
 
+_BANNED_BUILTIN_CALLS = frozenset({"eval", "exec", "compile", "__import__"})
+_BANNED_MODULE_CALLS = frozenset({("os", "system"), ("os", "popen"), ("pty", "spawn")})
+
+
+def _banned_call(node: ast.Call) -> str:
+    """Name of a banned call (``eval(...)``, ``os.system(...)``), else ""."""
+    func = node.func
+    if isinstance(func, ast.Name) and func.id in _BANNED_BUILTIN_CALLS:
+        return f"{func.id}("
+    if isinstance(func, ast.Attribute):
+        owner = func.value.id if isinstance(func.value, ast.Name) else ""
+        if (owner, func.attr) in _BANNED_MODULE_CALLS:
+            return f"{owner}.{func.attr}("
+        if owner == "builtins" and func.attr in _BANNED_BUILTIN_CALLS:
+            return f"builtins.{func.attr}("
+    return ""
+
+
 def _shell_call_name(node: ast.Call) -> str:
     """Return the called function name, or "" for non-Name/Attribute calls."""
     if isinstance(node.func, ast.Name):
@@ -291,6 +324,19 @@ def _decorator_name(dec: ast.expr) -> str:
     return ""
 
 
+def _call_signature(tool_obj: Any) -> str:
+    """``title: string, body: string`` from a smolagents Tool's inputs."""
+    inputs = getattr(tool_obj, "inputs", None)
+    if not isinstance(inputs, dict):
+        return "..."
+    parts = []
+    for arg, spec in inputs.items():
+        kind = spec.get("type", "any") if isinstance(spec, dict) else "any"
+        optional = isinstance(spec, dict) and spec.get("nullable")
+        parts.append(f"{arg}: {kind}" + (" = optional" if optional else ""))
+    return ", ".join(parts)
+
+
 def _format_available_tools_context() -> str:
     """Render the ``AVAILABLE TOOLS`` section for the drafter's system prompt.
 
@@ -301,14 +347,19 @@ def _format_available_tools_context() -> str:
     (e.g. in unit tests).
     """
     if _ORCHESTRATOR is None:
-        return "AVAILABLE TOOLS\n(unavailable in this context)\n"
-
-    builtin_names = getattr(_ORCHESTRATOR, "_builtin_tool_names", frozenset())
-    dynamic_names = getattr(_ORCHESTRATOR, "_dynamic_tool_names", set())
+        # No running daemon (scripts, tests): list the static built-ins.
+        from tools import AVAILABLE_TOOLS
+        all_tools = list(AVAILABLE_TOOLS)
+        builtin_names = frozenset(getattr(t, "name", "") for t in all_tools)
+        dynamic_names: set[str] = set()
+    else:
+        all_tools = list(getattr(_ORCHESTRATOR, "tools", []))
+        builtin_names = getattr(_ORCHESTRATOR, "_builtin_tool_names", frozenset())
+        dynamic_names = getattr(_ORCHESTRATOR, "_dynamic_tool_names", set())
 
     builtin_lines: list[str] = []
     dynamic_lines: list[str] = []
-    for tool_obj in getattr(_ORCHESTRATOR, "tools", []):
+    for tool_obj in all_tools:
         name = getattr(tool_obj, "name", getattr(tool_obj, "__name__", ""))
         if not name:
             continue
@@ -322,16 +373,22 @@ def _format_available_tools_context() -> str:
             if desc.strip()
             else "(no description)"
         )
+        # Exact keyword arguments: drafts used to call
+        # ``show_notification(title=..., message=...)`` (the real name is
+        # ``body``), which raised TypeError inside a background thread.
+        call = f"{name}({_call_signature(tool_obj)})"
         if name in builtin_names:
             path = f"tools.{name}"
             builtin_lines.append(
                 f"- {name}  (import: from {path} import {name})\n"
+                f"    call: {call}\n"
                 f"    {first_line[:220]}"
             )
         elif name in dynamic_names:
             path = f"tools.generated.{name}"
             dynamic_lines.append(
                 f"- {name}  (import: from {path} import {name})\n"
+                f"    call: {call}\n"
                 f"    {first_line[:220]}"
             )
 
@@ -354,6 +411,8 @@ def _draft_with_engine(
     tool_name: str,
     description: str,
     expected_logic: str,
+    previous_source: str = "",
+    problems: Optional[list[str]] = None,
 ) -> str:
     """Drive the configured drafting engine to write a @tool module synchronously.
 
@@ -374,8 +433,18 @@ def _draft_with_engine(
         f"expected_logic: {expected_logic}\n\n"
         "Emit the full module now. Output nothing but the Python source."
     )
+    if previous_source and problems:
+        # Repair turn (Phase 5.1): show the model its own draft and the
+        # exact check failures so it fixes them instead of starting over.
+        user_msg += (
+            "\n\nYour previous draft:\n" + previous_source +
+            "\n\nIt failed these checks:\n" +
+            "\n".join(f"- {p}" for p in problems) +
+            "\n\nFix every problem above and emit the full corrected "
+            "module. Output nothing but the Python source."
+        )
     raw = engine.generate_chat_sync(
-        system_prompt, user_msg, max_tokens=1200
+        system_prompt, user_msg, max_tokens=_DRAFT_MAX_TOKENS
     )
     return _strip_fences(raw)
 
@@ -419,11 +488,29 @@ _DUP_STOPWORDS: frozenset[str] = frozenset({
     "user", "users", "util", "utility", "with",
 })
 
+# Jaccard overlap (name + description tokens) at which an existing tool
+# counts as covering the request.
+_DUP_SIMILARITY = 0.5
+
+# Tools that are never "the same" as a requested tool.
+_DUP_EXEMPT_TOOLS: frozenset[str] = frozenset({"generate_custom_tool"})
+
+
+def _dup_stem(token: str) -> str:
+    """Crude stem so ``reader``/``read`` and ``generator``/``generate`` match."""
+    for suffix in ("ing", "or", "er", "ed", "es", "s"):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+            token = token[: -len(suffix)]
+            break
+    return token[:-1] if token.endswith("e") and len(token) > 4 else token
+
 
 def _dup_tokens(text: str) -> set[str]:
-    """Lowercase, split on non-alphanumerics, drop stopwords + short tokens."""
+    """Lowercase, split on non-alphanumerics, drop stopwords + short tokens, stem."""
     raw = re.split(r"[^a-z0-9]+", text.lower())
-    return {t for t in raw if t and len(t) > 2 and t not in _DUP_STOPWORDS}
+    return {
+        _dup_stem(t) for t in raw if t and len(t) > 2 and t not in _DUP_STOPWORDS
+    }
 
 
 def _find_similar_existing_tool(
@@ -431,29 +518,41 @@ def _find_similar_existing_tool(
 ) -> Optional[str]:
     """Return an existing tool name that likely covers the requested task.
 
-    Matches when any significant token from the requested ``tool_name``
-    or ``description`` also appears in an existing tool's name or
-    description. Used as a semantic-duplicate guard in
-    :func:`generate_custom_tool` — exact-name duplicates are caught
+    Matches when either:
+
+    * every significant token of the requested ``tool_name`` appears in an
+      existing tool's name (``auto_screenshot`` vs ``screenshot_tool``), or
+    * the requested name+description and the existing name+description
+      share at least :data:`_DUP_SIMILARITY` of their tokens (Jaccard).
+
+    A single shared word is not enough: that matched almost every request
+    (``create_invoice_template`` against ``read_clipboard``). The
+    meta-tool itself is never a match. Used as a semantic-duplicate guard
+    in :func:`generate_custom_tool`; exact-name duplicates are caught
     earlier by the on-disk path check.
     """
     if _ORCHESTRATOR is None:
         return None
-    request_tokens = _dup_tokens(tool_name) | _dup_tokens(description)
-    if not request_tokens:
+    request_name = _dup_tokens(tool_name)
+    request_all = request_name | _dup_tokens(description)
+    if not request_all:
         return None
 
     for tool_obj in getattr(_ORCHESTRATOR, "tools", []):
         name = getattr(tool_obj, "name", getattr(tool_obj, "__name__", ""))
-        if not name:
+        if not name or name in _DUP_EXEMPT_TOOLS:
             continue
         desc = (
             getattr(tool_obj, "description", None)
             or getattr(tool_obj, "__doc__", None)
             or ""
         )
-        existing_tokens = _dup_tokens(name) | _dup_tokens(desc)
-        if request_tokens & existing_tokens:
+        existing_name = _dup_tokens(name)
+        if request_name and request_name <= existing_name:
+            return name
+        existing_all = existing_name | _dup_tokens(desc)
+        overlap = len(request_all & existing_all) / len(request_all | existing_all)
+        if overlap >= _DUP_SIMILARITY:
             return name
     return None
 
@@ -515,6 +614,97 @@ def _git_commit(directory: Path, filename: str, message: str) -> tuple[bool, str
         return False, "git command timed out"
     except Exception as exc:  # pragma: no cover - defensive
         return False, f"git error: {exc}"
+
+
+def _draft_until_clean(
+    engine: Any, tool_name: str, description: str, expected_logic: str,
+) -> tuple[str, int]:
+    """Draft, check, critique and repair up to :data:`MAX_DRAFT_ATTEMPTS` times.
+
+    Each attempt runs, stopping at the first stage with problems: the
+    structural checks (:func:`tools.draft_checks.check_draft`), a
+    sandboxed dry run (:mod:`tools.draft_dry_run`; the test plan is made
+    once and reused so every attempt faces the same expectations), and
+    the logic critic (:func:`tools.draft_critic.critique`). Problems are
+    fed back to the drafter for the next attempt.
+
+    Returns ``(source, attempts)`` for the first draft with no problems.
+    When attempts run out, the last draft that passed the structural
+    checks is returned with the critic's remaining notes as a comment
+    header, so the human reviewer sees them (the critic is advisory).
+    Raises :class:`ToolGenerationError` when no draft passed the
+    structural checks. Each failed draft is dumped to ``_rejected/``.
+    """
+    source = ""
+    problems: list[str] = []
+    best_clean: Optional[tuple[str, list[str]]] = None
+    use_critic = critic_enabled()
+    use_dry_run = dry_run_enabled()
+    soft_notes: list[str] = []
+    plan: Optional[DryRunPlan] = None
+    plan_attempted = False
+    for attempt in range(1, MAX_DRAFT_ATTEMPTS + 1):
+        source = _draft_with_engine(
+            engine, tool_name, description, expected_logic,
+            previous_source=source, problems=problems,
+        )
+        problems = check_draft(tool_name, source, static_validator=_validate_source)
+        stage = "checks"
+        if not problems and use_dry_run:
+            if not plan_attempted:
+                plan_attempted = True
+                _report_progress(f"Planning a sandboxed dry run of {tool_name}.")
+                plan = plan_dry_run(engine, tool_name, description, expected_logic, source)
+            if plan is not None:
+                result = run_dry_run(tool_name, source, plan)
+                problems = result.hard
+                soft_notes = result.soft
+                stage = "dry run"
+                best_clean = (source, problems + soft_notes)
+        if not problems and use_critic:
+            _report_progress(f"Reviewing draft {attempt} of {tool_name} against its spec.")
+            problems = critique(engine, tool_name, description, expected_logic, source)
+            stage = "review"
+            best_clean = (source, problems + soft_notes)
+        if not problems:
+            if attempt > 1:
+                _report_progress(
+                    f"Draft of {tool_name} passed after {attempt} attempts."
+                )
+            # Dry-run expectation mismatches are advisory: shown, not repaired.
+            return with_review_notes(source, soft_notes), attempt
+        reason = "; ".join(problems)
+        dumped = _dump_rejected_draft(tool_name, source, f"{stage}: {reason}")
+        logger.warning(
+            "Draft %d/%d for %s failed %s: %s (dumped=%s)",
+            attempt, MAX_DRAFT_ATTEMPTS, tool_name, stage, reason, dumped,
+        )
+        _report_progress(
+            f"Draft {attempt}/{MAX_DRAFT_ATTEMPTS} of {tool_name} failed {stage}: "
+            f"{reason}" + (" Repairing." if attempt < MAX_DRAFT_ATTEMPTS else "")
+        )
+    if best_clean is not None:
+        clean_source, notes = best_clean
+        return with_review_notes(clean_source, notes), MAX_DRAFT_ATTEMPTS
+    raise ToolGenerationError(
+        f"draft still failing after {MAX_DRAFT_ATTEMPTS} attempts: "
+        + "; ".join(problems)
+    )
+
+
+def _report_progress(message: str) -> None:
+    """Best-effort ``tool_result`` thought so the UI shows repair progress."""
+    orch = _ORCHESTRATOR
+    loop = getattr(getattr(orch, "event_bus", None), "loop", None)
+    if orch is None or loop is None:
+        return
+    event_id = getattr(orch, "_current_event_id", "evt_unknown")
+    try:
+        asyncio.run_coroutine_threadsafe(
+            orch._emit_thought(event_id, "tool_result", message), loop,
+        )
+    except Exception:
+        logger.debug("progress report failed", exc_info=True)
 
 
 @tool
@@ -602,20 +792,11 @@ def generate_custom_tool(
             ),
         }
 
-    source = ""
     try:
-        source = _draft_with_engine(
-            _DRAFT_ENGINE or _ENGINE,
-            tool_name, description, expected_logic,
+        source, attempts = _draft_until_clean(
+            _DRAFT_ENGINE or _ENGINE, tool_name, description, expected_logic,
         )
-        _validate_source(tool_name, source)
     except ToolGenerationError as exc:
-        dumped = _dump_rejected_draft(tool_name, source, str(exc))
-        head = "\n".join(source.splitlines()[:10]) if source else "(empty)"
-        logger.warning(
-            "Meta-tool draft rejected for %s: %s\n  dumped=%s\n  first lines:\n%s",
-            tool_name, exc, dumped, head,
-        )
         return {"status": "error", "tool_name": tool_name, "error": str(exc)}
     except Exception as exc:
         logger.exception("Meta-tool draft failed")
@@ -631,13 +812,14 @@ def generate_custom_tool(
 
     final_source = response.edited_code or source
     if response.edited_code:
-        try:
-            _validate_source(tool_name, final_source)
-        except ToolGenerationError as exc:
+        edit_problems = check_draft(
+            tool_name, final_source, static_validator=_validate_source,
+        )
+        if edit_problems:
             return {
                 "status": "error",
                 "tool_name": tool_name,
-                "error": f"user-edited draft rejected: {exc}",
+                "error": "user-edited draft rejected: " + "; ".join(edit_problems),
             }
 
     target_path = _GENERATED_DIR / f"{tool_name}.py"
@@ -678,6 +860,7 @@ def generate_custom_tool(
         "path": str(target_path),
         "git": git_summary,
         "git_ok": git_ok,
+        "draft_attempts": attempts,
         "message": (
             f"Tool {tool_name!r} was drafted, approved, and installed. "
             "Immediately emit final_answer with a brief confirmation; "

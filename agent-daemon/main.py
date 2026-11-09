@@ -11,22 +11,37 @@ import asyncio
 import logging
 import os
 import re
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
+
+import user_settings
 
 from ai.memory import Memory, set_default_memory
 from ai.mlx_engine import MLXEngine
 from ai.orchestrator import Orchestrator
-from ai.pattern_recognizer import PatternRecognizer
+from ai.pattern_recognizer import PatternRecognizer, make_detection_evaluator
+from ai.idea_sources import (
+    CHAT_GAP_SYSTEM_PROMPT,
+    NEXT_STEP_SYSTEM_PROMPT,
+    ChatGapDetector,
+    NextStepSuggester,
+)
+from ai.open_help import (
+    IDEA_JUDGE_SYSTEM_PROMPT,
+    OPEN_HELP_SYSTEM_PROMPT,
+    IdeaFeedback,
+    OpenHelpSuggester,
+)
 # GroqEngine is imported lazily inside ``lifespan`` so the daemon still
 # boots cleanly when ``settings.provider == "local"`` and the optional
 # Groq dependency tree is missing.
-from config import settings
+from config import GROQ_DEFAULT_MODELS, settings
 from events.event_bus import ContextEvent, EventBus
 from events.file_watcher import FileWatcher
 from events.imessage_watcher import IMessageWatcher
@@ -99,6 +114,29 @@ def _build_engines() -> tuple[Any, Any, Any]:
     )
 
 
+def _select_detection_engine(
+    choice: str, engine: Any, analysis_engine: Any, drafting_engine: Any
+) -> Any:
+    """Pick the engine that runs pattern detection.
+
+    ``choice`` comes from :data:`settings.pattern_detection_engine`.
+    Unknown values fall back to the main engine with a warning so a typo
+    in ``AGENT_PATTERN_ENGINE`` cannot brick startup.
+    """
+    engines = {
+        "main": engine,
+        "analysis": analysis_engine,
+        "drafting": drafting_engine,
+    }
+    key = (choice or "main").lower()
+    if key not in engines:
+        logger.warning(
+            "Unknown AGENT_PATTERN_ENGINE=%r; using main engine", choice
+        )
+        key = "main"
+    return engines[key]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.seq = 0
@@ -167,10 +205,42 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to start IMessageWatcher")
 
+    detection_engine = _select_detection_engine(
+        settings.pattern_detection_engine,
+        engine, analysis_engine, drafting_engine,
+    )
     pattern_recognizer = PatternRecognizer(
         event_bus=bus,
-        evaluate=analysis_engine.evaluate_event,
+        evaluate=make_detection_evaluator(detection_engine),
     )
+    idea_sources = [
+        NextStepSuggester(
+            event_bus=bus,
+            evaluate=make_detection_evaluator(
+                detection_engine, system_prompt=NEXT_STEP_SYSTEM_PROMPT,
+            ),
+        ),
+        ChatGapDetector(
+            event_bus=bus,
+            evaluate=make_detection_evaluator(
+                detection_engine, system_prompt=CHAT_GAP_SYSTEM_PROMPT,
+            ),
+        ),
+    ]
+    if settings.open_help_enabled:
+        idea_sources.append(OpenHelpSuggester(
+            event_bus=bus,
+            evaluate=make_detection_evaluator(
+                detection_engine, system_prompt=OPEN_HELP_SYSTEM_PROMPT,
+            ),
+            judge=make_detection_evaluator(
+                detection_engine, max_tokens=120,
+                system_prompt=IDEA_JUDGE_SYSTEM_PROMPT,
+            ),
+            feedback=IdeaFeedback(settings.idea_feedback_path),
+            interval_seconds=settings.open_help_interval_seconds,
+            min_score=settings.open_help_min_score,
+        ))
     orchestrator = Orchestrator(
         engine=engine,
         event_bus=bus,
@@ -179,6 +249,7 @@ async def lifespan(app: FastAPI):
         analysis_engine=analysis_engine,
         generated_tools_dir=settings.generated_tools_dir,
         pattern_recognizer=pattern_recognizer,
+        idea_sources=idea_sources,
     )
     set_meta_tool_context(
         orchestrator=orchestrator,
@@ -320,6 +391,148 @@ async def list_chat_log(limit: int = 200) -> list[dict[str, Any]]:
     except Exception as exc:
         logger.exception("get_chat_log failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class SettingsUpdate(BaseModel):
+    """Body for ``PUT /api/settings``. Omitted fields are left unchanged.
+
+    ``groq_api_key``: omit or ``null`` keeps the saved key, ``""`` clears it.
+    """
+
+    provider: Optional[str] = None
+    groq_api_key: Optional[str] = None
+    groq_main_model: Optional[str] = None
+    groq_analysis_model: Optional[str] = None
+    groq_drafting_model: Optional[str] = None
+
+
+# (request field, env/settings-file key, attribute on ``settings``)
+_SETTING_FIELDS = (
+    ("provider", "AGENT_PROVIDER", "provider"),
+    ("groq_api_key", "GROQ_API_KEY", "groq_api_key"),
+    ("groq_main_model", "GROQ_MAIN_MODEL", "groq_main_model"),
+    ("groq_analysis_model", "GROQ_ANALYSIS_MODEL", "groq_analysis_model"),
+    ("groq_drafting_model", "GROQ_DRAFTING_MODEL", "groq_drafting_model"),
+)
+
+
+def _key_hint(key: str) -> str:
+    return f"…{key[-4:]}" if len(key) >= 8 else ""
+
+
+def _settings_view() -> dict[str, Any]:
+    """What the Settings window shows. Never returns the full API key.
+
+    ``saved`` values apply on the next daemon start; ``running`` is what
+    this process is using now. ``restart_required`` is true when they differ.
+    """
+    saved_file = user_settings.read()
+    saved: dict[str, str] = {}
+    running: dict[str, str] = {}
+    for field_name, env_key, attr in _SETTING_FIELDS:
+        running[field_name] = str(getattr(settings, attr) or "")
+        if env_key in user_settings.shell_exported:
+            # A shell export beats the file, so a restart won't change it.
+            saved[field_name] = running[field_name]
+        else:
+            saved[field_name] = saved_file.get(env_key) or running[field_name]
+    return {
+        "provider": saved["provider"].lower(),
+        "running_provider": running["provider"].lower(),
+        "groq_api_key_set": bool(saved["groq_api_key"]),
+        "groq_api_key_hint": _key_hint(saved["groq_api_key"]),
+        "groq_main_model": saved["groq_main_model"],
+        "groq_analysis_model": saved["groq_analysis_model"],
+        "groq_drafting_model": saved["groq_drafting_model"],
+        "restart_required": saved != running,
+        "can_restart": _can_self_restart(),
+        # Fields the UI can't change because they're exported in the shell.
+        "locked_fields": [
+            field_name for field_name, env_key, _ in _SETTING_FIELDS
+            if env_key in user_settings.shell_exported
+        ],
+    }
+
+
+def _can_self_restart() -> bool:
+    # Under ``uvicorn --reload`` this process is a multiprocessing child;
+    # re-exec'ing its argv would not bring the server back.
+    import multiprocessing  # noqa: WPS433
+    return multiprocessing.parent_process() is None
+
+
+@app.get("/api/settings")
+async def get_settings() -> dict[str, Any]:
+    return _settings_view()
+
+
+@app.put("/api/settings")
+async def put_settings(body: SettingsUpdate) -> dict[str, Any]:
+    """Save provider settings from the UI. Takes effect after a restart."""
+    updates: dict[str, str] = {}
+    if body.provider is not None:
+        provider = body.provider.strip().lower()
+        if provider not in user_settings.PROVIDERS:
+            raise HTTPException(status_code=400, detail="unknown provider")
+        updates["AGENT_PROVIDER"] = provider
+    if body.groq_api_key is not None:
+        updates["GROQ_API_KEY"] = body.groq_api_key.strip()
+    for field_name, env_key, _ in _SETTING_FIELDS[2:]:
+        value = getattr(body, field_name)
+        if value is not None:
+            value = value.strip()
+            # Don't pin the built-in default: storing "" lets a future
+            # default change reach this user.
+            if value == GROQ_DEFAULT_MODELS[env_key]:
+                value = ""
+            updates[env_key] = value
+
+    # Refuse to save Groq without a key, or the next start would fail.
+    current = user_settings.read()
+    next_provider = updates.get(
+        "AGENT_PROVIDER", current.get("AGENT_PROVIDER", settings.provider)
+    )
+    next_key = updates.get(
+        "GROQ_API_KEY", current.get("GROQ_API_KEY", settings.groq_api_key)
+    )
+    if next_provider == "groq" and not next_key:
+        raise HTTPException(
+            status_code=400, detail="a Groq API key is required for Groq"
+        )
+    try:
+        await asyncio.to_thread(user_settings.write, updates)
+    except (OSError, ValueError) as exc:
+        logger.exception("Saving settings failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return _settings_view()
+
+
+@app.post("/api/restart")
+async def restart_daemon() -> dict[str, str]:
+    """Re-exec the daemon so saved settings take effect.
+
+    Replies first, then replaces this process with the same command line
+    after a short delay so the HTTP response gets out.
+    """
+    if not _can_self_restart():
+        raise HTTPException(
+            status_code=409,
+            detail="running under --reload; restart the daemon manually",
+        )
+
+    def _reexec() -> None:
+        logger.info("Restarting daemon to apply settings")
+        try:
+            app.state.memory.close()
+        except Exception:
+            logger.exception("Error closing memory before restart")
+        user_settings.clear_inherited_environ()
+        # ``orig_argv`` is the full original command line, interpreter
+        # included, e.g. ``[python, .venv/bin/uvicorn, main:app]``.
+        os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+
+    asyncio.get_running_loop().call_later(0.5, _reexec)
+    return {"status": "restarting"}
 
 
 @app.delete("/api/tools/{tool_name}")
