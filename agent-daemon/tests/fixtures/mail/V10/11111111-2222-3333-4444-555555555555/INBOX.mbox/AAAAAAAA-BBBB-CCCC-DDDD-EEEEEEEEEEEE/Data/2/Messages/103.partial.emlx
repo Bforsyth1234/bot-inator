@@ -1,0 +1,27 @@
+420        
+From: Bob <bob@example.com>
+To: me@example.com
+Subject: Slides attached
+Date: Mon, 09 Nov 2026 12:00:00 -0800
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="YY"
+
+--YY
+Content-Type: text/plain; charset=utf-8
+
+Here are the slides for tomorrow.
+--YY
+Content-Type: application/pdf; name="slides.pdf"
+Content-Disposition: attachment; filename="slides.pdf"
+X-Apple-Content-Length: 12345
+
+
+--YY--
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>flags</key>
+	<integer>8590195713</integer>
+</dict>
+</plist>

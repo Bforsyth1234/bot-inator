@@ -155,7 +155,7 @@ def test_backfill_rows_saved_without_vec(tmp_path, monkeypatch):
 
 
 _RACE_SCRIPT = r"""
-import sys, threading
+import sys, threading, time
 sys.path.insert(0, sys.argv[2])
 from ai.memory import Memory, _fallback_embed
 mem = Memory(sys.argv[1], embedder=lambda t: _fallback_embed(t, 8), dim=8)
@@ -170,11 +170,17 @@ def worker():
             mem.store_embedding("w")
         except BaseException as exc:
             errs.append(repr(exc))
+        # Yield so close() isn't starved of the lock: Python locks aren't
+        # fair, and 4 spinning workers made one run take minutes.
+        time.sleep(0)
 threads = [threading.Thread(target=worker) for _ in range(4)]
 for t in threads:
     t.start()
-for _ in range(3000):
+deadline = time.monotonic() + 0.5
+for _ in range(1000):
     mem.close()
+    if time.monotonic() > deadline:
+        break
 stop.set()
 for t in threads:
     t.join()

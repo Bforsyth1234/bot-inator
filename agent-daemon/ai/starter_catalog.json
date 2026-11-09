@@ -1,0 +1,79 @@
+[
+  {
+    "id": "tidy_installers",
+    "tool_name": "tidy_downloaded_installers",
+    "description": "Move leftover .dmg and .pkg installers out of Downloads into the Trash, listing them first.",
+    "expected_logic": "Inputs: folder (str, default ~/Downloads), min_age_days (int, default 1), dry_run (bool, default True). List every regular file in folder (not recursive) whose suffix is .dmg or .pkg and whose modification time is older than min_age_days. Skip any .dmg that is currently mounted (check `hdiutil info` for its path). With dry_run=True return the list of paths and their total size in MB. With dry_run=False move each file to the Trash with `osascript -e 'tell application \"Finder\" to delete POSIX file \"<path>\"'` and return the moved paths. If folder does not exist, return an error string.",
+    "requires": {"downloads": {"exts": [".dmg", ".pkg"], "min": 3}}
+  },
+  {
+    "id": "file_pdf_attachments",
+    "tool_name": "file_pdfs_by_month",
+    "description": "File PDFs saved from Mail into ~/Documents/PDFs/<YYYY-MM> folders so Downloads stays clear.",
+    "expected_logic": "Inputs: source (str, default ~/Downloads), dest_root (str, default ~/Documents/PDFs), dry_run (bool, default True). For each *.pdf directly in source, read its modification time and compute dest = dest_root/YYYY-MM/<name>; if a file with that name exists, append ' (2)', ' (3)' and so on. With dry_run=True return the planned moves as 'old -> new' lines. With dry_run=False create the month folders and move the files with shutil.move, returning the moves. If source is missing, return an error string.",
+    "requires": {"apps_all": ["Mail", "Preview"], "downloads": {"exts": [".pdf"], "min": 5}}
+  },
+  {
+    "id": "extract_archives",
+    "tool_name": "extract_downloaded_archives",
+    "description": "Unzip downloaded .zip archives next to themselves and move the archives to the Trash.",
+    "expected_logic": "Inputs: folder (str, default ~/Downloads), dry_run (bool, default True). For each *.zip directly in folder, the target is a sibling folder with the archive's stem; skip archives whose target folder already exists. With dry_run=True return the archives that would be extracted. With dry_run=False extract each with zipfile.ZipFile.extractall into the target (reject member names containing '..' or starting with '/'), then move the .zip to the Trash via osascript Finder delete, and return the extracted folders. Return an error string if folder is missing.",
+    "requires": {"downloads": {"exts": [".zip"], "min": 5}}
+  },
+  {
+    "id": "archive_old_downloads",
+    "tool_name": "archive_old_downloads",
+    "description": "Move files untouched for months out of Downloads into ~/Downloads/Archive/<year>.",
+    "expected_logic": "Inputs: folder (str, default ~/Downloads), older_than_days (int, default 90), dry_run (bool, default True). For each regular, non-hidden file directly in folder whose modification time is older than older_than_days, compute dest = folder/Archive/<YYYY of mtime>/<name>, adding ' (2)' on a name clash. With dry_run=True return the count, total size in MB, and the first 20 planned moves. With dry_run=False create the year folders and move the files with shutil.move, returning the count moved. Never touch the Archive folder itself. Return an error string if folder is missing.",
+    "requires": {"downloads_total": 50, "downloads_oldest_days": 90}
+  },
+  {
+    "id": "convert_heic",
+    "tool_name": "convert_heic_to_jpeg",
+    "description": "Convert HEIC photos (from AirDrop or Photos) to JPEG copies that open anywhere.",
+    "expected_logic": "Inputs: folder (str, default ~/Downloads), quality (int 1-100, default 85), dry_run (bool, default True). For each *.heic or *.HEIC file directly in folder, the output is the same path with a .jpg suffix; skip files whose .jpg already exists. With dry_run=True return the planned conversions. With dry_run=False run `sips -s format jpeg -s formatOptions <quality> <in> --out <out>` for each and return the created paths; keep the originals. Return an error string if folder is missing or sips fails, including its stderr.",
+    "requires": {"downloads": {"exts": [".heic"], "min": 3}}
+  },
+  {
+    "id": "resize_images",
+    "tool_name": "resize_images_for_sharing",
+    "description": "Make smaller copies of large images so they are quick to send by mail or message.",
+    "expected_logic": "Inputs: paths (list of str, image files), max_pixels (int, default 1600). For each path ending in .png, .jpg or .jpeg (case-insensitive), write a copy into a 'Resized' folder next to the original, using `sips -Z <max_pixels> <in> --out <out>`. Never modify the originals. Return the list of created paths with their new size in KB from os.path.getsize. Skip and report missing paths or other extensions. Return an error string if paths is empty.",
+    "requires": {"downloads": {"exts": [".png", ".jpg", ".jpeg"], "min": 10}}
+  },
+  {
+    "id": "merge_csvs",
+    "tool_name": "merge_csv_exports",
+    "description": "Combine several downloaded CSV exports with the same header into one file for Numbers or Excel.",
+    "expected_logic": "Inputs: paths (list of str, .csv files), output (str, default ~/Downloads/merged.csv). Read each file with csv.reader; the first file's header is the reference. Skip files whose header differs and report them. Write the header once, then every data row from the matching files in the order given, to output (append ' (2)' if output exists). Return the output path, row count and skipped files. Return an error string if fewer than two paths are given or none exist.",
+    "requires": {"apps_any": ["Numbers", "Microsoft Excel"], "downloads": {"exts": [".csv"], "min": 3}}
+  },
+  {
+    "id": "brew_update",
+    "tool_name": "update_homebrew_packages",
+    "description": "Run Homebrew's update and upgrade in one click and report what changed.",
+    "expected_logic": "Inputs: dry_run (bool, default True). Find brew at /opt/homebrew/bin/brew or /usr/local/bin/brew; if neither exists, return an error string. Run `brew update` with subprocess.run (capture output, timeout 600 s). With dry_run=True then run `brew outdated` and return the list of outdated packages. With dry_run=False run `brew upgrade` and return the last 40 lines of its output. Include stderr in the result if any command exits non-zero.",
+    "requires": {"shell_any": ["brew update", "brew upgrade"], "shell_min": 5}
+  },
+  {
+    "id": "pull_all_repos",
+    "tool_name": "pull_all_git_repos",
+    "description": "Fast-forward every git repository under a folder in one click and list the ones that need attention.",
+    "expected_logic": "Inputs: root (str, default ~/dev), dry_run (bool, default True). Find directories directly under root that contain a .git folder. For each, run `git -C <repo> status --porcelain` and `git -C <repo> fetch --quiet` via subprocess.run with a 60 s timeout. With dry_run=True report each repo as clean/dirty and how many commits it is behind (`git rev-list --count HEAD..@{u}`). With dry_run=False run `git -C <repo> pull --ff-only` only on clean repos and report the result per repo. Return an error string if root is missing.",
+    "requires": {"shell_any": ["git pull", "git fetch"], "shell_min": 10}
+  },
+  {
+    "id": "join_next_meeting",
+    "tool_name": "join_next_video_meeting",
+    "description": "Open the video-call link of the next calendar meeting in one click.",
+    "expected_logic": "Inputs: within_minutes (int, default 15). Use osascript to ask Calendar for events starting between now and now + within_minutes (title, start date, location, notes/description). Search location then notes for the first URL matching zoom.us/j/, meet.google.com/ or teams.microsoft.com/l/meetup-join. If found, open it with `open <url>` and return the title and URL. If there is no upcoming event or no link, return a short message saying so.",
+    "requires": {"apps_any": ["zoom.us", "Microsoft Teams", "Google Chrome"], "calendar_recurring": 1}
+  },
+  {
+    "id": "daily_agenda_note",
+    "tool_name": "write_daily_agenda_note",
+    "description": "Write today's calendar events into a dated note in Notes each morning.",
+    "expected_logic": "Inputs: date (str YYYY-MM-DD, default today), dry_run (bool, default True). Use osascript to read Calendar events for that date across all calendars (title, start and end time), sorted by start time. Build lines 'HH:MM-HH:MM title'. With dry_run=True return the text. With dry_run=False create a note titled 'Agenda <date>' in Notes via osascript containing those lines, or replace its body if a note with that title exists, and return the note title. If there are no events, return 'No events on <date>'.",
+    "requires": {"apps_all": ["Calendar", "Notes"], "calendar_recurring": 2}
+  }
+]

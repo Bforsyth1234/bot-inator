@@ -16,7 +16,9 @@ import asyncio
 import copy
 import importlib.util
 import logging
+import os
 import sys
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,7 +61,15 @@ WSSendCallable = Callable[[Any], Awaitable[None]]
 # popup informing them of the focus change they just caused). Pattern
 # detection still runs because the recognizer's whole job is finding
 # repeatable workflows in activation sequences.
-_AGENT_TRIGGER_EXCLUDED_EVENT_TYPES: frozenset[str] = frozenset({"app_activated"})
+# Wave 3 sources are signal-only too: running the tool-calling agent on
+# every email, upcoming meeting or copy would flood the user with
+# approval cards. Idea sources still see them.
+_AGENT_TRIGGER_EXCLUDED_EVENT_TYPES: frozenset[str] = frozenset({
+    "app_activated",
+    "clipboard_changed",
+    "mail_received",
+    "event_starting_soon",
+})
 
 
 def _now_iso() -> str:
@@ -72,6 +82,19 @@ def _now_iso() -> str:
 
 # How ``_build_pattern_prompt`` explains each idea source to the agent.
 _PATTERN_SOURCE_INTROS: dict[str, str] = {
+    "friction": (
+        "The user keeps copying data in one app and pasting it into "
+        "another, and a reviewed tool idea would move that data directly."
+    ),
+    "setup_scan": (
+        "A one-time scan of the user's Mac found repeated manual work "
+        "(for example a long shell command typed many times), and a "
+        "reviewed tool idea passed its quality bar."
+    ),
+    "starter_catalog": (
+        "A curated, known-good tool idea matched the apps and files on "
+        "the user's Mac and passed review."
+    ),
     "repetition": (
         "The pattern recognizer has observed the user performing a "
         "repeatable workflow and suggested a new tool that would automate it."
@@ -139,7 +162,7 @@ class Orchestrator:
         import threading
         self._tool_load_lock = threading.RLock()
         # Set by :func:`tools.meta_tool_generator.generate_custom_tool`
-        # when a new tool was installed (or matched an existing file) so
+        # when a new tool was installed and loaded so
         # :meth:`_handle_user_message` can transparently re-run the same
         # prompt against the rebuilt agent, which now has the tool in
         # its schema. Cleared immediately after consumption to keep the
@@ -150,17 +173,23 @@ class Orchestrator:
         # ``observe(event)`` and/or ``observe_chat(user_text, reply,
         # tools_called)``.
         self.idea_sources: list[Any] = list(idea_sources or [])
-        # Tool names invoked during the current chat turn, so a chat-gap
-        # source can skip turns that already tried ``generate_custom_tool``.
+        # Tool names invoked during the current agent turn (reset at the
+        # top of :meth:`_handle_event`), so a chat-gap source can skip turns
+        # that already tried ``generate_custom_tool`` and a second
+        # ``generate_custom_tool`` call in one turn is refused (#38).
         self._turn_tool_calls: set[str] = set()
+        # Generated tools moved to ``quarantine/`` by the loader (#28):
+        # name -> first line of the error. Cleared when the name loads.
+        self._quarantined: dict[str, str] = {}
         self._agent: Any = None
 
     def mark_tool_ready_for_rerun(self, tool_name: str) -> None:
         """Flag the current user turn for an auto-rerun with ``tool_name``.
 
-        Called from the meta-tool generator after a successful install
-        (or when an identically-named tool already exists on disk). The
-        flag is consumed by :meth:`_handle_user_message`.
+        Called from the meta-tool generator after a successful install and
+        load. A name that is already a generated tool never gets here: the
+        meta-tool rejects it up front with a ``name_collision`` error (#24).
+        The flag is consumed by :meth:`_handle_user_message`.
         """
         self._pending_rerun_tool = tool_name
 
@@ -283,10 +312,16 @@ class Orchestrator:
         re-loading refreshes the cached module and replaces the previous
         tool instance in :attr:`tools`.
 
+        A module that fails to load (``exec_module`` raises, no Tool found,
+        or the agent rebuild fails because of it) is quarantined: moved to
+        ``<directory>/quarantine/`` next to a ``<name>.error.txt`` holding
+        the error, and reported as a ``tool_result`` thought. The other
+        tools stay loaded (#28).
+
         Returns the sorted list of dynamic tool names currently loaded.
 
-        Files starting with ``.`` (e.g. ``.gitkeep``) and the nested
-        ``.git`` bookkeeping directory are always skipped.
+        Files starting with ``.`` (e.g. ``.gitkeep``) and subdirectories
+        (``.git``, ``disabled/``, ``quarantine/``) are always skipped.
 
         Thread-safe: uses ``_tool_load_lock`` to serialize concurrent calls.
         """
@@ -296,6 +331,7 @@ class Orchestrator:
                 return sorted(self._dynamic_tool_names)
 
             loaded: list[str] = []
+            quarantined: list[tuple[str, str]] = []
             for path in sorted(target.iterdir()):
                 if path.name.startswith(".") or path.is_dir():
                     continue
@@ -313,24 +349,145 @@ class Orchestrator:
                         for t in self.tools
                     ) - {name}
                     tool_obj = self._import_tool_module(name, path, exclude)
-                except Exception:
-                    logger.exception(
-                        "Failed to load dynamic tool from %s; skipping", path
-                    )
+                except Exception as exc:
+                    logger.exception("Failed to load dynamic tool from %s", path)
+                    quarantined.append((name, self._quarantine_tool(
+                        target, name, exc, traceback.format_exc()
+                    )))
                     continue
                 if tool_obj is None:
-                    logger.warning(
-                        "No smolagents Tool instance found in %s; skipping", path
-                    )
+                    quarantined.append((name, self._quarantine_tool(
+                        target, name,
+                        f"No smolagents Tool instance found in {path.name}", "",
+                    )))
                     continue
                 self._replace_tool(name, tool_obj)
                 self._dynamic_tool_names.add(name)
+                self._quarantined.pop(name, None)
                 loaded.append(name)
 
             if loaded:
+                quarantined.extend(self._rebuild_agent_isolating(target, loaded))
+                logger.info(
+                    "Loaded dynamic tools: %s",
+                    ", ".join(n for n in loaded if n in self._dynamic_tool_names),
+                )
+            elif quarantined:
                 self._agent = self._build_agent()
-                logger.info("Loaded dynamic tools: %s", ", ".join(loaded))
+            for name, first_line in quarantined:
+                self._report_quarantine(name, first_line)
             return sorted(self._dynamic_tool_names)
+
+    def _rebuild_agent_isolating(
+        self, target: Path, loaded: list[str]
+    ) -> list[tuple[str, str]]:
+        """Rebuild the agent; if that fails, quarantine the tools that break it.
+
+        The fast path is one build. On failure the just-loaded tools are
+        detached and re-added one at a time, so a tool whose schema breaks
+        ``ToolCallingAgent`` is quarantined and the rest stay loaded.
+        Returns ``(name, first_error_line)`` for each quarantined tool.
+        """
+        try:
+            self._agent = self._build_agent()
+            return []
+        except Exception:
+            logger.exception(
+                "Agent rebuild failed; re-adding new tools one at a time"
+            )
+        pending = [(n, self._tool_named(n)) for n in loaded]
+        for name, _ in pending:
+            self._remove_tool(name)
+        try:
+            self._agent = self._build_agent()
+        except Exception:
+            # Not attributable to a new tool: restore them and re-raise.
+            for name, tool_obj in pending:
+                self._replace_tool(name, tool_obj)
+                self._dynamic_tool_names.add(name)
+            raise
+        quarantined: list[tuple[str, str]] = []
+        for name, tool_obj in pending:
+            self._replace_tool(name, tool_obj)
+            self._dynamic_tool_names.add(name)
+            try:
+                self._agent = self._build_agent()
+            except Exception as exc:
+                tb = traceback.format_exc()
+                logger.warning("Agent rebuild fails with %s; quarantining", name)
+                self._remove_tool(name)
+                quarantined.append(
+                    (name, self._quarantine_tool(target, name, exc, tb))
+                )
+        if quarantined:
+            self._agent = self._build_agent()
+        return quarantined
+
+    def _tool_named(self, name: str) -> Any:
+        for t in self.tools:
+            if getattr(t, "name", getattr(t, "__name__", "")) == name:
+                return t
+        return None
+
+    def _remove_tool(self, name: str) -> None:
+        """Detach ``name`` from :attr:`tools` without rebuilding the agent."""
+        self.tools = [
+            t
+            for t in self.tools
+            if getattr(t, "name", getattr(t, "__name__", "")) != name
+        ]
+        self._dynamic_tool_names.discard(name)
+        sys.modules.pop(f"tools.generated.{name}", None)
+
+    def _quarantine_tool(
+        self, target: Path, name: str, error: Any, tb: str
+    ) -> str:
+        """Move ``<target>/<name>.py`` to ``<target>/quarantine/`` (#28).
+
+        Writes ``quarantine/<name>.error.txt``: the error on line one, then
+        the traceback. Unloads the tool if it was loaded. Returns the
+        error's first line. Never raises: a failed move is logged.
+        """
+        if isinstance(error, BaseException):
+            first_line = f"{type(error).__name__}: {error}".splitlines()[0]
+        else:
+            first_line = (str(error).splitlines() or [""])[0]
+        first_line = first_line[:240]
+        self._remove_tool(name)
+        self._quarantined[name] = first_line
+        qdir = target / "quarantine"
+        try:
+            qdir.mkdir(exist_ok=True)
+            os.replace(target / f"{name}.py", qdir / f"{name}.py")
+            (qdir / f"{name}.error.txt").write_text(
+                first_line + "\n\n" + (tb or ""), encoding="utf-8"
+            )
+            logger.warning("Quarantined generated tool %s: %s", name, first_line)
+        except OSError:
+            logger.exception("Could not quarantine generated tool %s", name)
+        return first_line
+
+    def _report_quarantine(self, name: str, first_line: str) -> None:
+        """Emit a ``tool_result`` thought for a quarantined tool, from any thread."""
+        loop = getattr(self.event_bus, "loop", None)
+        if loop is None or loop.is_closed():
+            return
+        coro = self._emit_thought(
+            getattr(self, "_current_event_id", "evt_tools"),
+            "tool_result",
+            f"Generated tool {name} failed to load and was moved to "
+            f"quarantine/: {first_line}",
+        )
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            loop.create_task(coro)
+        elif loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, loop)
+        else:
+            coro.close()
 
     def unload_dynamic_tool(self, name: str) -> bool:
         """Remove a previously-loaded dynamic tool from the active agent.
@@ -344,13 +501,7 @@ class Orchestrator:
         with self._tool_load_lock:
             if name not in self._dynamic_tool_names:
                 return False
-            self.tools = [
-                t
-                for t in self.tools
-                if getattr(t, "name", getattr(t, "__name__", "")) != name
-            ]
-            self._dynamic_tool_names.discard(name)
-            sys.modules.pop(f"tools.generated.{name}", None)
+            self._remove_tool(name)
             self._agent = self._build_agent()
             logger.info("Unloaded dynamic tool: %s", name)
             return True
@@ -429,6 +580,7 @@ class Orchestrator:
 
     async def _handle_event(self, event: ContextEvent) -> None:
         event_id = event.metadata.get("event_id") or f"evt_{uuid.uuid4().hex[:12]}"
+        self._turn_tool_calls = set()
         await self._emit_thought(event_id, "event_received", self._describe_event(event))
 
         if self.pattern_recognizer is not None:
@@ -521,7 +673,7 @@ class Orchestrator:
         result = await self._run_agent(event_id, prompt, max_steps=6)
         reply = str(result) if result is not None else ""
 
-        # If the turn generated (or matched) a tool, the current agent's
+        # If the turn generated a tool, the current agent's
         # schema was frozen before the tool was available. ``load_dynamic_tools``
         # has already rebuilt ``self._agent`` with the new tool, so one more
         # pass can call it directly without making the user re-ask. The flag
@@ -727,6 +879,28 @@ class Orchestrator:
             event_id = getattr(orchestrator, "_current_event_id", "evt_unknown")
             call_args: list[Any] = list(args)
             call_kwargs: dict[str, Any] = dict(kwargs)
+            if (
+                tool_name == "generate_custom_tool"
+                and tool_name in orchestrator._turn_tool_calls
+            ):
+                # #38: one generation per turn. A retry after a failure
+                # asked the user to approve again (4 prompts in one turn).
+                result = {
+                    "status": "error",
+                    "error": "generate_custom_tool_already_called",
+                    "message": (
+                        "generate_custom_tool was already called in this "
+                        "turn. Do not call it again; emit final_answer "
+                        "reporting the earlier result."
+                    ),
+                }
+                asyncio.run_coroutine_threadsafe(
+                    orchestrator._emit_thought(
+                        event_id, "tool_result", f"{tool_name}: {result}"
+                    ),
+                    loop,
+                )
+                return result
             orchestrator._turn_tool_calls.add(tool_name)
             if not is_read_only:
                 coro = orchestrator._request_approval(
@@ -748,6 +922,8 @@ class Orchestrator:
                 if original_forward
                 else None
             )
+            if tool_name == "generate_custom_tool":
+                result = orchestrator._flag_quarantined_install(result)
             label = f"{tool_name} (read-only)" if is_read_only else tool_name
             asyncio.run_coroutine_threadsafe(
                 orchestrator._emit_thought(event_id, "tool_result", f"{label}: {result}"),
@@ -761,6 +937,29 @@ class Orchestrator:
             wrapped.forward = gated_forward  # type: ignore[attr-defined]
             return wrapped
         return gated_forward
+
+    def _flag_quarantined_install(self, result: Any) -> Any:
+        """Turn an "ok" install whose tool was quarantined into an error.
+
+        The meta-tool reports ``ok`` once ``load_dynamic_tools`` returns,
+        but a module that failed to load is quarantined there (#28) rather
+        than raising. Report the failure and drop the auto-rerun.
+        """
+        if not isinstance(result, dict) or result.get("status") != "ok":
+            return result
+        name = result.get("tool_name")
+        if name not in self._quarantined or name in self._dynamic_tool_names:
+            return result
+        if self._pending_rerun_tool == name:
+            self._pending_rerun_tool = None
+        return {
+            "status": "error",
+            "tool_name": name,
+            "error": (
+                "installed but failed to load; moved to quarantine/: "
+                f"{self._quarantined[name]}"
+            ),
+        }
 
     @staticmethod
     def _apply_edits(
@@ -1023,6 +1222,23 @@ class Orchestrator:
             tool_name = event.metadata.get("tool_name", "unknown")
             desc = event.metadata.get("description", "")
             return f"Pattern detected → suggested tool: {tool_name} — {desc}"
+        meta = event.metadata or {}
+        if event.event_type == "mail_received":
+            return (
+                f"Email from {meta.get('sender', 'unknown')}: "
+                f"{meta.get('subject', '') or '(no subject)'} "
+                f"[{meta.get('mailbox', '')}, id {meta.get('message_id')}]"
+            )
+        if event.event_type == "event_starting_soon":
+            start = str(meta.get("start", ""))
+            text = f"Meeting starting soon: {meta.get('title', '(untitled)')} at {start[11:16]}"
+            if meta.get("location"):
+                text += f" — {meta['location']}"
+            if meta.get("video_url"):
+                text += f" — video link: {meta['video_url']}"
+            return text
+        if event.event_type == "clipboard_changed":
+            return f"Copied {meta.get('kind', 'something')} in {event.app_name or 'an app'}"
         if event.event_type == "user_message":
             text = event.metadata.get("text", "") or ""
             preview = text if len(text) <= 120 else text[:120] + "…"

@@ -185,6 +185,15 @@ removal to the nested git repo (DONE.md #8), and returns 200 with
 | `ai/open_help.py`             | `OpenHelpSuggester`: asks "how could I help?"      |
 |                               | over recent events, judge-scores ideas 0-10, keeps |
 |                               | approve/reject feedback (DONE.md #13).             |
+| `ai/setup_scan.py`            | `SetupScanner`: once-per-install scan (apps, shell |
+|                               | history, Downloads, calendar) + starter catalog    |
+|                               | (`ai/starter_catalog.json`); ≤3 judged ideas.      |
+| `ai/friction.py`              | `FrictionDetector`: copy in A → paste in B loops   |
+|                               | and app ping-pong → judged ideas.                  |
+| `events/mail_watcher.py`      | Mail.app Envelope Index (read-only) → mail_received|
+| `events/calendar_watcher.py`  | Upcoming meetings → event_starting_soon.           |
+| `events/clipboard_watcher.py` | Clipboard changes → clipboard_changed (app + kind, |
+|                               | never content).                                    |
 | `ai/orchestrator.py`          | Event loop, tool gating, subscriber fan-out,       |
 |                               | dynamic-tool hot-reload (`load_dynamic_tools`).    |
 | `ai/pattern_recognizer.py`    | Rolling 50-event deque fed by the orchestrator;    |
@@ -302,6 +311,9 @@ bypass the approval gate and run inline; all other tools still emit an
 |                    |           | Screen Recording).                                |
 | `open_app`         |           | `open -a` on an `.app` found in the Applications  |
 |                    |           | folders.                                          |
+| `read_email`       | ✅         | Body of one Mail.app message by id (`.emlx`).     |
+| `list_events`      | ✅         | Calendar events in a range (EventKit/AppleScript).|
+| `create_event`     |           | Adds a Calendar event.                            |
 | `generate_custom_tool`|         | Meta-tool: drafts a new `@tool` module on the     |
 |                    |           | main engine, runs static safety checks, emits a   |
 |                    |           | `code_approval_request` for human review, and —   |

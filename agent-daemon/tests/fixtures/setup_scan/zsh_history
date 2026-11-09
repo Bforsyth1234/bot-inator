@@ -1,0 +1,113 @@
+: 1700000000:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000005:0;ls
+: 1700000060:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000065:0;ls
+: 1700000120:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000125:0;ls
+: 1700000180:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000185:0;ls
+: 1700000240:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000245:0;ls
+: 1700000300:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000305:0;ls
+: 1700000360:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000365:0;ls
+: 1700000420:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000425:0;ls
+: 1700000480:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000485:0;ls
+: 1700000540:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000545:0;ls
+: 1700000600:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000605:0;ls
+: 1700000660:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000665:0;ls
+: 1700000720:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000725:0;ls
+: 1700000780:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000785:0;ls
+: 1700000840:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000845:0;ls
+: 1700000900:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000905:0;ls
+: 1700000960:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700000965:0;ls
+: 1700001020:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001025:0;ls
+: 1700001080:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001085:0;ls
+: 1700001140:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001145:0;ls
+: 1700001200:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001205:0;ls
+: 1700001260:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001265:0;ls
+: 1700001320:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001325:0;ls
+: 1700001380:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001385:0;ls
+: 1700001440:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001445:0;ls
+: 1700001500:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001505:0;ls
+: 1700001560:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001565:0;ls
+: 1700001620:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001625:0;ls
+: 1700001680:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001685:0;ls
+: 1700001740:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001745:0;ls
+: 1700001800:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001805:0;ls
+: 1700001860:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001865:0;ls
+: 1700001920:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001925:0;ls
+: 1700001980:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700001985:0;ls
+: 1700002040:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700002045:0;ls
+: 1700002100:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700002105:0;ls
+: 1700002160:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700002165:0;ls
+: 1700002220:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700002225:0;ls
+: 1700002280:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700002285:0;ls
+: 1700002340:0;docker compose -f infra/docker-compose.yml up -d --build api worker
+: 1700002345:0;ls
+: 1700005000:0;brew update && brew upgrade
+: 1700005001:0;brew update && brew upgrade
+: 1700005002:0;brew update && brew upgrade
+: 1700005003:0;brew update && brew upgrade
+: 1700005004:0;brew update && brew upgrade
+: 1700005005:0;brew update && brew upgrade
+: 1700005006:0;brew update && brew upgrade
+: 1700005007:0;brew update && brew upgrade
+: 1700005008:0;brew update && brew upgrade
+: 1700005009:0;brew update && brew upgrade
+: 1700005010:0;brew update && brew upgrade
+: 1700005011:0;brew update && brew upgrade
+: 1700009000:0;curl -H 'Authorization: Bearer abc123' https://api.example.com/v1/items
+: 1700009001:0;curl -H 'Authorization: Bearer abc123' https://api.example.com/v1/items
+: 1700009002:0;curl -H 'Authorization: Bearer abc123' https://api.example.com/v1/items
+: 1700009003:0;curl -H 'Authorization: Bearer abc123' https://api.example.com/v1/items
+: 1700009004:0;curl -H 'Authorization: Bearer abc123' https://api.example.com/v1/items
+: 1700009005:0;curl -H 'Authorization: Bearer abc123' https://api.example.com/v1/items
+: 1700009006:0;curl -H 'Authorization: Bearer abc123' https://api.example.com/v1/items
+: 1700009007:0;curl -H 'Authorization: Bearer abc123' https://api.example.com/v1/items
+: 1700009500:0;python manage.py migrate \
+  --settings=app.settings.local
+: 1700009501:0;python manage.py migrate \
+  --settings=app.settings.local
+: 1700009502:0;python manage.py migrate \
+  --settings=app.settings.local
+: 1700009503:0;python manage.py migrate \
+  --settings=app.settings.local
+: 1700009504:0;python manage.py migrate \
+  --settings=app.settings.local
+: 1700009505:0;python manage.py migrate \
+  --settings=app.settings.local
+git status

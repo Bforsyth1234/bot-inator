@@ -1,0 +1,14 @@
+{
+ "Installer-1.dmg": 3,
+ "Installer-2.dmg": 10,
+ "Tool.pkg": 20,
+ "Other.dmg": 40,
+ "invoice-01.pdf": 2,
+ "invoice-02.pdf": 5,
+ "invoice-03.pdf": 9,
+ "statement.pdf": 30,
+ "receipt.pdf": 60,
+ "report.csv": 4,
+ "notes.txt": 200,
+ ".DS_Store": 1
+}
