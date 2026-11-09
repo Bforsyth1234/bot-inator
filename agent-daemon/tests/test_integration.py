@@ -41,8 +41,9 @@ def client():
         return_value="NO_PATTERN",
     ):
         from main import app  # noqa: WPS433 - import after env/patch set up
+        from auth import auth_header  # noqa: WPS433
 
-        with TestClient(app) as test_client:
+        with TestClient(app, headers=auth_header()) as test_client:
             yield test_client
 
 

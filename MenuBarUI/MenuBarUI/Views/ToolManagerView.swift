@@ -57,9 +57,8 @@ final class ToolManagerViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
-            let (data, response) = try await session.data(
-                from: baseURL.appendingPathComponent("api/tools")
-            )
+            let request = try DaemonAuth.request(baseURL.appendingPathComponent("api/tools"))
+            let (data, response) = try await session.data(for: request)
             try Self.checkStatus(response)
             tools = try JSONDecoder().decode([AgentTool].self, from: data)
             errorMessage = nil
@@ -70,11 +69,10 @@ final class ToolManagerViewModel: ObservableObject {
 
     func delete(_ tool: AgentTool) async {
         guard tool.isGenerated else { return }
-        var request = URLRequest(
-            url: baseURL.appendingPathComponent("api/tools/\(tool.name)")
-        )
-        request.httpMethod = "DELETE"
         do {
+            let request = try DaemonAuth.request(
+                baseURL.appendingPathComponent("api/tools/\(tool.name)"), method: "DELETE"
+            )
             let (_, response) = try await session.data(for: request)
             try Self.checkStatus(response)
             errorMessage = nil
@@ -89,11 +87,11 @@ final class ToolManagerViewModel: ObservableObject {
     func setEnabled(_ tool: AgentTool, _ enabled: Bool) async {
         guard tool.isGenerated else { return }
         let action = enabled ? "enable" : "disable"
-        var request = URLRequest(
-            url: baseURL.appendingPathComponent("api/tools/\(tool.name)/\(action)")
-        )
-        request.httpMethod = "POST"
         do {
+            let request = try DaemonAuth.request(
+                baseURL.appendingPathComponent("api/tools/\(tool.name)/\(action)"),
+                method: "POST"
+            )
             let (_, response) = try await session.data(for: request)
             try Self.checkStatus(response)
             errorMessage = nil
@@ -104,6 +102,7 @@ final class ToolManagerViewModel: ObservableObject {
     }
 
     private static func checkStatus(_ response: URLResponse) throws {
+        try DaemonAuth.checkAuth(response)
         guard let http = response as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else {
             throw NSError(

@@ -13,6 +13,7 @@ os.environ["AGENT_EAGER_LOAD"] = "0"
 from fastapi.testclient import TestClient  # noqa: E402
 
 import user_settings  # noqa: E402
+from auth import auth_header  # noqa: E402
 from main import app  # noqa: E402
 
 
@@ -26,7 +27,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "groq_api_key", "")
     for role in ("main", "analysis", "drafting"):
         monkeypatch.setattr(settings, f"provider_{role}", "")
-    with TestClient(app) as test_client:
+    with TestClient(app, headers=auth_header()) as test_client:
         test_client.settings_path = path
         yield test_client
 

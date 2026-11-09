@@ -31,3 +31,12 @@ os.environ.setdefault(
 # Per-engine overrides from a developer's .env must not leak into tests.
 for _role in ("MAIN", "ANALYSIS", "DRAFTING"):
     os.environ.setdefault(f"AGENT_PROVIDER_{_role}", "")
+# Keep the developer's real ~/.bot-inator/token out of tests (#27): the
+# daemon creates this temp token on first use and test clients send it.
+os.environ.setdefault(
+    "AGENT_TOKEN_PATH",
+    os.path.join(_tempfile.mkdtemp(prefix="bot-inator-token-"), "token"),
+)
+# A developer's .env opt-in to sending personal text to the cloud (#31) must
+# not change test expectations; tests that need it set it themselves.
+os.environ.setdefault("AGENT_CLOUD_PERSONAL_TEXT", "0")

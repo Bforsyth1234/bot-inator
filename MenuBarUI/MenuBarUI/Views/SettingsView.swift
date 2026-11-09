@@ -91,9 +91,11 @@ final class SettingsViewModel: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         do {
-            let (data, response) = try await session.data(
-                from: baseURL.appendingPathComponent("api/settings")
+            let request = try DaemonAuth.request(
+                baseURL.appendingPathComponent("api/settings")
             )
+            let (data, response) = try await session.data(for: request)
+            try DaemonAuth.checkAuth(response)
             try Self.checkStatus(response, data)
             apply(try JSONDecoder().decode(DaemonSettings.self, from: data))
             errorMessage = nil
@@ -116,14 +118,16 @@ final class SettingsViewModel: ObservableObject {
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !key.isEmpty { body["groq_api_key"] = key }
 
-        var request = URLRequest(url: baseURL.appendingPathComponent("api/settings"))
-        request.httpMethod = "PUT"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         isBusy = true
         defer { isBusy = false }
         do {
+            var request = try DaemonAuth.request(
+                baseURL.appendingPathComponent("api/settings"), method: "PUT"
+            )
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder().encode(body)
             let (data, response) = try await session.data(for: request)
+            try DaemonAuth.checkAuth(response)
             try Self.checkStatus(response, data)
             apply(try JSONDecoder().decode(DaemonSettings.self, from: data))
             apiKey = ""
@@ -137,12 +141,14 @@ final class SettingsViewModel: ObservableObject {
     }
 
     func restart() async {
-        var request = URLRequest(url: baseURL.appendingPathComponent("api/restart"))
-        request.httpMethod = "POST"
         isBusy = true
         defer { isBusy = false }
         do {
+            let request = try DaemonAuth.request(
+                baseURL.appendingPathComponent("api/restart"), method: "POST"
+            )
             let (data, response) = try await session.data(for: request)
+            try DaemonAuth.checkAuth(response)
             try Self.checkStatus(response, data)
         } catch {
             errorMessage = "Restart failed: \(error.localizedDescription)"

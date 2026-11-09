@@ -37,8 +37,9 @@ final class ChatViewModel: ObservableObject {
     /// the chat window appears.
     func loadHistory() async {
         do {
-            let url = baseURL.appendingPathComponent("api/chats")
-            let (data, _) = try await session.data(from: url)
+            let request = try DaemonAuth.request(baseURL.appendingPathComponent("api/chats"))
+            let (data, response) = try await session.data(for: request)
+            try DaemonAuth.checkAuth(response)
             let rows = try JSONDecoder().decode([ChatLogRow].self, from: data)
             for row in rows { upsert(row: row) }
             errorMessage = nil
@@ -161,6 +162,11 @@ struct ChatView: View {
                 Text(ws.isConnected ? "Connected" : "Offline")
                     .font(.caption)
                     .foregroundStyle(ws.isConnected ? Color.secondary : Color.red)
+                if !ws.isConnected, let hint = ws.authHint {
+                    Text(hint)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
         }

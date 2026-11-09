@@ -78,6 +78,25 @@ WebSocket (real-time event stream + approvals, §3.1) and a small
 read/write HTTP surface for operations that do not fit a broadcast
 model — tool management today, diagnostics later (§3.2).
 
+**Auth (#27).** Every HTTP request and WS handshake passes two checks, in
+this order (`agent-daemon/auth.py`, pure ASGI middleware):
+1. *Origin.* Any request carrying an `Origin` header is refused (HTTP 403;
+   WS handshake closed with 1008, HTTP 403 on the wire), unless the origin
+   is listed exactly in `AGENT_ALLOWED_ORIGINS` (comma separated, empty by
+   default, no wildcard). Browsers always send `Origin` on cross-site
+   requests and WebSockets; URLSession, curl and `websockets` send none.
+   This also applies to `GET /health`.
+2. *Token.* `Authorization: Bearer <token>` with the per-install secret in
+   `~/.bot-inator/token` (`secrets.token_urlsafe(32)`, file 0600, dir 0700,
+   created at daemon start if missing, `AGENT_TOKEN_PATH` overrides; never
+   logged). Compared with `hmac.compare_digest`. Missing/wrong → 401 with
+   `WWW-Authenticate: Bearer`; on the WS, close 1008 before accept. Only
+   `GET /health` is exempt. The Swift clients (`DaemonAuth.swift`) re-read
+   the file on every connect/request and send it as a header, including on
+   the `URLSessionWebSocketTask` handshake (built from a `URLRequest`).
+   `/api/restart` re-execs with the same token file, so clients keep
+   working.
+
 ### 3.1 WebSocket protocol
 
 Endpoint: `ws://127.0.0.1:8000/ws/stream`. Every frame is a single JSON object
@@ -137,7 +156,9 @@ Code-approval flow (Phase 4 meta-tool generation):
 Non-streaming, request/response operations live on plain HTTP so they
 can be driven by ordinary `URLSession` calls from the MenuBar app and
 by `curl` during debugging. All responses are JSON; all routes are
-local-only (the daemon binds `127.0.0.1`).
+local-only (the daemon binds `127.0.0.1`) and, except `GET /health`, need
+the bearer token (see Auth above):
+`curl -H "Authorization: Bearer $(cat ~/.bot-inator/token)" http://127.0.0.1:8000/api/tools`.
 
 | Method | Path                      | Purpose                                          |
 |--------|---------------------------|--------------------------------------------------|

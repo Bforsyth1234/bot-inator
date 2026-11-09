@@ -14,6 +14,9 @@ final class WebSocketManager: ObservableObject {
     /// Bumped on every `tools_changed` frame (#29); views can also listen
     /// for `Notification.Name.toolsChanged`.
     @Published private(set) var toolsChangedCount: Int = 0
+    /// Why the last connect couldn't authenticate (#27): no token file, or
+    /// the daemon refused the token. Nil once a handshake gets through.
+    @Published private(set) var authHint: String?
     /// Dismissed notice ids, kept for the app's lifetime so a reconnect's
     /// replay doesn't bring a dismissed banner back.
     private var dismissedNoticeIds: Set<String> = []
@@ -76,12 +79,24 @@ final class WebSocketManager: ObservableObject {
 
     func connect() {
         guard task == nil else { return }
-        let task = session.webSocketTask(with: url)
+        debug.connectAttempts += 1
+        // Read the token on every connect: the daemon may create
+        // ~/.bot-inator/token after the app starts (#27).
+        let request: URLRequest
+        do {
+            request = try DaemonAuth.request(url)
+        } catch {
+            authHint = DaemonAuth.missingTokenHint
+            debug.lastConnectError = DaemonAuth.missingTokenHint
+            isConnected = false
+            Task { [weak self] in await self?.scheduleReconnect() }
+            return
+        }
+        let task = session.webSocketTask(with: request)
         self.task = task
         task.resume()
         isConnected = true
         reconnectDelay = 1.0
-        debug.connectAttempts += 1
         receiveTask = Task { [weak self] in await self?.receiveLoop() }
     }
 
@@ -212,10 +227,18 @@ final class WebSocketManager: ObservableObject {
         while !Task.isCancelled {
             do {
                 let message = try await task.receive()
+                authHint = nil
                 await handleIncoming(message)
             } catch {
                 NSLog("WebSocketManager receive error: \(error)")
                 debug.lastConnectError = String(describing: error)
+                // The daemon refuses a bad token / an Origin by failing the
+                // handshake (HTTP 403 on the wire).
+                if let status = (task.response as? HTTPURLResponse)?.statusCode,
+                   status == 401 || status == 403 {
+                    authHint = DaemonAuth.rejectedTokenHint
+                    debug.lastConnectError = "HTTP \(status): \(DaemonAuth.rejectedTokenHint)"
+                }
                 await scheduleReconnect()
                 return
             }
@@ -278,6 +301,7 @@ final class WebSocketManager: ObservableObject {
         debug.reconnectsScheduled += 1
         let delay = reconnectDelay
         reconnectDelay = min(reconnectDelay * 2, maxReconnectDelay)
+        reconnectTask?.cancel()
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }

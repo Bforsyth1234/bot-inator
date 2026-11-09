@@ -70,14 +70,39 @@ WSSendCallable = Callable[[Any], Awaitable[None]]
 # detection still runs because the recognizer's whole job is finding
 # repeatable workflows in activation sequences.
 # Wave 3 sources are signal-only too: running the tool-calling agent on
-# every email, upcoming meeting or copy would flood the user with
-# approval cards. Idea sources still see them.
+# every upcoming meeting or copy would flood the user with approval
+# cards. Idea sources still see them. ``mail_received`` does reach the
+# agent (it reads the email and may offer a reminder or calendar event),
+# but see ``_mail_skips_agent`` for the mail it leaves alone.
 _AGENT_TRIGGER_EXCLUDED_EVENT_TYPES: frozenset[str] = frozenset({
     "app_activated",
     "clipboard_changed",
-    "mail_received",
     "event_starting_soon",
 })
+
+# Built-in follow-up kinds the NextStepSuggester already turns into an
+# approval card for an email; the agent skips those emails so the user
+# does not get two cards for one message.
+_MAIL_KINDS_HANDLED_BY_IDEAS: frozenset[str] = frozenset({
+    "mail_invite",
+    "mail_shipping",
+    "mail_deadline",
+})
+
+
+def _mail_skips_agent(event: ContextEvent) -> bool:
+    """True for mail the tool-calling agent should not act on.
+
+    Junk, sent and draft mailboxes never reach it, and neither does mail
+    a built-in follow-up already covers (see
+    ``_MAIL_KINDS_HANDLED_BY_IDEAS``).
+    """
+    # Imported lazily: ``ai.idea_sources`` pulls in the pattern recognizer.
+    from ai.idea_sources import _SKIP_MAILBOXES, NextStepSuggester
+
+    if _SKIP_MAILBOXES.search(str((event.metadata or {}).get("mailbox") or "")):
+        return True
+    return NextStepSuggester.classify(event) in _MAIL_KINDS_HANDLED_BY_IDEAS
 
 
 def _now_iso() -> str:
@@ -700,6 +725,8 @@ class Orchestrator:
         # see ``_AGENT_TRIGGER_EXCLUDED_EVENT_TYPES`` for the rationale.
         if event.event_type in _AGENT_TRIGGER_EXCLUDED_EVENT_TYPES:
             return
+        if event.event_type == "mail_received" and _mail_skips_agent(event):
+            return
 
         analysis = await self._analyse_event(event)
         if analysis:
@@ -716,8 +743,10 @@ class Orchestrator:
 
         # Ambient events must terminate in one tool call or ``no action``;
         # a tight step cap keeps a malformed tool call from spiralling
-        # into an endless parse-retry loop.
-        result = await self._run_agent(event_id, prompt, max_steps=2)
+        # into an endless parse-retry loop. Email gets one extra step for
+        # the ``read_email`` call before the action.
+        max_steps = 3 if event.event_type == "mail_received" else 2
+        result = await self._run_agent(event_id, prompt, max_steps=max_steps)
         await self._emit_thought(event_id, "complete", str(result)[:500])
 
     async def _handle_user_message(
@@ -1189,6 +1218,8 @@ class Orchestrator:
         event = privacy.redact_event(event, "main")
         if event.event_type == "imessage_received":
             return self._build_imessage_prompt(event, memories=memories)
+        if event.event_type == "mail_received":
+            return self._build_mail_prompt(event, memories=memories)
 
         parts = [
             "You are an on-device macOS assistant. Decide whether to help "
@@ -1327,6 +1358,44 @@ class Orchestrator:
             "written in the user's voice. The call will prompt the user "
             "for explicit approval before the message is sent. "
             "Otherwise, reply with the plain text 'no action'."
+        )
+
+    @staticmethod
+    def _build_mail_prompt(
+        event: ContextEvent, memories: Optional[list[str]] = None
+    ) -> str:
+        """Have the agent read a new email and offer a reminder or event.
+
+        The subject is redacted by ``privacy.redact_event`` when the main
+        engine is a cloud one (#31); ``read_email`` results are redacted
+        the same way in the gated tool wrapper.
+        """
+        event = privacy.redact_event(event, "main")
+        meta = event.metadata or {}
+        sender = meta.get("sender", "unknown")
+        subject = meta.get("subject", "") or "(no subject)"
+        message_id = meta.get("message_id")
+        memory_block = Orchestrator._format_memories(memories)
+        memory_suffix = f"\n\n{memory_block}" if memory_block else ""
+        return (
+            "You are an on-device macOS assistant watching the user's "
+            "email inbox on their behalf.\n"
+            f"A new email just arrived from {sender}.\n"
+            f"Subject: \"{subject}\"\n"
+            f"message_id: {message_id}"
+            f"{memory_suffix}\n\n"
+            "First call `read_email` with "
+            f"`message_id={message_id!r}` to read the body.\n"
+            "Then decide whether the email asks the user to do something:\n"
+            "- A task, to-do or reminder (for example \"Reminder: take the "
+            "dog on a walk\"): call `create_reminder` exactly once with a "
+            "short title, and a due date only if the email gives one.\n"
+            "- A meeting or appointment with a date and time: call "
+            "`create_event` exactly once.\n"
+            "Both tools ask the user for approval before anything is saved.\n"
+            "Newsletters, receipts, promotions, notifications and anything "
+            "that needs no action from the user: call `final_answer` with "
+            "'no action'."
         )
 
     @staticmethod

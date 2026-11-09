@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 import uuid
@@ -21,7 +22,14 @@ async def main(prompt: str) -> int:
     uri = "ws://127.0.0.1:8000/ws/stream"
     deadline = time.monotonic() + 60.0
 
-    async with websockets.connect(uri) as ws:
+    # The daemon requires its bearer token on the handshake (#27).
+    token_file = os.environ.get("AGENT_TOKEN_PATH") or os.path.expanduser(
+        "~/.bot-inator/token"
+    )
+    with open(token_file, encoding="utf-8") as fh:
+        headers = {"Authorization": f"Bearer {fh.read().strip()}"}
+
+    async with websockets.connect(uri, extra_headers=headers) as ws:
         hello = json.loads(await ws.recv())
         print(f"[status] {hello['payload']}")
 

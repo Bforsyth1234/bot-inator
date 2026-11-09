@@ -160,9 +160,11 @@ class MacAppListener:
                 self._started_at = started
                 self._pump(proc)
                 code = proc.wait()
-                self.last_exit_code = code
                 if self._stop_event.is_set():
+                    # stop() terminated it: not a crash, so keep the last
+                    # real exit code and error for status() (todo #50).
                     break
+                self.last_exit_code = code
                 uptime = self._clock() - started
                 self.last_error = f"helper exited with code {code} after {uptime:.1f}s"
                 if uptime >= self._stable_after:
