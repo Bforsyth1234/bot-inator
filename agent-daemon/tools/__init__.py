@@ -12,7 +12,7 @@ from .meta_tool_generator import generate_custom_tool
 from .move_file import move_file
 from .notes import append_note, create_note
 from .open_url import open_url
-from .read_active_tab import read_active_tab
+from .read_active_tab import read_active_tab, read_active_tab_text
 from .read_clipboard import read_clipboard
 from .read_email import read_email
 from .reminders import create_reminder, list_reminders
@@ -26,6 +26,7 @@ from .write_clipboard import write_clipboard
 
 AVAILABLE_TOOLS = [
     read_active_tab,
+    read_active_tab_text,
     open_url,
     show_notification,
     read_clipboard,
@@ -55,6 +56,7 @@ AVAILABLE_TOOLS = [
 # it also bypasses the approval gate.
 READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset({
     "read_active_tab",
+    "read_active_tab_text",
     "read_clipboard",
     "summarize_file",
     "remember_preference",

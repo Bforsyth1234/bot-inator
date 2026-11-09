@@ -24,6 +24,9 @@ ALLOWED_KEYS = frozenset({
     "GROQ_MAIN_MODEL",
     "GROQ_ANALYSIS_MODEL",
     "GROQ_DRAFTING_MODEL",
+    # "1"/"0": let cloud engines see email and message text (#52). Read
+    # live by ai.privacy.personal_text_allowed, so it needs no restart.
+    "AGENT_CLOUD_PERSONAL_TEXT",
 })
 PROVIDERS = ("local", "groq")
 

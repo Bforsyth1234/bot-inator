@@ -933,3 +933,14 @@ someone", a reworded Chrome↔Claude switcher → declined; "read my
 iMessages", "send an email", "add a calendar event", "file invoices" →
 allowed. Removing denials is #56.
 Deviations: none.
+
+## Wave 8 — closed 2026-11-09
+
+Wave-close run: full suite 661 passed (3 runs at 659 before the wiring
+test); Swift type-check clean. #52, #53, #56, #58, #59, #61 built and wait in
+todo.md as `[~] live`. Runner wiring: `read_active_tab_text` registered
+read-only; `routes/ideas.py`, `routes/permissions.py`, `routes/tool_detail.py`
+included in `main.py` (FastAPI 0.162 keeps them as one `_IncludedRouter`
+entry each, so `tests/test_wave8_wiring.py` calls them through the app);
+`app.state.idea_feedback`; `set_current_idea` in the pattern turn;
+`PermissionsView` in Settings, `DeclinedIdeasView` in Tool Manager.

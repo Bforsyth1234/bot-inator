@@ -20,6 +20,9 @@ struct DaemonSettings: Codable, Equatable {
     var restartRequired: Bool
     var canRestart: Bool
     var lockedFields: [String]
+    // Let cloud engines see email and message text (#52). Applies live.
+    // Optional so an older daemon without it still decodes.
+    var cloudPersonalText: Bool?
 
     enum CodingKeys: String, CodingKey {
         case provider
@@ -37,6 +40,7 @@ struct DaemonSettings: Codable, Equatable {
         case restartRequired = "restart_required"
         case canRestart = "can_restart"
         case lockedFields = "locked_fields"
+        case cloudPersonalText = "cloud_personal_text"
     }
 }
 
@@ -56,6 +60,7 @@ final class SettingsViewModel: ObservableObject {
     @Published var mainModel = ""
     @Published var analysisModel = ""
     @Published var draftingModel = ""
+    @Published private(set) var cloudPersonalText = false
 
     private let baseURL: URL
     private let session: URLSession
@@ -75,6 +80,41 @@ final class SettingsViewModel: ObservableObject {
         [providerMain, providerAnalysis, providerDrafting]
             .map { $0.isEmpty ? provider : $0 }
             .contains("groq")
+    }
+
+    /// True when the personal-text toggle matters: an engine uses Groq in
+    /// the form as edited, or in the running daemon (#52).
+    var showsPersonalTextToggle: Bool {
+        usesGroq || (saved?.runningEngineProviders?.values.contains("groq") ?? false)
+            || saved?.runningProvider == "groq"
+    }
+
+    /// Save the personal-text toggle at once: the daemon reads it on every
+    /// prompt, so it needs neither Save nor a restart (#52).
+    func setCloudPersonalText(_ value: Bool) async {
+        cloudPersonalText = value
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            var request = try DaemonAuth.request(
+                baseURL.appendingPathComponent("api/settings"), method: "PUT"
+            )
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(["cloud_personal_text": value])
+            let (data, response) = try await session.data(for: request)
+            try DaemonAuth.checkAuth(response)
+            try Self.checkStatus(response, data)
+            let s = try JSONDecoder().decode(DaemonSettings.self, from: data)
+            saved = s
+            cloudPersonalText = s.cloudPersonalText ?? false
+            errorMessage = nil
+            statusMessage = cloudPersonalText
+                ? "Cloud models now see email and message text."
+                : "Email and message text now stays on this Mac."
+        } catch {
+            cloudPersonalText = saved?.cloudPersonalText ?? false
+            errorMessage = "Save failed: \(error.localizedDescription)"
+        }
     }
 
     /// "Running now" line, per engine when they differ.
@@ -184,6 +224,7 @@ final class SettingsViewModel: ObservableObject {
         mainModel = s.groqMainModel
         analysisModel = s.groqAnalysisModel
         draftingModel = s.groqDraftingModel
+        cloudPersonalText = s.cloudPersonalText ?? false
     }
 
     private static func checkStatus(_ response: URLResponse, _ data: Data) throws {
@@ -227,6 +268,9 @@ struct SettingsView: View {
                                  env: "AGENT_PROVIDER_DRAFTING",
                                  selection: $viewModel.providerDrafting)
                 }
+                if viewModel.showsPersonalTextToggle {
+                    personalTextToggle
+                }
             }
 
             if viewModel.usesGroq {
@@ -247,6 +291,8 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            PermissionsView()
 
             Section {
                 if let error = viewModel.errorMessage {
@@ -275,6 +321,22 @@ struct SettingsView: View {
         .disabled(viewModel.isBusy)
         .frame(minWidth: 440, minHeight: 360)
         .task { await viewModel.refresh() }
+    }
+
+    /// Off by default (invariant 7c). Saved as soon as it is flipped.
+    @ViewBuilder
+    private var personalTextToggle: some View {
+        Toggle("Let cloud models see email and message text", isOn: Binding(
+            get: { viewModel.cloudPersonalText },
+            set: { value in Task { await viewModel.setCloudPersonalText(value) } }
+        ))
+        .disabled(viewModel.isLocked("cloud_personal_text"))
+        Text(viewModel.cloudPersonalText
+             ? "Groq receives iMessage text and email subjects and bodies. Applies to the next prompt."
+             : "iMessage text and email subjects and bodies are replaced by a placeholder before a prompt goes to Groq.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        lockedNote("cloud_personal_text", env: "AGENT_CLOUD_PERSONAL_TEXT")
     }
 
     private var apiKeyPlaceholder: String {

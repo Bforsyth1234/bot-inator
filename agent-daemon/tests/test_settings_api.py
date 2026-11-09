@@ -188,3 +188,71 @@ def test_shell_export_locks_override(client, monkeypatch):
     # Saving needs a key, because the exported override is Groq.
     resp = client.put("/api/settings", json={"provider_main": "local"})
     assert resp.status_code == 400
+
+
+# ---- cloud_personal_text toggle (#52) ---------------------------------------
+
+
+@pytest.fixture
+def cloud_main(client, monkeypatch):
+    """A running cloud main engine with no env opt-in."""
+    from config import settings
+    monkeypatch.setattr(settings, "provider_main", "groq")
+    monkeypatch.setattr(settings, "groq_api_key", "gsk_test_1234abcd")
+    monkeypatch.delenv("AGENT_CLOUD_PERSONAL_TEXT", raising=False)
+    return client
+
+
+def test_cloud_personal_text_defaults_off(cloud_main):
+    from ai import privacy
+    body = cloud_main.get("/api/settings").json()
+    assert body["cloud_personal_text"] is False
+    assert "cloud_personal_text" not in body["locked_fields"]
+    assert privacy.should_redact("main") is True
+
+
+def test_put_cloud_personal_text_flips_redaction_live(cloud_main):
+    from ai import privacy
+    resp = cloud_main.put("/api/settings", json={"cloud_personal_text": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cloud_personal_text"] is True
+    # Applies without a restart, so it must not ask for one.
+    assert body["restart_required"] is False
+    saved = json.loads(cloud_main.settings_path.read_text())
+    assert saved["AGENT_CLOUD_PERSONAL_TEXT"] == "1"
+    assert privacy.should_redact("main") is False
+    assert privacy.redact_text("hi there", "main") == "hi there"
+
+    resp = cloud_main.put("/api/settings", json={"cloud_personal_text": False})
+    assert resp.json()["cloud_personal_text"] is False
+    assert privacy.should_redact("main") is True
+    assert privacy.redact_text("hi there", "main") == privacy.PLACEHOLDER
+
+
+def test_saved_off_beats_dotenv_opt_in(cloud_main, monkeypatch):
+    """A ``=1`` from .env (not a shell export) is overridden by the toggle."""
+    from ai import privacy
+    monkeypatch.setenv("AGENT_CLOUD_PERSONAL_TEXT", "1")
+    assert privacy.personal_text_allowed() is True
+    cloud_main.put("/api/settings", json={"cloud_personal_text": False})
+    assert privacy.should_redact("main") is True
+
+
+def test_shell_export_locks_cloud_personal_text(cloud_main, monkeypatch):
+    from ai import privacy
+    monkeypatch.setenv("AGENT_CLOUD_PERSONAL_TEXT", "0")
+    monkeypatch.setattr(user_settings, "shell_exported",
+                        frozenset({"AGENT_CLOUD_PERSONAL_TEXT"}))
+    cloud_main.put("/api/settings", json={"cloud_personal_text": True})
+    body = cloud_main.get("/api/settings").json()
+    assert "cloud_personal_text" in body["locked_fields"]
+    assert body["cloud_personal_text"] is False
+    assert privacy.should_redact("main") is True
+
+
+def test_status_frame_reflects_cloud_personal_text(cloud_main):
+    import main
+    assert main._status_frame().payload.cloud_personal_text is False
+    cloud_main.put("/api/settings", json={"cloud_personal_text": True})
+    assert main._status_frame().payload.cloud_personal_text is True

@@ -2,7 +2,8 @@
 
 When the engine that will read a prompt runs on a cloud provider (Groq),
 personal text is replaced by :data:`PLACEHOLDER` unless the user opted in
-with ``AGENT_CLOUD_PERSONAL_TEXT=1`` (invariant 7c).
+with the Settings toggle or ``AGENT_CLOUD_PERSONAL_TEXT=1`` (invariant 7c,
+#52; see :func:`personal_text_allowed`).
 
 "Personal text" here means words written by or to someone else that the
 user never typed to the assistant:
@@ -47,6 +48,19 @@ PERSONAL_EMAIL_FIELDS: tuple[str, ...] = ("subject", "body")
 
 
 def personal_text_allowed() -> bool:
+    """True when the user opted in to cloud engines seeing personal text.
+
+    Read on every call, so a Settings change applies without a restart
+    (#52). Precedence, highest first: a shell export of ``OPT_IN_ENV``
+    (the Settings toggle is then locked), the ``cloud_personal_text``
+    toggle saved in the settings file, the value from ``.env``, off.
+    """
+    import user_settings
+
+    if OPT_IN_ENV not in user_settings.shell_exported:
+        saved = user_settings.read().get(OPT_IN_ENV)
+        if saved in ("0", "1"):
+            return saved == "1"
     return os.environ.get(OPT_IN_ENV, "") == "1"
 
 
@@ -100,7 +114,8 @@ def redact_email_result(result: Any, role: Optional[str]) -> Any:
     if any(k in result for k in PERSONAL_EMAIL_FIELDS):
         out["note"] = (
             "Subject and body were kept on this Mac because this engine "
-            f"runs in the cloud ({OPT_IN_ENV}=1 allows sending them)."
+            "runs in the cloud (the user can allow sending them in "
+            f"Settings, or with {OPT_IN_ENV}=1)."
         )
     return out
 

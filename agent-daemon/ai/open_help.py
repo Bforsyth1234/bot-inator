@@ -177,6 +177,52 @@ class IdeaFeedback:
                 return True
         return False
 
+    # ---- review / un-decline (#56) -------------------------------------
+
+    def declined_groups(self) -> list[dict[str, Any]]:
+        """Declined ideas grouped by name, most recently declined first.
+
+        Each row: ``name``, ``description`` (of the latest decline),
+        ``last_declined_at`` (epoch seconds) and ``count``.
+        """
+        groups: dict[str, dict[str, Any]] = {}
+        for entry in self.entries:
+            if entry.get("approved"):
+                continue
+            name = str(entry.get("tool_name") or "")
+            at = float(entry.get("at") or 0.0)
+            row = groups.get(name)
+            if row is None:
+                groups[name] = {"name": name, "description": entry.get("description", ""),
+                                "last_declined_at": at, "count": 1}
+                continue
+            row["count"] += 1
+            if at >= row["last_declined_at"]:
+                row["last_declined_at"] = at
+                row["description"] = entry.get("description", "")
+        return sorted(groups.values(), key=lambda r: r["last_declined_at"], reverse=True)
+
+    def remove_declined(self, tool_name: str) -> list[dict[str, Any]]:
+        """Drop every declined entry named ``tool_name``; returns them.
+
+        Approved entries with that name stay. Saved atomically.
+        """
+        removed = [e for e in self.entries
+                   if not e.get("approved") and e.get("tool_name") == tool_name]
+        if removed:
+            self.entries = [e for e in self.entries
+                            if e.get("approved") or e.get("tool_name") != tool_name]
+            self._save()
+        return removed
+
+    def clear_declined(self) -> list[dict[str, Any]]:
+        """Drop every declined entry (approved ones stay); returns them."""
+        removed = [e for e in self.entries if not e.get("approved")]
+        if removed:
+            self.entries = [e for e in self.entries if e.get("approved")]
+            self._save()
+        return removed
+
     def summary(self, limit: int = 8) -> str:
         """Recent verdicts as judge-prompt lines (newest last)."""
         lines = []

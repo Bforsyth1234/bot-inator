@@ -45,6 +45,11 @@ Deviations, and the runner writes them into the item.
 permission, an approval click, a real model run) goes to the Live
 checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
+	12.	NEW HTTP ROUTES IN WAVE 8+ GO IN THEIR OWN MODULE (`agent-daemon/routes/
+<name>.py`, a FastAPI `APIRouter`); NEW SWIFT SCREENS GO IN THEIR OWN FILE.
+The runner adds `app.include_router(...)` in `main.py` and embeds new
+views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
+close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
 Next ID: #62
@@ -52,7 +57,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live
 
 ## Wave plan
 
-**Goal:** close every open item (#14–#47). Decided 2026-11-09 by the user:
+**Goal:** close every open item (#14–#47; waves 8–9 add #52, #53, #56, #58–#61, decided 2026-11-09). Decided 2026-11-09 by the user:
 the runner settles open design questions and records the choice in the
 item; live checks are batched at the end; one branch + PR to main per
 wave (`wave-N`, each branched from the previous wave); one subagent per
@@ -73,6 +78,8 @@ API auth → sandbox for installed tools → live checks.
 | 5 | A: #19 #29 #31 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `DebugView.swift`, `ToolManagerView.swift`, `ai/orchestrator.py`, `events/imessage_watcher.py` | [x] closed 2026-11-09 (all `[~] live`) |
 | 6 | A: #27 (alone) | `main.py` (all routes + WS), every Swift HTTP/WS client | [x] closed 2026-11-09 (`[~] live`) |
 | 7 | A: #22 #51 (alone) | `ai/orchestrator.py` tool execution, new `tools/tool_sandbox.py` | [x] closed 2026-11-09 (`[~] live`) |
+| 8 | A: #52 · B: #53 · C: #56 · D: #58 · E: #59 · F: #61 | A `ai/privacy.py`, `user_settings.py`, settings routes in `main.py`, `SettingsView.swift` · B `tools/tool_sandbox.py` · C new `routes/ideas.py`, `IdeaFeedback` in `ai/open_help.py`, `ai/idea_match.py`, new `DeclinedIdeasView.swift` · D `tools/read_active_tab.py` · E new `ai/permissions.py`, new `routes/permissions.py`, new `PermissionsView.swift` · F `ToolManagerView.swift`, new `ToolDetailView.swift`, new `routes/tool_detail.py`, provenance in `tools/meta_tool_generator.py` (+ each slot's new test file) | [x] closed 2026-11-09 (all `[~] live`) |
+| 9 | A: #60 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, new `CalendarBridge.swift`, `Info.plist`, `tools/calendar_access.py`, WS routing in `main.py` | [ ] |
 | — | #37 + every `[~] live` item | Live checks list (below) — needs the user at the Mac | [ ] |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -137,6 +144,12 @@ to see.
 - #29 tools_changed: with Manage Tools open, `curl -X POST http://127.0.0.1:8000/api/tools/<t>/disable` → the row updates without refresh (after #27, add the token header).
 - #31 Privacy: `AGENT_PROVIDER_MAIN=groq` → Debug shows "main: groq (cloud)" and "Personal text to cloud: kept on this Mac"; an inbound iMessage's reasoning prompt shows `[personal text kept on this Mac]`.
 - #27 Auth: build and launch the app → it connects, approves, lists tools, saves settings; `ls -l ~/.bot-inator/token` → `-rw-------`. Move the token away + restart the app → Offline with the hint; put it back → reconnects. Settings → Restart Daemon → comes back and reconnects. From a browser devtools console, `new WebSocket("ws://127.0.0.1:8000/ws/stream")` → refused; log "Refused websocket /ws/stream: Origin not allowed". Every curl in these checks now needs `-H "Authorization: Bearer $(cat ~/.bot-inator/token)"`.
+- #52 Toggle: Settings (an engine on Groq) → flip "Let cloud models see email and message text" off → the next iMessage/email prompt in the daemon log shows `[personal text kept on this Mac]`; on → real text. Reconnect → Debug matches.
+- #53 Sandbox: a generated tool that calls show_notification still notifies; one that creates a Notes note still works. Dismiss/deny any stray Finder or Terminal Automation prompts left from the agent's tests.
+- #56 Declined ideas: Tool Manager → Declined ideas lists `send_imessage` with its count → Remove → the next iMessage brings one build card back. Clear all → confirm → approved ideas stay.
+- #58 Page text: turn on Chrome → View → Developer → Allow JavaScript from Apple Events (Safari → Develop → Allow JavaScript from Apple Events). Open an article → "summarize the page I'm on" → summary, no card. Setting off → the agent names the menu item. Bank page → sensitive-site error.
+- #59 Permissions: Settings → Permissions lists 11 rows; "Request" on Automation → Calendar shows the macOS prompt; "Open Settings" on FDA opens it; refresh after granting turns the row green.
+- #61 Tool detail: Tool Manager → click find_files → "Runs without asking"; open_url → "Needs your approval"; "Open in editor" opens the file as text; a newly generated tool shows its idea and trigger.
 - #22 Sandbox: re-enable csv_diff in Manage Tools, run it from chat → one approval → correct result. A generated tool that calls show_notification still shows the notification. Check the daemon log has no "refusing to load generated tools (no sandbox)".
 - #51 Idea scrub: with Groq main and local detection (and `AGENT_CLOUD_PERSONAL_TEXT` not set to 1), an iMessage-derived idea's prompt shows `[personal text kept on this Mac]` instead of the message words.
 
@@ -506,8 +519,8 @@ Deviations: DELETE also notifies (deleting a disabled/quarantined copy sent noth
 
 ---
 
-#61 — Tool detail view: summary, run conditions, and source for every tool [ ]
-Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
+#61 — Tool detail view: summary, run conditions, and source for every tool [~] live
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: The app should show detailed data on every tool it has, both the
 built-ins it shipped with and the ones it generated. For each tool:
 1. A plain-language SUMMARY of what it does.
@@ -537,7 +550,16 @@ returning summary, conditions, gate, source path, error text),
 (`ToolManagerView.swift`) and wave 6 (`main.py` routes, auth): schedule
 after wave 6 so the new route gets the auth token.
 Verify:
-Deviations:
+Results (wave 8, 2026-11-09):
+⚬ `routes/tool_detail.py` `GET /api/tools/{name}`: kind, state
+  (loaded/disabled/quarantined/not_loaded), summary, when_it_runs
+  (schema + docstring for built-ins; saved provenance or "unknown" for
+  generated), gate, inputs, sandbox info, source_path, error_text.
+  `meta_tool_generator` writes `generated/.provenance/<name>.json` at
+  install (not git-committed); the runner calls `set_current_idea` in the
+  pattern turn. `ToolDetailView.swift` sheet from Tool Manager; "Open in
+  editor" = `open -t`. 13 tests; non-vacuity 3 / 1 / 1.
+Deviations: added state `not_loaded`.
 
 ---
 
@@ -752,8 +774,8 @@ Live (2026-11-09): "what windows do I have open?" → windows with titles
 
 ---
 
-#58 — Read the active browser tab's page text [ ]
-Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
+#58 — Read the active browser tab's page text [~] live
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "does the app see whats in the browser?" Today `read_active_tab`
 returns only the URL and title. The user wants the agent to read what is
 on the page (option 1 of three offered: page text via AppleScript, not a
@@ -812,7 +834,16 @@ Verify:
   setting off → the agent says which menu item to turn on. Safari in
   front with Chrome also open → Safari's page.
 Time: about 1 hour.
-Deviations:
+Results (wave 8, 2026-11-09):
+⚬ `read_active_tab_text(max_chars=8000)` → {url, title, browser, text,
+  truncated}; http/https only; sensitive-site lists checked before any JS;
+  fixed `on run argv` script, JS as argv, runs only if the tab still shows
+  the checked URL; whitespace collapsed; cap 20,000; cloud placeholder.
+  Both tab tools ask the frontmost browser first (`lsappinfo
+  visibleProcessList`), then Chrome, Safari. Setting-off errors name the
+  menu path. 47 tests; non-vacuity 5 / 16 / 3. Registered read-only by the
+  runner.
+Deviations: `file://` blocked with all non-web schemes; URL re-check between steps.
 
 ---
 
@@ -839,8 +870,8 @@ Results (wave 7, 2026-11-09):
   non-vacuity: no scrub → fails.
 Deviations: none.
 
-#52 — Settings toggle for sending personal text to cloud engines [ ]
-Wave: _ (after wave 6) · Agent: _ · Added: 2026-11-09 · Source: user
+#52 — Settings toggle for sending personal text to cloud engines [~] live
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "Is that a setting we should have in the app?" Today the only way to
 let Groq see email and iMessage text is `AGENT_CLOUD_PERSONAL_TEXT=1` in
 `agent-daemon/.env` (#31). The Debug tab shows it read-only
@@ -865,12 +896,20 @@ Verify:
 ⚬ New test in `tests/test_settings_api.py`: PUT `cloud_personal_text`
   flips `should_redact("main")` for a cloud main engine; non-vacuity:
   ignore the setting in `personal_text_allowed()` → test fails.
-Deviations:
+Results (wave 8, 2026-11-09):
+⚬ `ai/privacy.py` `personal_text_allowed()` per call: shell export >
+  saved setting > `.env` > off. `user_settings.py` allows
+  `AGENT_CLOUD_PERSONAL_TEXT`; `PUT /api/settings` takes `cloud_personal_text`
+  (saved "1"/"0", locked when shell-exported, no restart). Settings toggle
+  "Let cloud models see email and message text" (only when an engine uses
+  Groq, off by default). 5 tests; non-vacuity 3 + 1.
+Deviations: `.env` ranks below the saved toggle (otherwise the toggle could never turn
+the user's `.env` opt-in off). The Debug tab updates on next connect.
 
 ---
 
-#53 — Sandboxed tools can still reach outside via `open` / `osascript` [ ]
-Wave: — (after live checks) · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 7 report)
+#53 — Sandboxed tools can still reach outside via `open` / `osascript` [~] live
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 7 report)
 Ask: #22 allows `/usr/bin/osascript` and `/usr/bin/open` in the sandbox so
 generated tools can notify and open things. Both can ask another app (e.g.
 Terminal, via Apple Events) to run code outside the sandbox.
@@ -879,12 +918,28 @@ Editor in the profile; route osascript/open through a daemon-side allow-list
 of verbs (notify, open URL/file); or accept it as covered by human review of
 the source (rule 7b). Decide with the user.
 Verify: a generated tool that tries `osascript -e 'tell application "Terminal" to do script "touch ~/x"'` is blocked (or the decision to accept is recorded).
-Deviations:
+Results (wave 8, 2026-11-09):
+⚬ `tools/tool_sandbox.py`: profile denies `appleevent-send` to Terminal,
+  iTerm, Script Editor, System Events and Finder (verified on macOS 26.6.2:
+  -600, no prompt), and `(deny lsopen)`. `/usr/bin/open` is off the exec
+  allow-list; the tool's `open` asks the daemon over a short-lived unix
+  socket, which refuses shell apps as -a/-b, apps in writable folders,
+  script/app/bundle/executable files, files whose default app is refused,
+  `ssh:`/`x-man-page:` URLs, `--args`. An `osascript` stand-in asks the
+  daemon to launch allowed apps a script `tell`s. Notifications, URL/file
+  opens, Notes/Reminders/Calendar still work. 9 tests; non-vacuity for the
+  Terminal deny, lsopen and the open check.
+⚬ Residual: `/usr/bin/shortcuts` (a user Shortcut could run a shell script);
+  a short check-then-open window; network-enabled tools can reach unix
+  sockets. Human review of the source stays the gate for these.
+Deviations: Finder Apple Events also denied (Finder open of a `.command` runs it in
+Terminal); `~/Applications` apps can't be opened with -a. The user's
+generated `recent_apps_list` (System Events) now fails, as chosen.
 
 ---
 
-#56 — Review and remove remembered denials [ ]
-Wave: — · Agent: _ · Added: 2026-11-09 · Source: user
+#56 — Review and remove remembered denials [~] live
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "I need a way to remove the denials too." Declined tool ideas are now
 remembered and block reworded repeats (`ai/idea_match.py`, the shared
 `IdeaFeedback` in `~/.bot-inator/idea_feedback.json`). The user needs to see
@@ -903,7 +958,15 @@ Verify:
 ⚬ pytest: list/remove/clear routes (401 without token), matcher no longer
   matches after removal; non-vacuity: skip the cache clear → test fails.
 ⚬ swiftc typecheck.
-Deviations:
+Results (wave 8, 2026-11-09):
+⚬ `IdeaFeedback.declined_groups/remove_declined/clear_declined`,
+  `DeclinedIdeaMatcher.forget/clear_cache`; `routes/ideas.py`: GET
+  `/api/ideas/declined`, DELETE `/declined/{name}` (404 if none), POST
+  `/declined/clear` (approvals kept). `DeclinedIdeasView.swift` (Remove,
+  Clear all with confirm), embedded in Tool Manager by the runner. 9 tests;
+  non-vacuity 2 + 2.
+Deviations: removing from IdeaFeedback already stops matching (match() re-reads
+entries); the cache clear just drops vectors for removed ideas.
 
 ---
 
@@ -913,7 +976,7 @@ Deviations:
 ### Events and listeners
 
 #60 — Calendar through EventKit in the menu bar app [ ]
-Wave: — (not scheduled) · Agent: _ · Added: 2026-11-09 · Source: user (live check of #42)
+Wave: 9 · Agent: _ · Added: 2026-11-09 · Source: user (live check of #42)
 Ask: Calendar doesn't work from the daemon. Live check (2026-11-09):
 EventKit is silently denied to the daemon's Python (no prompt, status stays
 `not_determined`; a bare interpreter has no Info.plist usage string), and
@@ -1264,8 +1327,8 @@ Deviations: edited outside the slot list: `main.py` DELETE route (`tools_changed
 
 ---
 
-#59 — Permissions checklist: check and request every macOS permission [ ]
-Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
+#59 — Permissions checklist: check and request every macOS permission [~] live
+Wave: 8 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "i need a list of check / request all the permissions needed." One
 place that shows every permission the app uses, whether each is granted,
 and a button to request or open the right Settings pane. Today only Full
@@ -1318,7 +1381,17 @@ Verify:
   on Full Disk Access opens that pane; after granting, the row turns
   green without a restart.
 Time: about 3 hours (the Automation check is the fiddly part).
-Deviations:
+Results (wave 8, 2026-11-09):
+⚬ `ai/permissions.py`: 11 rows (FDA, Screen Recording, Calendars via the
+  app (#60 hook), Automation → Reminders/Calendar/Notes/Chrome/Safari/System
+  Events, browser JS settings), `check_all()` never prompts
+  (AEDeterminePermissionToAutomateTarget via ctypes with ask=false), and
+  `process_info()` names the responsible process TCC charges. Routes in
+  `routes/permissions.py`; `PermissionsView.swift` embedded in Settings by
+  the runner. 35 tests; non-vacuity 6 / 3 / 3. Shell dry run: FDA, Screen
+  Recording, Reminders, Notes, Chrome, Safari granted; Calendar not asked.
+Deviations: Automation → Messages left out (send_imessage not registered); Reminders
+checked as Automation (AppleScript backend).
 
 ### Approvals and UI
 
