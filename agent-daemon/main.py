@@ -42,10 +42,23 @@ from ai.open_help import (
 # boots cleanly when ``settings.provider == "local"`` and the optional
 # Groq dependency tree is missing.
 from config import GROQ_DEFAULT_MODELS, settings
+from ai.friction import (
+    FRICTION_JUDGE_SYSTEM_PROMPT,
+    FRICTION_SYSTEM_PROMPT,
+    FrictionDetector,
+)
+from ai.setup_scan import (
+    SETUP_JUDGE_SYSTEM_PROMPT,
+    SETUP_SCAN_SYSTEM_PROMPT,
+    SetupScanner,
+)
+from events.calendar_watcher import CalendarWatcher
+from events.clipboard_watcher import ClipboardWatcher
 from events.event_bus import ContextEvent, EventBus
 from events.file_watcher import FileWatcher
 from events.imessage_watcher import IMessageWatcher
 from events.mac_listeners import MacAppListener
+from events.mail_watcher import MailWatcher
 from schemas.ws_messages import (
     ApprovalResponse,
     CodeApprovalResponse,
@@ -209,6 +222,18 @@ async def lifespan(app: FastAPI):
             listener_names.append("imessage_watcher")
         except Exception:
             logger.exception("Failed to start IMessageWatcher")
+        for name, factory in (
+            ("mail_watcher", MailWatcher),
+            ("calendar_watcher", CalendarWatcher),
+            ("clipboard_watcher", ClipboardWatcher),
+        ):
+            try:
+                listener = factory(bus)
+                listener.start()
+                listeners.append(listener)
+                listener_names.append(name)
+            except Exception:
+                logger.exception("Failed to start %s", name)
 
     detection_engine = _select_detection_engine(
         settings.pattern_detection_engine,
@@ -232,6 +257,11 @@ async def lifespan(app: FastAPI):
             ),
         ),
     ]
+    # One feedback store for every judged source: two IdeaFeedback
+    # instances on the same file would overwrite each other's verdicts.
+    # Exactly one source records verdicts (the orchestrator calls every
+    # source's record_feedback).
+    idea_feedback = IdeaFeedback(settings.idea_feedback_path)
     if settings.open_help_enabled:
         idea_sources.append(OpenHelpSuggester(
             event_bus=bus,
@@ -242,10 +272,22 @@ async def lifespan(app: FastAPI):
                 detection_engine, max_tokens=120,
                 system_prompt=IDEA_JUDGE_SYSTEM_PROMPT,
             ),
-            feedback=IdeaFeedback(settings.idea_feedback_path),
+            feedback=idea_feedback,
             interval_seconds=settings.open_help_interval_seconds,
             min_score=settings.open_help_min_score,
         ))
+    idea_sources.append(FrictionDetector(
+        event_bus=bus,
+        evaluate=make_detection_evaluator(
+            detection_engine, system_prompt=FRICTION_SYSTEM_PROMPT,
+        ),
+        judge=make_detection_evaluator(
+            detection_engine, max_tokens=120,
+            system_prompt=FRICTION_JUDGE_SYSTEM_PROMPT,
+        ),
+        feedback=idea_feedback,
+        records_feedback=not settings.open_help_enabled,
+    ))
     orchestrator = Orchestrator(
         engine=engine,
         event_bus=bus,
@@ -268,6 +310,23 @@ async def lifespan(app: FastAPI):
         logger.exception("load_dynamic_tools at startup failed")
     await orchestrator.start()
 
+    setup_scanner: Optional[SetupScanner] = None
+    if _listeners_enabled() and os.environ.get("AGENT_SETUP_SCAN", "1") != "0":
+        setup_scanner = SetupScanner(
+            event_bus=bus,
+            cloud=settings.provider != "local",
+            feedback=idea_feedback,
+            evaluate=make_detection_evaluator(
+                detection_engine, system_prompt=SETUP_SCAN_SYSTEM_PROMPT,
+            ),
+            judge=make_detection_evaluator(
+                detection_engine, max_tokens=120,
+                system_prompt=SETUP_JUDGE_SYSTEM_PROMPT,
+            ),
+            calendar_reader=_calendar_reader_if_granted,
+        )
+        setup_scanner.start()
+
     app.state.event_bus = bus
     app.state.engine = engine
     app.state.analysis_engine = analysis_engine
@@ -281,6 +340,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if setup_scanner is not None:
+            try:
+                await setup_scanner.stop()
+            except Exception:
+                logger.exception("Error stopping setup scanner")
         await orchestrator.stop()
         for listener in listeners:
             try:
@@ -308,6 +372,26 @@ app = FastAPI(title="agent-daemon", version="0.1.0", lifespan=lifespan)
 def _next_seq() -> int:
     app.state.seq += 1
     return app.state.seq
+
+
+async def _calendar_reader_if_granted() -> list[Any]:
+    """Last 28 days of events for the setup scan, only if Calendar access
+    was already granted: the scan must never cause a permission prompt."""
+    from datetime import datetime, timedelta
+
+    from tools import calendar_access
+
+    try:
+        backend = calendar_access.get_backend()
+        if not backend.ready():
+            return []
+        now = datetime.now()
+        return await asyncio.to_thread(
+            calendar_access.list, now - timedelta(days=28), now,
+        )
+    except Exception:
+        logger.exception("setup scan calendar read failed")
+        return []
 
 
 @app.get("/health")
@@ -383,7 +467,35 @@ async def list_tools() -> list[dict[str, Any]]:
                 "description": _description_from_source(path),
                 "is_generated": True,
             })
+        # Disabled (#23) and quarantined (#28) tools live in subdirectories
+        # the loader skips. A name already listed above wins.
+        for sub, flag in (("disabled", "disabled"), ("quarantine", "quarantined")):
+            subdir = generated_dir / sub
+            if not subdir.is_dir():
+                continue
+            for path in sorted(subdir.glob("*.py")):
+                name = path.stem
+                if name.startswith(".") or name in seen:
+                    continue
+                seen.add(name)
+                row: dict[str, Any] = {
+                    "name": name,
+                    "description": _description_from_source(path),
+                    "is_generated": True,
+                    flag: True,
+                }
+                if flag == "quarantined":
+                    row["error"] = _first_error_line(subdir / f"{name}.error.txt")
+                rows.append(row)
     return rows
+
+
+def _first_error_line(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    return lines[0][:240] if lines else ""
 
 
 @app.get("/api/chats")
@@ -544,36 +656,138 @@ async def restart_daemon() -> dict[str, str]:
     return {"status": "restarting"}
 
 
-@app.delete("/api/tools/{tool_name}")
-async def delete_tool(tool_name: str) -> dict[str, Any]:
-    """Uninstall an agent-authored tool. Refuses to touch built-ins."""
+def _checked_generated_name(tool_name: str, verb: str) -> None:
+    """400 on a non-identifier or a built-in name (DELETE / disable / enable)."""
     if not _IDENTIFIER_RE.match(tool_name):
         raise HTTPException(status_code=400, detail="invalid tool name")
     orchestrator: Orchestrator = app.state.orchestrator
     if tool_name in orchestrator._builtin_tool_names:
         raise HTTPException(
-            status_code=400, detail="cannot delete a built-in tool"
+            status_code=400, detail=f"cannot {verb} a built-in tool"
         )
+
+
+def _commit_tool_paths(generated_dir: Path, rel_paths: list[str], message: str) -> None:
+    """Best-effort nested-repo commit of each path (a move is two paths)."""
+    try:
+        from tools.meta_tool_generator import _git_commit  # noqa: WPS433
+        for rel in rel_paths:
+            ok, summary = _git_commit(generated_dir, rel, message)
+            if not ok:
+                logger.info("git commit of %s skipped: %s", rel, summary)
+    except Exception:
+        logger.exception("git commit of %s failed", rel_paths)
+
+
+@app.delete("/api/tools/{tool_name}")
+async def delete_tool(tool_name: str) -> dict[str, Any]:
+    """Uninstall an agent-authored tool. Refuses to touch built-ins.
+
+    Also removes a disabled (``disabled/``) or quarantined
+    (``quarantine/`` plus its ``.error.txt``) copy.
+    """
+    _checked_generated_name(tool_name, "delete")
+    orchestrator: Orchestrator = app.state.orchestrator
     generated_dir = settings.generated_tools_dir
-    path = generated_dir / f"{tool_name}.py"
-    if not path.exists():
+    rel_paths = [
+        f"{tool_name}.py",
+        f"disabled/{tool_name}.py",
+        f"quarantine/{tool_name}.py",
+    ]
+    present = [rel for rel in rel_paths if (generated_dir / rel).exists()]
+    if not present:
         raise HTTPException(status_code=404, detail="tool not found")
     unloaded = orchestrator.unload_dynamic_tool(tool_name)
     try:
-        path.unlink()
+        for rel in present:
+            (generated_dir / rel).unlink()
+        (generated_dir / "quarantine" / f"{tool_name}.error.txt").unlink(
+            missing_ok=True
+        )
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    # Best-effort nested-repo commit of the removal.
-    try:
-        from tools.meta_tool_generator import _git_commit  # noqa: WPS433
-        _git_commit(
-            generated_dir,
-            f"{tool_name}.py",
-            f"Removed generated tool: {tool_name}",
-        )
-    except Exception:
-        logger.exception("git commit of removal failed")
+    _commit_tool_paths(
+        generated_dir, present, f"Removed generated tool: {tool_name}"
+    )
     return {"status": "ok", "tool_name": tool_name, "unloaded": unloaded}
+
+
+@app.post("/api/tools/{tool_name}/disable")
+async def disable_tool(tool_name: str) -> dict[str, Any]:
+    """Suspend a generated tool: move it to ``disabled/`` and unload it (#23)."""
+    _checked_generated_name(tool_name, "disable")
+    orchestrator: Orchestrator = app.state.orchestrator
+    generated_dir = settings.generated_tools_dir
+    src = generated_dir / f"{tool_name}.py"
+    dest = generated_dir / "disabled" / f"{tool_name}.py"
+    if not src.exists():
+        if dest.exists():
+            return {"status": "ok", "tool_name": tool_name, "unloaded": False}
+        raise HTTPException(status_code=404, detail="tool not found")
+    if dest.exists():
+        raise HTTPException(
+            status_code=409, detail="a disabled copy already exists"
+        )
+    unloaded = orchestrator.unload_dynamic_tool(tool_name)
+    try:
+        dest.parent.mkdir(exist_ok=True)
+        os.replace(src, dest)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    _commit_tool_paths(
+        generated_dir,
+        [f"disabled/{tool_name}.py", f"{tool_name}.py"],
+        f"Disabled generated tool: {tool_name}",
+    )
+    return {"status": "ok", "tool_name": tool_name, "unloaded": unloaded}
+
+
+@app.post("/api/tools/{tool_name}/enable")
+async def enable_tool(tool_name: str) -> dict[str, Any]:
+    """Move a disabled (or quarantined) tool back and load it (#23).
+
+    If it fails to load again the loader re-quarantines it; the response
+    then has ``status: "quarantined"`` and the error's first line.
+    """
+    _checked_generated_name(tool_name, "enable")
+    orchestrator: Orchestrator = app.state.orchestrator
+    generated_dir = settings.generated_tools_dir
+    dest = generated_dir / f"{tool_name}.py"
+    sources = [
+        generated_dir / "disabled" / f"{tool_name}.py",
+        generated_dir / "quarantine" / f"{tool_name}.py",
+    ]
+    src = next((p for p in sources if p.exists()), None)
+    if src is None:
+        if dest.exists():
+            return {"status": "ok", "tool_name": tool_name,
+                    "loaded": tool_name in orchestrator._dynamic_tool_names}
+        raise HTTPException(status_code=404, detail="tool not found")
+    if dest.exists():
+        raise HTTPException(
+            status_code=409, detail="an enabled tool with this name exists"
+        )
+    try:
+        os.replace(src, dest)
+        if src.parent.name == "quarantine":
+            (src.parent / f"{tool_name}.error.txt").unlink(missing_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    _commit_tool_paths(
+        generated_dir,
+        [f"{tool_name}.py", f"{src.parent.name}/{tool_name}.py"],
+        f"Enabled generated tool: {tool_name}",
+    )
+    loaded = tool_name in await asyncio.to_thread(
+        orchestrator.load_dynamic_tools, generated_dir
+    )
+    if not loaded:
+        error = _first_error_line(
+            generated_dir / "quarantine" / f"{tool_name}.error.txt"
+        )
+        return {"status": "quarantined", "tool_name": tool_name,
+                "loaded": False, "error": error}
+    return {"status": "ok", "tool_name": tool_name, "loaded": True}
 
 
 async def _handle_command(app: FastAPI, msg: Command) -> None:

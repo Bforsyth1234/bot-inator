@@ -778,3 +778,15 @@ failure, tracked as #50). No Swift changes. All eight items (#14, #16,
 Runner wiring: `GET /health` reports the app-listener status; the WS
 `clear_memory` command now deletes memories; tests use a temp memory DB
 (`AGENT_MEMORY_DB`); README gains the uv / sqlite-vec setup note.
+
+## Wave 3 — closed 2026-11-09
+
+Wave-close run: full suite 361 passed, 4 of 5 runs clean; the 5th exposed
+#50's flaky restart test (deadline raised to 10 s). Swift type-check clean.
+All eight items (#23, #28, #38, #41, #42, #33, #35, #34) are built and wait
+in todo.md as `[~] live`. Runner wiring: `read_email`, `list_events`
+(read-only) and `create_event` (gated) registered; mail, calendar and
+clipboard watchers started; friction detector and setup scanner wired with
+one shared `IdeaFeedback`; `mail_received`, `event_starting_soon` and
+`clipboard_changed` feed idea sources but don't start the tool-calling
+agent; event descriptions and source intros added.

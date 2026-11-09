@@ -1,0 +1,25 @@
+392        
+From: Alice Example <alice@example.com>
+To: me@example.com
+Subject: Lunch on Friday?
+Date: Mon, 09 Nov 2026 10:00:00 -0800
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="XX"
+
+--XX
+Content-Type: text/plain; charset=utf-8
+
+Hi! Are you free for lunch on Friday at noon?
+--XX
+Content-Type: text/html; charset=utf-8
+
+<p>HTML VERSION SHOULD NOT BE USED</p>
+--XX--
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>flags</key>
+	<integer>8590195713</integer>
+</dict>
+</plist>

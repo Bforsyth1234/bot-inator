@@ -1,0 +1,17 @@
+377        
+From: Shop <orders@shop.example>
+To: me@example.com
+Subject: Your order has shipped
+Date: Mon, 09 Nov 2026 11:00:00 -0800
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>p{color:red}</style><title>t</title></head><body><p>Your order &amp; tracking:</p><p>Tracking number <b>1Z999AA10123456784</b></p><script>alert(1)</script></body></html>
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>flags</key>
+	<integer>8590195713</integer>
+</dict>
+</plist>

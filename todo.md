@@ -68,7 +68,7 @@ API auth → sandbox for installed tools → live checks.
 | :--- | :--- | :--- | :--- |
 | 1 | A: #39 #40 · B: #43 · C: #44 · D: #46 · E: #47 · F: #30 | A `tests/test_groq_engine.py`, `tests/test_dry_run.py`, `tools/draft_dry_run.py` · B `tools/shortcuts.py` · C `tools/find_files.py` · D `tools/notes.py` · E `tools/windows.py` · F `tests/test_git_commit.py` (+ each slot's own new test file) | [x] closed 2026-11-09 (#43 #44 #46 #47 `[~] live`) |
 | 2 | A: #20 #21 · B: #24 · C: #25 · D: #14 · E: #16 #17 · F: #36 | A `ai/memory.py` · B `tools/meta_tool_generator.py` · C `ai/pattern_recognizer.py` · D `events/file_watcher.py` · E `events/mac_listeners.py`, `events/_mac_app_helper.py` · F `ai/open_help.py` | [x] closed 2026-11-09 (all `[~] live`) |
-| 3 | A: #23 #28 #38 · B: #41 · C: #42 · D: #33 #35 · E: #34 | A `ai/orchestrator.py`, tool routes in `main.py`, `ToolManagerView.swift` · B `events/mail_watcher.py`, `tools/read_email.py` · C `tools/calendar_access.py`, `tools/list_events.py`, `tools/create_event.py`, `events/calendar_watcher.py`, `requirements.txt` · D `ai/setup_scan.py`, `ai/starter_catalog.json` · E `events/clipboard_watcher.py`, `ai/friction.py` | [ ] |
+| 3 | A: #23 #28 #38 · B: #41 · C: #42 · D: #33 #35 · E: #34 | A `ai/orchestrator.py`, tool routes in `main.py`, `ToolManagerView.swift` · B `events/mail_watcher.py`, `tools/read_email.py` · C `tools/calendar_access.py`, `tools/list_events.py`, `tools/create_event.py`, `events/calendar_watcher.py`, `requirements.txt` · D `ai/setup_scan.py`, `ai/starter_catalog.json` · E `events/clipboard_watcher.py`, `ai/friction.py` | [x] closed 2026-11-09 (all `[~] live`) |
 | 4 | A: #32 · B: #45 · C: #15 #18 · D: #26 | A `ai/idea_sources.py`, `ai/open_help.py` · B `tools/reminders.py` (+ additive `tools/calendar_access.py`) · C `ApprovalAlert.swift`, `ApprovalPresenter.swift`, `CodeReviewAlert.swift` · D `config.py`, engine setup + settings routes in `main.py`, `SettingsView.swift` | [ ] |
 | 5 | A: #19 #29 #31 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `DebugView.swift`, `ToolManagerView.swift`, `ai/orchestrator.py`, `events/imessage_watcher.py` | [ ] |
 | 6 | A: #27 (alone) | `main.py` (all routes + WS), every Swift HTTP/WS client | [ ] |
@@ -120,6 +120,13 @@ to see.
 - #24 Names: ask the agent to create a tool named like an installed generated tool → error naming it, no code-review card. Delete it in Tool Manager, ask again → review card.
 - #25 Cadence: repetitive activity that matches nothing → INFO "pattern detection interval" lines at 120/240/480/600 s.
 - #36 Judge: `cd agent-daemon && .venv/bin/python -m ai.open_help` (add `--generate` to have the model write ideas). Record "pass rate X/9" and "matches expected Y/9". Target 3/9 and 9/9 (old always-pass judge: 8/9, 4/9).
+- #23 Disable: in Tool Manager, switch a generated tool off → "Disabled", file in `generated/disabled/`, agent no longer offers it; on → usable again.
+- #28 Quarantine: restart the daemon → any broken module in `generated/` (maybe `recent_apps*.py`) moves to `generated/quarantine/` with `.error.txt`; its row shows "Failed to load: …".
+- #38 One call per turn: start a generation that fails → exactly one approval prompt in that turn.
+- #41 Mail: grant Full Disk Access, run `cd agent-daemon && .venv/bin/python -m events.mail_watcher --schema`, paste the output into #41 (adjust `SCHEMA` if it reports gaps). Send yourself an email → `mail_received` in Debug within ~10 s, no Sent copy. Ask "what did my last email say?" → `read_email`, no approval card.
+- #42 Calendar: `cd agent-daemon && .venv/bin/python tools/calendar_access.py --check` → record whether the prompt appears and for which app, and whether today's events list; rerun after a restart → `full_access`, no prompt (if silently denied, add `--applescript` and pin `AGENT_CALENDAR_BACKEND`). "What's on my calendar today?" → events, no card. "Add lunch with Sam tomorrow at noon" → card → event in Calendar. An event 10 min out → `event_starting_soon` in Debug.
+- #33/#35 Setup scan: delete `~/.bot-inator/setup_scan.json`, restart (local provider) → log "setup scan done: N idea(s) queued", first idea card ~2 min later; second restart doesn't rescan; with Groq, "shell history skipped".
+- #34 Friction: copy in Mail → Cmd-Tab to Numbers → back, ×5 → `clipboard_changed {app: Mail, kind: text}` (no content), then a friction idea card if the judge passes it. Copy a password from a password manager → no `clipboard_changed`.
 
 ---
 
@@ -186,6 +193,16 @@ DECISIONS (assistant, 2026-11-09):
    `~/.bot-inator/idea_feedback.json`. Still in memory: the
    `NextStepSuggester` / `ChatGapDetector` cooldowns, and open-help's
    per-idea 7-day cooldown.
+FROM WAVE 3 #42 (2026-11-09): apply in `FOLLOW_UPS`:
+`calendar_invite_downloaded` = "Read the .ics file and add the event with the
+built-in create_event tool (asks for approval), then move the file to the
+Trash."; `plan_with_time` = "Add the plan with the built-in create_event tool
+(title, start and end parsed from the text); it asks the user for
+approval."; new kind `meeting_with_video_link` (classify: `event_starting_soon`
+with `metadata.video_url`) = "Open the meeting's video link (open_url) a
+minute before it starts." Also add mail kinds from #41 (`.ics` attachment /
+invite subject → create_event; shipping email → tracking follow-up) and the
+reminder kind from #45.
 Verify: restart the daemon; a declined next-step idea is not offered again.
 Deviations:
 
@@ -228,7 +245,7 @@ Deviations:
 
 ---
 
-#38 — Repeated approval prompts after generate_custom_tool fails [ ]
+#38 — Repeated approval prompts after generate_custom_tool fails [~] live
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: assistant (live run)
 Ask: After `recent_apps` installed but failed to load, the agent retried
 `generate_custom_tool` as `recent_apps_list`, and the user was asked to
@@ -241,38 +258,76 @@ FROM WAVE 2 #24 (2026-11-09): update the `ai/orchestrator.py` docstring
 (~line 162) that still describes the old "identically-named tool already
 exists on disk" short-circuit; collisions are now a `name_collision` error.
 Verify: a test where the meta-tool returns an error; exactly one approval_request.
-Deviations:
+Results (wave 3, 2026-11-09):
+⚬ A second `generate_custom_tool` in one turn returns
+  `error: generate_custom_tool_already_called` with no approval request.
+  `_turn_tool_calls` is now reset at the top of `_handle_event` (it was only
+  reset for chat turns, so pattern turns had no cap). Stale docstrings fixed.
+  Non-vacuity: no cap → 1 fails; no per-turn reset → 1 fails. #48 (wave 1)
+  fixed the stacked-approval cause of the 4× prompts.
+Deviations: none.
 
 ---
 
-#33 — Idea source: setup scan [ ]
+#33 — Idea source: setup scan [~] live
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: spec (Phase 5.2 table, row 3)
 Ask: One-time scan: installed apps, `~/.zsh_history`, Downloads clutter,
 recurring calendar events. Example: the same long `docker` command run
 40× → one-click tool.
 Verify:
-Deviations:
+Results (wave 3, 2026-11-09):
+⚬ `ai/setup_scan.py` `SetupScanner`: once per install (marker + publish
+  queue in `~/.bot-inator/setup_scan.json`): app names, top repeated long zsh
+  commands (secret-looking ones dropped), Downloads counts/age, recurring
+  calendar titles. History and calendar skipped under a cloud provider.
+  Filter: `passes_checks`, `grounded_in_events`, rejected-idea memory, judge
+  ≥7; at most 3, first after 120 s, then 4 h apart; re-checked before
+  publishing. `tests/test_setup_scan.py` 18 tests; 4 mutations each fail.
+⚬ Runner: started in `main.py` only when listeners are enabled and
+  `AGENT_SETUP_SCAN` isn't `0`; calendar read only if access is already
+  granted (`_calendar_reader_if_granted`), so it never prompts; shares the
+  one `IdeaFeedback`.
+Deviations: own `SETUP_JUDGE_SYSTEM_PROMPT` (the open-help judge would sink every catalog
+idea, unverified on a real model); calendar also skipped under cloud.
 
 ---
 
-#34 — Idea source: friction [ ]
+#34 — Idea source: friction [~] live
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: spec (Phase 5.2 table, row 4)
 Ask: Copy in app A → paste in app B; rapid ping-pong between two apps.
 Example: Mail → Numbers copy/paste ×5 → "pull invoice totals into my
 sheet". Needs a clipboard listener.
 Verify:
-Deviations:
+Results (wave 3, 2026-11-09):
+⚬ `events/clipboard_watcher.py`: polls `changeCount` (works off the main
+  thread); reads only pasteboard `types()` → kind; concealed/transient/
+  auto-generated copies skipped; app via `lsappinfo front` (NSWorkspace was
+  stale in-process). Emits `clipboard_changed` {app, kind}, never content.
+⚬ `ai/friction.py` `FrictionDetector`: copy in A → switch to B within 60 s,
+  5 times in 10 min → idea; ping-pong ≥10 alternations in 120 s with judge
+  bar 8; 24 h cooldown per pair; filter: checks, names one of the apps,
+  rejected-idea memory, judge. `tests/test_friction.py` 20 tests; 4
+  mutations each fail (incl. 2 privacy tests).
+⚬ Runner: watcher + detector wired; shares `IdeaFeedback` with
+  `records_feedback` off while open-help records; `clipboard_changed`
+  excluded from starting the agent; `_PATTERN_SOURCE_INTROS["friction"]`.
+Deviations: own `FRICTION_JUDGE_SYSTEM_PROMPT` (the open-help judge says app switching is
+not evidence).
 
 ---
 
-#35 — Idea source: starter catalog [ ]
+#35 — Idea source: starter catalog [~] live
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: spec (Phase 5.2 table, row 5)
 Ask: Curated, known-good tool ideas matched to the user's apps. Example:
 uses Mail + Preview → "auto-file PDF attachments". Adding a kind =
 adding a `FOLLOW_UPS` entry and a classifier rule in `ai/idea_sources.py`
 (see DONE.md #12).
 Verify:
-Deviations:
+Results (wave 3, 2026-11-09):
+⚬ `ai/starter_catalog.json`: 11 curated ideas with required apps/signals,
+  matched by the setup scan (#33), published with source `starter_catalog`.
+Deviations: merged into #33's scanner rather than `FOLLOW_UPS` (the catalog needs the
+scan's app/file signals).
 
 ---
 
@@ -296,7 +351,7 @@ back off like NO_PATTERN.
 
 ### Generated tools
 
-#28 — Quarantine a generated tool that fails to load [ ] [Q15]
+#28 — Quarantine a generated tool that fails to load [~] live [Q15]
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q15)
 Ask: The stdlib allow-list is advisory. A generated tool that imports a
 non-stdlib module fails at `load_dynamic_tools` time with an
@@ -308,7 +363,14 @@ DECISIONS (assistant, 2026-11-09): seen live: `recent_apps.py` was
 installed but failed to load (duplicate tool name; loader fixed in
 c89e0f5). Any load failure should quarantine, not only ImportError.
 Verify:
-Deviations:
+Results (wave 3, 2026-11-09):
+⚬ `ai/orchestrator.py`: `exec_module` raising, no Tool in the module, or the
+  agent rebuild failing (bisected by re-adding new tools one at a time) moves
+  the file to `quarantine/<name>.py` + `<name>.error.txt`; others stay loaded;
+  a `tool_result` thought reports it. An "ok" install that got quarantined is
+  reported as an error (no auto-rerun). Non-vacuity: no move → 2 fail; no
+  bisect → 1 fails.
+Deviations: quarantine moves are not git-committed (keeps git out of the loader).
 
 ---
 
@@ -329,14 +391,23 @@ Deviations:
 
 ---
 
-#23 — Disable a generated tool without deleting it [ ] [Q10]
+#23 — Disable a generated tool without deleting it [~] live [Q10]
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q10)
 Ask: Uninstall exists (ToolManagerView + `DELETE /api/tools/<name>`). Add
 a *disable without deleting* toggle so the user can suspend a suspect
 tool without losing the source, in case they want to tweak and
 re-install it.
 Verify:
-Deviations:
+Results (wave 3, 2026-11-09):
+⚬ `main.py`: `POST /api/tools/{name}/disable` (unload + move to
+  `generated/disabled/`) and `/enable` (move back + load); same validation as
+  DELETE (400 bad/built-in, 404 missing, 409 target exists); best-effort
+  nested-repo commits. `GET /api/tools` lists disabled (`disabled: true`) and
+  quarantined (`quarantined: true`, `error`) rows. `ToolManagerView.swift`:
+  per-row enable switch, "Disabled" caption, orange "Failed to load" line.
+⚬ `tests/test_tool_lifecycle.py` (6 tests, shared with #28/#38); swiftc clean.
+Deviations: DELETE also removes a disabled/quarantined copy and its `.error.txt`; enable
+also restores from `quarantine/`.
 
 ---
 
@@ -488,6 +559,8 @@ DECISIONS (assistant, 2026-11-09):
 Files: agent-daemon/tools/reminders.py, agent-daemon/tests/test_reminders.py;
 EDITED: agent-daemon/tools/calendar_access.py (#42), agent-daemon/tools/__init__.py,
 agent-daemon/ai/idea_sources.py.
+FROM WAVE 3 #42 (2026-11-09): `EventKitBackend._ensure_access(entity)` in
+`tools/calendar_access.py` is per entity type; add reminders beside it.
 Verify:
 ⚬ Fake-backend tests for both tools, due-date parsing, and the gate check.
 ⚬ Live: "remind me to call the vet tomorrow at 9" → approval card →
@@ -577,6 +650,14 @@ the timing-based tests added in wave 2 (`test_mac_listeners.py` uses real
 subprocesses and sub-second timings).
 Approach: when it happens again, record the test id (run with
 `-p no:cacheprovider -rf`) and give that test timing headroom.
+FROM WAVE 3 close (2026-11-09): caught it:
+`test_mac_listeners.py::test_helper_restarts_after_crash_with_backoff` (4
+interpreter starts in a 2 s deadline). Deadline raised to 10 s; the gap
+assertions stay exact. Also seen: one full run took 108 s instead of ~36 s;
+found: `test_memory.py::test_close_while_searching_from_threads` (47 s to
+minutes: 4 spinning workers starved `close()` of the lock). Workers now
+yield and the close loop is time-boxed: ~3.5 s, still segfaults 3/3 with the
+lock removed. Suite back to 25–32 s, 361 passed ×3.
 Verify: 10 consecutive full runs green after the fix.
 Deviations:
 
@@ -584,7 +665,7 @@ Deviations:
 
 ### Events and listeners
 
-#41 — Read email from Mail.app's local store [ ]
+#41 — Read email from Mail.app's local store [~] live
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "I want the app to be able to read email." New mail becomes an
 event the idea sources can act on, and the agent can read a message's
@@ -649,11 +730,27 @@ Verify:
   shows a `mail_received` event within ~10 s, and asking in chat "what
   did my last email say?" calls `read_email` without an approval prompt.
 Time: about 2–3 hours including tests, after Full Disk Access is granted.
-Deviations:
+Results (wave 3, 2026-11-09):
+⚬ `events/mail_watcher.py`: newest `V*/MailData/Envelope Index`, `mode=ro`,
+  schema check then baseline `MAX(ROWID)`, 10 s poll, `mail_received`
+  {sender, subject, date, mailbox, message_id}; Sent/Drafts skipped; no
+  access or schema mismatch logs once and idles. Schema isolated in one
+  `SCHEMA` block; `python -m events.mail_watcher --schema` prints the real
+  layout (no content).
+⚬ `tools/read_email.py` (read-only): finds `<id>.emlx`/`.partial.emlx`,
+  strips byte count + plist, plain text preferred, 4,000-char cap;
+  `AGENT_MAIL_ROOT` override.
+⚬ `tests/test_mail_watcher.py` 12 tests; 5 mutations each fail a test.
+⚬ Runner: watcher started in `main.py`, tool registered read-only,
+  `_describe_event` added; `mail_received` does not start the tool-calling
+  agent (added to `_AGENT_TRIGGER_EXCLUDED_EVENT_TYPES`, so idea sources
+  get it without an approval card per email).
+Deviations: schema inspection became the live check (no Full Disk Access here); Drafts
+skipped with Sent.
 
 ---
 
-#42 — Use the Mac's Calendar: read events, create events, upcoming-meeting events [ ]
+#42 — Use the Mac's Calendar: read events, create events, upcoming-meeting events [~] live
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "I want the app to be able to use the Mac's Calendar app too." The
 agent can answer "what's on my calendar?", add events (with approval),
@@ -736,7 +833,23 @@ Verify:
   `event_starting_soon` in the Debug tab.
 Time: about 3 hours including tests; about 4 if the AppleScript
 fallback is needed.
-Deviations:
+Results (wave 3, 2026-11-09):
+⚬ `tools/calendar_access.py`: one interface over `EventKitBackend`
+  (recurrences expanded; per-entity `_ensure_access` ready for #45) and
+  `AppleScriptBackend` (fixed scripts, argv, numeric dates, 14-day cap);
+  `AGENT_CALENDAR_BACKEND=eventkit|applescript|auto`. Diagnostic:
+  `python tools/calendar_access.py --check`.
+⚬ `list_events` (read-only; empty = today; 31-day cap flagged `truncated`),
+  `create_event` (gated; end defaults to +1 h).
+⚬ `events/calendar_watcher.py`: 60 s poll only when the backend is already
+  ready (never prompts); one `event_starting_soon` per occurrence within 10
+  min; skips all-day; detects Zoom/Meet/Teams links.
+⚬ `requirements.txt`: `pyobjc-framework-EventKit>=11.0` (installed).
+⚬ `tests/test_calendar.py` 18 tests; non-vacuity via the gate flip, dedupe
+  and cap. Runner: registered, watcher started, `_describe_event` added,
+  `event_starting_soon` excluded from starting the agent.
+Deviations: AppleScript backend does not expand recurrences. The diagnostic runs as a
+script path (`-m` hits the tools/ai circular import).
 
 ---
 
@@ -827,6 +940,9 @@ Wave: 4 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q5)
 Ask: Extend the editable-approval pattern to other tools: `open_url`
 (edit the URL), `show_notification` (edit title/body), `move_file` (edit
 destination). The current UI falls back to a read-only JSON view.
+FROM WAVE 3 #42 (2026-11-09): the `create_event` card shows Title, Date,
+Start–End (local time), Calendar ("Default calendar" if empty), Location,
+Notes (truncated).
 Verify:
 Deviations:
 
@@ -907,6 +1023,8 @@ Wave: 4 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q19)
 Ask: The provider applies to all three engines. A per-engine override
 (local analysis, cloud drafting) would keep per-event traffic on-device
 and send only tool drafts to Groq.
+FROM WAVE 3 #33 (2026-11-09): `SetupScanner(cloud=…)` is set from
+`settings.provider`; make it follow the detection engine's provider.
 Verify:
 Deviations:
 

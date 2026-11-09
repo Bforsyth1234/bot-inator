@@ -73,7 +73,11 @@ def test_helper_restarts_after_crash_with_backoff(tmp_path):
     )
     listener.start()
     try:
-        assert _wait_for(lambda: log.exists() and len(log.read_text().split()) >= 4)
+        # Generous deadline: 4 interpreter starts under a busy full suite can
+        # exceed 2 s (todo #50). The gap assertions below stay exact.
+        assert _wait_for(
+            lambda: log.exists() and len(log.read_text().split()) >= 4, timeout=10.0,
+        )
     finally:
         listener.stop()
     starts = [float(x) for x in log.read_text().split()]
