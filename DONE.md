@@ -836,3 +836,10 @@ Fixed in `events/mac_listeners.py` (an intentional stop no longer updates
 Also at wave 6 close: conftest pins `AGENT_CLOUD_PERSONAL_TEXT=0` so a
 developer `.env` opt-in doesn't change test results.
 Deviations:
+
+## Wave 7 — closed 2026-11-09
+
+Wave-close run: full suite 523 passed, 3 runs in a row (~74 s); Swift
+type-check clean. #22 (sandboxed generated tools) and #51 (idea-text scrub)
+built and wait as `[~] live`. New #52: `open`/`osascript` inside the sandbox
+can reach other apps; needs a decision.

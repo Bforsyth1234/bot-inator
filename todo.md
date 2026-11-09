@@ -72,7 +72,7 @@ API auth → sandbox for installed tools → live checks.
 | 4 | A: #32 · B: #45 · C: #15 #18 · D: #26 | A `ai/idea_sources.py`, `ai/open_help.py` · B `tools/reminders.py` (+ additive `tools/calendar_access.py`) · C `ApprovalAlert.swift`, `ApprovalPresenter.swift`, `CodeReviewAlert.swift` · D `config.py`, engine setup + settings routes in `main.py`, `SettingsView.swift` | [x] closed 2026-11-09 (all `[~] live`) |
 | 5 | A: #19 #29 #31 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `DebugView.swift`, `ToolManagerView.swift`, `ai/orchestrator.py`, `events/imessage_watcher.py` | [x] closed 2026-11-09 (all `[~] live`) |
 | 6 | A: #27 (alone) | `main.py` (all routes + WS), every Swift HTTP/WS client | [x] closed 2026-11-09 (`[~] live`) |
-| 7 | A: #22 #51 (alone) | `ai/orchestrator.py` tool execution, new `tools/tool_sandbox.py` | [ ] |
+| 7 | A: #22 #51 (alone) | `ai/orchestrator.py` tool execution, new `tools/tool_sandbox.py` | [x] closed 2026-11-09 (`[~] live`) |
 | — | #37 + every `[~] live` item | Live checks list (below) — needs the user at the Mac | [ ] |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -137,6 +137,8 @@ to see.
 - #29 tools_changed: with Manage Tools open, `curl -X POST http://127.0.0.1:8000/api/tools/<t>/disable` → the row updates without refresh (after #27, add the token header).
 - #31 Privacy: `AGENT_PROVIDER_MAIN=groq` → Debug shows "main: groq (cloud)" and "Personal text to cloud: kept on this Mac"; an inbound iMessage's reasoning prompt shows `[personal text kept on this Mac]`.
 - #27 Auth: build and launch the app → it connects, approves, lists tools, saves settings; `ls -l ~/.bot-inator/token` → `-rw-------`. Move the token away + restart the app → Offline with the hint; put it back → reconnects. Settings → Restart Daemon → comes back and reconnects. From a browser devtools console, `new WebSocket("ws://127.0.0.1:8000/ws/stream")` → refused; log "Refused websocket /ws/stream: Origin not allowed". Every curl in these checks now needs `-H "Authorization: Bearer $(cat ~/.bot-inator/token)"`.
+- #22 Sandbox: re-enable csv_diff in Manage Tools, run it from chat → one approval → correct result. A generated tool that calls show_notification still shows the notification. Check the daemon log has no "refusing to load generated tools (no sandbox)".
+- #51 Idea scrub: with Groq main and local detection (and `AGENT_CLOUD_PERSONAL_TEXT` not set to 1), an iMessage-derived idea's prompt shows `[personal text kept on this Mac]` instead of the message words.
 
 ---
 
@@ -402,7 +404,7 @@ Deviations: quarantine moves are not git-committed (keeps git out of the loader)
 
 ---
 
-#22 — Real sandbox for installed generated tools [ ] [Q9]
+#22 — Real sandbox for installed generated tools [~] live [Q9]
 Wave: 7 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q9)
 Ask: Generated tools run unsandboxed in the daemon process once
 approved. The static sanity checks (`exec`, `eval`, `__import__`,
@@ -415,7 +417,29 @@ DECISIONS (assistant, 2026-11-09): the 5.1 dry run (DONE.md #11) already
 runs unapproved drafts under `sandbox-exec`; that profile is the
 starting point.
 Verify:
-Deviations:
+Results (wave 7, 2026-11-09):
+⚬ `tools/tool_sandbox.py`: the daemon never imports a generated module. At
+  load a `sandbox-exec` child imports it and reports name/description/
+  inputs/output_type; the daemon registers a `SandboxedTool` proxy. Each
+  call runs a fresh child (JSON args on stdin, result on a private fd),
+  60 s timeout (`AGENT_TOOL_SANDBOX_TIMEOUT`), process group killed on
+  timeout. Profile per the decision; network only when the module's AST
+  imports a network module; minimal env (no API keys), dotenv disabled.
+  Built-in imports work via stub packages in the child.
+⚬ Sandbox unavailable → no generated tool loads (one `tool_result` thought
+  each, files stay); `AGENT_TOOL_SANDBOX=0` restores in-process import.
+⚬ Approval-gate choice: a built-in called from a generated tool runs in the
+  child with no second approval (the user approved the source and approves
+  every call of the generated tool; a round-trip channel would let untrusted
+  code drive daemon approvals). Tested: exactly one approval.
+⚬ `tests/test_tool_sandbox.py` 13 tests; non-vacuity for network/read deny,
+  minimal env, refusal, proxy; an automated control removes the Library
+  deny and sees the write succeed. A copy of csv_diff ran under the sandbox
+  with the real HOME and worked.
+Deviations: write-deny also covers the whole repo (daemon source, venv, `.env`) and
+shell start-up files; read-deny covers `agent-daemon/.env` and the token;
+the child's cwd is $HOME. Residual risk tracked as #52. The suite now takes
+~74 s (was ~26 s): the sandbox tests spawn real children.
 
 ---
 
@@ -485,7 +509,7 @@ Deviations: DELETE also notifies (deleting a disabled/quarantined copy sent noth
 
 ---
 
-#51 — Tool detail view: summary, run conditions, and source for every tool [ ]
+#51 — Tool detail view: summary, run conditions, and source for every tool [~] live
 Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: The app should show detailed data on every tool it has, both the
 built-ins it shipped with and the ones it generated. For each tool:
@@ -516,7 +540,14 @@ returning summary, conditions, gate, source path, error text),
 (`ToolManagerView.swift`) and wave 6 (`main.py` routes, auth): schedule
 after wave 6 so the new route gets the auth token.
 Verify:
-Deviations:
+Results (wave 7, 2026-11-09):
+⚬ `ai/privacy.py`: `note_personal_event` records iMessage text and mail
+  subjects from the last hour; `scrub_idea_text` (applied when
+  `should_redact("main")`) replaces 3+-word runs found in that text and any
+  quoted string of 3+ words in the idea's description/expected_logic.
+  `tests/test_idea_privacy.py` 5 tests incl. "dinner at 7 with Sam";
+  non-vacuity: no scrub → fails.
+Deviations: none.
 
 ---
 
@@ -758,6 +789,20 @@ Verify:
 ⚬ New test in `tests/test_settings_api.py`: PUT `cloud_personal_text`
   flips `should_redact("main")` for a cloud main engine; non-vacuity:
   ignore the setting in `personal_text_allowed()` → test fails.
+Deviations:
+
+---
+
+#52 — Sandboxed tools can still reach outside via `open` / `osascript` [ ]
+Wave: — (after live checks) · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 7 report)
+Ask: #22 allows `/usr/bin/osascript` and `/usr/bin/open` in the sandbox so
+generated tools can notify and open things. Both can ask another app (e.g.
+Terminal, via Apple Events) to run code outside the sandbox.
+Approach: options to weigh: deny Apple Events to Terminal/iTerm/Script
+Editor in the profile; route osascript/open through a daemon-side allow-list
+of verbs (notify, open URL/file); or accept it as covered by human review of
+the source (rule 7b). Decide with the user.
+Verify: a generated tool that tries `osascript -e 'tell application "Terminal" to do script "touch ~/x"'` is blocked (or the decision to accept is recorded).
 Deviations:
 
 ---

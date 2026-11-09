@@ -120,6 +120,28 @@ both.
 Generated tools live in `agent-daemon/tools/generated/`, which is its own
 nested git repo so every installed tool is versioned.
 
+### How generated tools run
+
+An installed generated tool does not run inside the daemon. Each call
+starts a short-lived Python child under macOS `sandbox-exec`:
+
+- it can write under your home folder, but not in `~/Library`, `~/.ssh`,
+  `~/.bot-inator`, your shell start-up files, or this repo;
+- it can't read `~/.ssh`, `~/.bot-inator` (API token, memory) or
+  `agent-daemon/.env`, and gets no API keys in its environment;
+- it has no network unless its source imports a network module
+  (`urllib`, `http`, `socket`, `ssl`, …). The tool's `sandbox_note` says
+  which;
+- it can only run `osascript`, `open`, `shortcuts`, `mdfind` and Python;
+- a call that takes longer than `AGENT_TOOL_SANDBOX_TIMEOUT` seconds
+  (default 60) is stopped.
+
+You still approve every call. Built-in tools a generated tool calls
+(e.g. `show_notification`) run inside the same sandbox without a second
+approval. If `sandbox-exec` is missing or fails its self-test, generated
+tools are not loaded. `AGENT_TOOL_SANDBOX=0` turns the sandbox off and
+runs them in the daemon process as before.
+
 ## Configuration
 
 Everything else is set in `agent-daemon/.env`. See
@@ -133,6 +155,7 @@ Useful ones:
 | `AGENT_OPEN_HELP_MIN_SCORE` | `7` | Judge score (0-10) an idea needs before you see it |
 | `AGENT_DRAFT_CRITIC` | `1` | Review each drafted tool against its spec |
 | `AGENT_DRAFT_DRY_RUN` | `1` | Dry-run each drafted tool in a sandbox |
+| `AGENT_TOOL_SANDBOX` | `1` | `0` runs installed generated tools in the daemon process, unsandboxed |
 | `AGENT_DISABLE_LISTENERS` | unset | `1` turns off all system event listeners |
 | `AGENT_LOG_LEVEL` | `INFO` | Daemon log level |
 

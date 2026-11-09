@@ -428,6 +428,8 @@ class Orchestrator:
                 return sorted(self._dynamic_tool_names)
 
             before = set(self._dynamic_tool_names)
+            if self._refuse_unsandboxed(target):
+                return sorted(self._dynamic_tool_names)
             loaded: list[str] = []
             quarantined: list[tuple[str, str]] = []
             for path in sorted(target.iterdir()):
@@ -446,11 +448,17 @@ class Orchestrator:
                         getattr(t, "name", getattr(t, "__name__", ""))
                         for t in self.tools
                     ) - {name}
-                    tool_obj = self._import_tool_module(name, path, exclude)
+                    tool_obj = self._load_tool(name, path, exclude)
                 except Exception as exc:
                     logger.exception("Failed to load dynamic tool from %s", path)
+                    # A sandboxed import failure carries the child's error
+                    # and traceback (#22), so quarantine reports the same
+                    # ``ModuleNotFoundError: ...`` line as an in-process one.
+                    child_error = getattr(exc, "child_error", None)
                     quarantined.append((name, self._quarantine_tool(
-                        target, name, exc, traceback.format_exc()
+                        target, name, child_error or exc,
+                        getattr(exc, "child_traceback", "")
+                        or traceback.format_exc(),
                     )))
                     continue
                 if tool_obj is None:
@@ -603,6 +611,58 @@ class Orchestrator:
             self.notify_tools_changed("unloaded", [name])
             return True
 
+    def _load_tool(
+        self, name: str, path: Path, exclude: frozenset[str] = frozenset()
+    ) -> Any:
+        """Load ``path`` as a sandboxed proxy, or in-process when opted out (#22)."""
+        from tools import tool_sandbox
+
+        if not tool_sandbox.sandbox_enabled():
+            return self._import_tool_module(name, path, exclude)
+        return tool_sandbox.load_sandboxed_tool(name, path, exclude)
+
+    def _refuse_unsandboxed(self, target: Path) -> bool:
+        """With the sandbox on but unusable, load no generated tool (#22).
+
+        Every ``*.py`` tool in ``target`` is unloaded (if loaded), recorded
+        like a quarantined tool (so an install reports an error) and
+        reported as a ``tool_result`` thought. Files stay where they are:
+        they load again once the sandbox works or ``AGENT_TOOL_SANDBOX=0``.
+        Returns True when loading was refused.
+        """
+        from tools import tool_sandbox
+
+        if not tool_sandbox.sandbox_enabled() or tool_sandbox.sandbox_available():
+            return False
+        reason = (
+            "not loaded: the tool sandbox is unavailable "
+            f"({tool_sandbox.sandbox_problem() or 'self-test failed'}); "
+            f"set {tool_sandbox.SANDBOX_ENV}=0 to run generated tools unsandboxed"
+        )
+        refused: list[str] = []
+        for path in sorted(target.iterdir()):
+            if path.name.startswith(".") or path.is_dir() or path.suffix != ".py":
+                continue
+            name = path.stem
+            if name in self._builtin_tool_names:
+                continue
+            if name in self._dynamic_tool_names:
+                self._remove_tool(name)
+            self._quarantined[name] = reason
+            refused.append(name)
+        if not refused:
+            return True
+        self._agent = self._build_agent()
+        for name in refused:
+            logger.warning("Generated tool %s %s", name, reason)
+            self._schedule(self._emit_thought(
+                getattr(self, "_current_event_id", "evt_tools"),
+                "tool_result",
+                f"Generated tool {name} {reason}",
+            ))
+        self.notify_tools_changed("quarantined", refused)
+        return True
+
     @staticmethod
     def _import_tool_module(
         name: str, path: Path, exclude: frozenset[str] = frozenset()
@@ -686,6 +746,8 @@ class Orchestrator:
             return
         event_id = event.metadata.get("event_id") or f"evt_{uuid.uuid4().hex[:12]}"
         self._turn_tool_calls = set()
+        # Personal text an idea may quote later (#51).
+        privacy.note_personal_event(event)
         await self._emit_thought(event_id, "event_received", self._describe_event(event))
 
         if self.pattern_recognizer is not None:
@@ -1071,14 +1133,12 @@ class Orchestrator:
             return result
         if self._pending_rerun_tool == name:
             self._pending_rerun_tool = None
-        return {
-            "status": "error",
-            "tool_name": name,
-            "error": (
-                "installed but failed to load; moved to quarantine/: "
-                f"{self._quarantined[name]}"
-            ),
-        }
+        reason = self._quarantined[name]
+        if reason.startswith("not loaded:"):  # sandbox unavailable (#22)
+            error = f"installed but {reason}"
+        else:
+            error = f"installed but failed to load; moved to quarantine/: {reason}"
+        return {"status": "error", "tool_name": name, "error": error}
 
     @staticmethod
     def _apply_edits(
@@ -1252,8 +1312,10 @@ class Orchestrator:
         """
         meta = event.metadata
         tool_name = meta.get("tool_name", "new_helper")
-        description = meta.get("description", "")
-        logic = meta.get("expected_logic", "")
+        # A local detection engine may have quoted an iMessage or a mail
+        # subject into the idea; a cloud main engine must not see it (#51).
+        description = privacy.scrub_idea_text(meta.get("description", ""), "main")
+        logic = privacy.scrub_idea_text(meta.get("expected_logic", ""), "main")
         builtin = meta.get("builtin_tool")
         if builtin:
             # Known follow-up a built-in tool can do directly (#32): no new
