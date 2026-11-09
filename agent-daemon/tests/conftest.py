@@ -15,3 +15,8 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("AGENT_PROVIDER", "local")
+# Keep the developer's real ~/.bot-inator/settings.json out of tests.
+os.environ.setdefault(
+    "AGENT_SETTINGS_PATH",
+    os.path.join(os.path.dirname(__file__), ".no-user-settings.json"),
+)

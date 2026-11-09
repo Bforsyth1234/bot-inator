@@ -27,6 +27,12 @@ struct MenuBarUIApp: App {
         }
         .defaultSize(width: 520, height: 620)
         .keyboardShortcut("c", modifiers: [.command, .shift])
+
+        Window("Settings", id: "settings") {
+            SettingsView()
+        }
+        .defaultSize(width: 480, height: 420)
+        .keyboardShortcut(",", modifiers: [.command])
     }
 }
 
@@ -68,6 +74,15 @@ struct RootPopoverView: View {
                 }
                 .buttonStyle(.borderless)
                 .keyboardShortcut("c", modifiers: [.command, .shift])
+                Spacer()
+                Button {
+                    presentWindow(id: "settings")
+                } label: {
+                    Label("Settings…", systemImage: "slider.horizontal.3")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.borderless)
+                .keyboardShortcut(",", modifiers: [.command])
                 Spacer()
                 Button {
                     presentWindow(id: "tool-manager")

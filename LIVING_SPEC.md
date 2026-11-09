@@ -6,9 +6,37 @@ phases supersede older ones where they conflict.
 
 ## 1. Goals
 
-A local-first macOS agent that observes system events, reasons about them
-with an LLM, and proposes actions that the user approves or rejects from
-a MenuBar UI. No background action without consent.
+A local-first macOS agent that builds agent workflows to help the user
+wherever it can. It observes system events, reasons about them with an
+LLM, and proposes tools and actions that the user approves or rejects
+from a MenuBar UI. No background action without consent.
+
+**Guiding question.** For every event, or window of events, the LLM asks:
+*"How could I possibly help the user here?"* That question is always
+asked. It is never gated on repetition or on a fixed list of event kinds.
+
+**Ask always, surface rarely.** Open-ended generation from a small model
+over-proposes (Phase 5.2: "add a screenshot to the calendar"). So the
+pipeline has two separate stages:
+
+1. **Generate.** Ask the guiding question freely and produce candidate
+   ideas. Generating is cheap and its output is never shown directly.
+2. **Filter.** A candidate reaches the user only if it passes a quality
+   bar: critic review, static draft checks and a dry run
+   (`tools/draft_critic.py`, `tools/draft_checks.py`,
+   `tools/draft_dry_run.py`). When in doubt, drop it.
+3. **Learn.** Approvals and rejections tune what passes the bar, so
+   suggestions fit this user over time.
+
+Known-good follow-ups (`FOLLOW_UPS` in `ai/idea_sources.py`) and the
+repeated-workflow detector (`ai/pattern_recognizer.py`) are seed sources
+of high-confidence ideas. They are not the only ideas allowed.
+
+Implemented by `ai/open_help.py` (`OpenHelpSuggester`, source
+`open_help`): it asks over a rolling window of events at most once per
+`AGENT_OPEN_HELP_INTERVAL`, a judge call scores each idea 0-10 against
+`AGENT_OPEN_HELP_MIN_SCORE`, and approve/reject answers on
+`generate_custom_tool` are kept in `~/.bot-inator/idea_feedback.json`.
 
 Inference runs on-device (MLX) by default. Groq cloud inference is an
 opt-in alternative (`AGENT_PROVIDER=groq`, Phase 4.7). With Groq selected,

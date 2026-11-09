@@ -5,11 +5,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+import user_settings
+
 # Load ``agent-daemon/.env`` (resolved relative to this file, not CWD) so the
 # daemon picks up ``GROQ_API_KEY`` and friends regardless of where uvicorn is
 # launched from. ``override=False`` keeps real shell exports authoritative,
 # which matters for tests and for the ``AGENT_PROVIDER=local`` overrides we
 # sometimes pass on the launch command line.
+#
+# Settings saved from the MenuBar app's Settings window are applied first,
+# so they win over ``.env`` but still lose to real shell exports.
+user_settings.apply_to_environ()
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 
@@ -73,6 +79,22 @@ class Settings:
     # Selected via ``AGENT_PATTERN_ENGINE``.
     pattern_detection_engine: str = field(
         default_factory=lambda: _env("AGENT_PATTERN_ENGINE", "main").lower()
+    )
+    # Open-ended "how could I help?" idea source (LIVING_SPEC §1). On by
+    # default; ``AGENT_OPEN_HELP=0`` turns it off. Asks at most once per
+    # ``AGENT_OPEN_HELP_INTERVAL`` seconds and only shows ideas the judge
+    # scores at or above ``AGENT_OPEN_HELP_MIN_SCORE`` (0-10).
+    open_help_enabled: bool = field(
+        default_factory=lambda: _env("AGENT_OPEN_HELP", "1") != "0"
+    )
+    open_help_interval_seconds: float = field(
+        default_factory=lambda: float(_env("AGENT_OPEN_HELP_INTERVAL", "600"))
+    )
+    open_help_min_score: int = field(
+        default_factory=lambda: int(_env("AGENT_OPEN_HELP_MIN_SCORE", "7"))
+    )
+    idea_feedback_path: Path = field(
+        default_factory=lambda: Path.home() / ".bot-inator" / "idea_feedback.json"
     )
     watch_dirs: list[Path] = field(
         default_factory=lambda: [Path.home() / "Downloads"]

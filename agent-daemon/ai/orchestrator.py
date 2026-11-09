@@ -83,6 +83,10 @@ _PATTERN_SOURCE_INTROS: dict[str, str] = {
         "In chat, the user asked for something no existing tool could do, "
         "and a new tool was suggested so it works next time."
     ),
+    "open_help": (
+        "While watching recent activity, the assistant asked how it could "
+        "help the user, and a reviewed tool idea passed its quality bar."
+    ),
 }
 
 

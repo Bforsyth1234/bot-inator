@@ -488,11 +488,29 @@ _DUP_STOPWORDS: frozenset[str] = frozenset({
     "user", "users", "util", "utility", "with",
 })
 
+# Jaccard overlap (name + description tokens) at which an existing tool
+# counts as covering the request.
+_DUP_SIMILARITY = 0.5
+
+# Tools that are never "the same" as a requested tool.
+_DUP_EXEMPT_TOOLS: frozenset[str] = frozenset({"generate_custom_tool"})
+
+
+def _dup_stem(token: str) -> str:
+    """Crude stem so ``reader``/``read`` and ``generator``/``generate`` match."""
+    for suffix in ("ing", "or", "er", "ed", "es", "s"):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+            token = token[: -len(suffix)]
+            break
+    return token[:-1] if token.endswith("e") and len(token) > 4 else token
+
 
 def _dup_tokens(text: str) -> set[str]:
-    """Lowercase, split on non-alphanumerics, drop stopwords + short tokens."""
+    """Lowercase, split on non-alphanumerics, drop stopwords + short tokens, stem."""
     raw = re.split(r"[^a-z0-9]+", text.lower())
-    return {t for t in raw if t and len(t) > 2 and t not in _DUP_STOPWORDS}
+    return {
+        _dup_stem(t) for t in raw if t and len(t) > 2 and t not in _DUP_STOPWORDS
+    }
 
 
 def _find_similar_existing_tool(
@@ -500,29 +518,41 @@ def _find_similar_existing_tool(
 ) -> Optional[str]:
     """Return an existing tool name that likely covers the requested task.
 
-    Matches when any significant token from the requested ``tool_name``
-    or ``description`` also appears in an existing tool's name or
-    description. Used as a semantic-duplicate guard in
-    :func:`generate_custom_tool` — exact-name duplicates are caught
+    Matches when either:
+
+    * every significant token of the requested ``tool_name`` appears in an
+      existing tool's name (``auto_screenshot`` vs ``screenshot_tool``), or
+    * the requested name+description and the existing name+description
+      share at least :data:`_DUP_SIMILARITY` of their tokens (Jaccard).
+
+    A single shared word is not enough: that matched almost every request
+    (``create_invoice_template`` against ``read_clipboard``). The
+    meta-tool itself is never a match. Used as a semantic-duplicate guard
+    in :func:`generate_custom_tool`; exact-name duplicates are caught
     earlier by the on-disk path check.
     """
     if _ORCHESTRATOR is None:
         return None
-    request_tokens = _dup_tokens(tool_name) | _dup_tokens(description)
-    if not request_tokens:
+    request_name = _dup_tokens(tool_name)
+    request_all = request_name | _dup_tokens(description)
+    if not request_all:
         return None
 
     for tool_obj in getattr(_ORCHESTRATOR, "tools", []):
         name = getattr(tool_obj, "name", getattr(tool_obj, "__name__", ""))
-        if not name:
+        if not name or name in _DUP_EXEMPT_TOOLS:
             continue
         desc = (
             getattr(tool_obj, "description", None)
             or getattr(tool_obj, "__doc__", None)
             or ""
         )
-        existing_tokens = _dup_tokens(name) | _dup_tokens(desc)
-        if request_tokens & existing_tokens:
+        existing_name = _dup_tokens(name)
+        if request_name and request_name <= existing_name:
+            return name
+        existing_all = existing_name | _dup_tokens(desc)
+        overlap = len(request_all & existing_all) / len(request_all | existing_all)
+        if overlap >= _DUP_SIMILARITY:
             return name
     return None
 
