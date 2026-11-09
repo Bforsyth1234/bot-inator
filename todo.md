@@ -47,7 +47,7 @@ checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
 ============================================================ -->
 
-Next ID: #50
+Next ID: #51
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -67,7 +67,7 @@ API auth → sandbox for installed tools → live checks.
 | Wave | Slot: items | Owned files (disjoint within the wave) | Status |
 | :--- | :--- | :--- | :--- |
 | 1 | A: #39 #40 · B: #43 · C: #44 · D: #46 · E: #47 · F: #30 | A `tests/test_groq_engine.py`, `tests/test_dry_run.py`, `tools/draft_dry_run.py` · B `tools/shortcuts.py` · C `tools/find_files.py` · D `tools/notes.py` · E `tools/windows.py` · F `tests/test_git_commit.py` (+ each slot's own new test file) | [x] closed 2026-11-09 (#43 #44 #46 #47 `[~] live`) |
-| 2 | A: #20 #21 · B: #24 · C: #25 · D: #14 · E: #16 #17 · F: #36 | A `ai/memory.py` · B `tools/meta_tool_generator.py` · C `ai/pattern_recognizer.py` · D `events/file_watcher.py` · E `events/mac_listeners.py`, `events/_mac_app_helper.py` · F `ai/open_help.py` | [ ] |
+| 2 | A: #20 #21 · B: #24 · C: #25 · D: #14 · E: #16 #17 · F: #36 | A `ai/memory.py` · B `tools/meta_tool_generator.py` · C `ai/pattern_recognizer.py` · D `events/file_watcher.py` · E `events/mac_listeners.py`, `events/_mac_app_helper.py` · F `ai/open_help.py` | [x] closed 2026-11-09 (all `[~] live`) |
 | 3 | A: #23 #28 #38 · B: #41 · C: #42 · D: #33 #35 · E: #34 | A `ai/orchestrator.py`, tool routes in `main.py`, `ToolManagerView.swift` · B `events/mail_watcher.py`, `tools/read_email.py` · C `tools/calendar_access.py`, `tools/list_events.py`, `tools/create_event.py`, `events/calendar_watcher.py`, `requirements.txt` · D `ai/setup_scan.py`, `ai/starter_catalog.json` · E `events/clipboard_watcher.py`, `ai/friction.py` | [ ] |
 | 4 | A: #32 · B: #45 · C: #15 #18 · D: #26 | A `ai/idea_sources.py`, `ai/open_help.py` · B `tools/reminders.py` (+ additive `tools/calendar_access.py`) · C `ApprovalAlert.swift`, `ApprovalPresenter.swift`, `CodeReviewAlert.swift` · D `config.py`, engine setup + settings routes in `main.py`, `SettingsView.swift` | [ ] |
 | 5 | A: #19 #29 #31 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `DebugView.swift`, `ToolManagerView.swift`, `ai/orchestrator.py`, `events/imessage_watcher.py` | [ ] |
@@ -114,6 +114,12 @@ to see.
 - #44 Spotlight: ask "find my latest invoice PDF" → a real path, no approval card.
 - #46 Notes: "save a note called Test with hello" → approval card → Automation prompt for Notes → a "Test" note. "Append 'world' to my note Test" → approval → new line. Appending to a missing title → error, no new note.
 - #47 Windows: "what windows do I have open?" → real windows (titles if Screen Recording is granted, otherwise the note). "Open Numbers" → approval card → Numbers opens.
+- #14 File watcher: download a .dmg in Chrome into ~/Downloads → one `file`/`renamed` event for `X.dmg` in the Debug tab, none for `.crdownload` or `.com.google.Chrome.*`.
+- #16/#17 App listener: `kill <mac_app_helper pid>` → log "restarting in 1.0s", a new pid, `/health` shows `restart_count: 1`, `alive: true`. Fast Cmd-Tab cycling emits only the app you land on; holding >500 ms emits exactly one `app_activated`.
+- #20/#21 Memory: restart the daemon → log "Backfilled vectors for N memories", no "Vector memory search disabled". Send the `clear_memory` command → `memories` table empty.
+- #24 Names: ask the agent to create a tool named like an installed generated tool → error naming it, no code-review card. Delete it in Tool Manager, ask again → review card.
+- #25 Cadence: repetitive activity that matches nothing → INFO "pattern detection interval" lines at 120/240/480/600 s.
+- #36 Judge: `cd agent-daemon && .venv/bin/python -m ai.open_help` (add `--generate` to have the model write ideas). Record "pass rate X/9" and "matches expected Y/9". Target 3/9 and 9/9 (old always-pass judge: 8/9, 4/9).
 
 ---
 
@@ -185,7 +191,7 @@ Deviations:
 
 ---
 
-#36 — Open-help judge is too lenient; log its score [ ]
+#36 — Open-help judge is too lenient; log its score [~] live
 Wave: 2 · Agent: _ · Added: 2026-11-09 · Source: assistant (live run)
 Ask: In the live run every idea built from throwaway test files
 (`create_invoice_template`, `invoice_number_generator`, `csv_merge`,
@@ -196,7 +202,16 @@ Approach: log `judge_score` on pass; tighten IDEA_JUDGE_SYSTEM_PROMPT
 rate on a fixed set of event windows before and after.
 Files: agent-daemon/ai/open_help.py, agent-daemon/tests/test_open_help.py
 Verify: a recorded set of ≥5 event windows; pass rate and examples written here.
-Deviations:
+Results (wave 2, 2026-11-09):
+⚬ `ai/open_help.py`: score and reason logged at INFO on pass and drop;
+  `parse_judge()` returns (score, reason). Stricter `IDEA_JUDGE_SYSTEM_PROMPT`
+  (name the manual step; files appearing or app switches aren't evidence;
+  test/sample/temp files cap at 4; when in doubt score lower). New free
+  pre-judge check `grounded_in_events()`. Renames show `from -> to`.
+⚬ `tests/fixtures/open_help_windows.json`: 9 windows (6 drop incl. the live
+  run's, 3 pass) and `python -m ai.open_help` to score them on a real engine.
+  `tests/test_open_help.py` 25 tests; non-vacuity: 4 fail when reverted.
+Deviations: none.
 
 ---
 
@@ -222,6 +237,9 @@ Approach: cap `generate_custom_tool` at one call per pattern_detected
 turn (the pattern prompt already says "exactly once"); on an error
 status, end the turn with the error instead of retrying.
 Files: agent-daemon/ai/orchestrator.py (+ test)
+FROM WAVE 2 #24 (2026-11-09): update the `ai/orchestrator.py` docstring
+(~line 162) that still describes the old "identically-named tool already
+exists on disk" short-circuit; collisions are now a `name_collision` error.
 Verify: a test where the meta-tool returns an error; exactly one approval_request.
 Deviations:
 
@@ -258,7 +276,7 @@ Deviations:
 
 ---
 
-#25 — Pattern detection cost: adaptive cadence [ ] [Q12]
+#25 — Pattern detection cost: adaptive cadence [~] live [Q12]
 Wave: 2 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q12)
 Ask: Every 10 events we hit the detection engine with a 50-event prompt.
 Phase 5.0's repeat gate skips the model call unless an event signature
@@ -266,7 +284,15 @@ repeats 3×, which removes most calls. Detection now defaults to the 8B
 main engine, so each call that does run costs more. Adaptive cadence is
 still open.
 Verify:
-Deviations:
+Results (wave 2, 2026-11-09):
+⚬ `ai/pattern_recognizer.py`: after each model call with no usable
+  suggestion, `current_interval` doubles 60→120→240→480→600 s (cap); a match
+  resets it; repeat-gate skips don't count. INFO log per change; new kwargs
+  `max_trigger_interval`, `clock`. `tests/test_pattern_cadence.py` 5 tests;
+  non-vacuity: no doubling → 4 fail, no count-trigger hold → 1 fails.
+Deviations: while backed off, the 10-event trigger is held too (otherwise a busy user
+never backs off: next call at +10 s instead of +120 s). Unparseable replies
+back off like NO_PATTERN.
 
 ### Generated tools
 
@@ -314,7 +340,7 @@ Deviations:
 
 ---
 
-#24 — Name collisions between generated tools [ ] [Q11]
+#24 — Name collisions between generated tools [~] live [Q11]
 Wave: 2 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q11)
 Ask: A generated tool whose name collides with a built-in is rejected.
 What about two generated tools across daemon restarts (e.g. the agent
@@ -328,7 +354,20 @@ into the catch-all and drops git's stderr; `.splitlines()[0]` raises
 `commit.gpgsign` / `core.hooksPath`, so a signing setup can hang to the 10 s
 timeout. `tests/test_git_commit.py` covers the happy paths.
 Verify:
-Deviations:
+Results (wave 2, 2026-11-09):
+⚬ `tools/meta_tool_generator.py`: `generate_custom_tool` rejects a name that
+  is a generated tool on disk or loaded, right after the identifier check and
+  before the similarity guard, drafting or approval: `error:
+  name_collision`, naming the tool and its description. Re-install after
+  DELETE works. `tests/test_tool_names.py` 5 tests.
+⚬ `_git_commit`: init/add failures return git's stderr; empty stdout →
+  "committed"; every call adds `commit.gpgsign=false`, `tag.gpgsign=false`,
+  `core.hooksPath=/dev/null`, stdin from /dev/null. 4 more tests in
+  `tests/test_git_commit.py`. Non-vacuity: each fix reverted fails its test.
+Deviations: the collision check runs before the similarity guard: for a loaded tool the
+guard used to swallow an exact name as `similar_exists`. A rejected name no
+longer marks a rerun. `orchestrator.py` docstring (~line 162) still describes
+the old short-circuit: handed to #38.
 
 ---
 
@@ -528,6 +567,21 @@ tools in shared modules; fixed by the runner at wave close (see #48).
 
 ---
 
+### Test hygiene
+
+#50 — One unidentified full-suite failure in 12 runs [ ]
+Wave: — (watch) · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 2 close)
+Ask: At wave 2 close one full run reported `1 failed, 286 passed`; the next
+11 full runs were all green, so the failing test wasn't captured. Suspects:
+the timing-based tests added in wave 2 (`test_mac_listeners.py` uses real
+subprocesses and sub-second timings).
+Approach: when it happens again, record the test id (run with
+`-p no:cacheprovider -rf`) and give that test timing headroom.
+Verify: 10 consecutive full runs green after the fix.
+Deviations:
+
+---
+
 ### Events and listeners
 
 #41 — Read email from Mail.app's local store [ ]
@@ -686,35 +740,60 @@ Deviations:
 
 ---
 
-#14 — File-watcher noise from in-progress downloads [ ] [Q1]
+#14 — File-watcher noise from in-progress downloads [~] live [Q1]
 Wave: 2 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q1)
 Ask: Chrome download churn (`.crdownload`) floods the stream. Add
 debounce + extension filter? Phase 5.2 added `on_moved`, so the finished
 download now arrives as a `renamed` event; the in-progress churn is
 still unfiltered.
 Verify:
-Deviations:
+Results (wave 2, 2026-11-09):
+⚬ `events/file_watcher.py`: created/modified events for dotfiles and
+  `.crdownload/.download/.part/.tmp` are dropped; a rename to a temp name or
+  dotfile is dropped; a rename from a temp name to a real file is emitted
+  (destination path). Modified events debounced to 1 per path per 2 s
+  (injectable clock); created/renamed always pass. 9 tests in
+  `tests/test_file_watcher.py`; non-vacuity: no filter → 6 fail, no debounce
+  → 3 fail.
+Deviations: a created or renamed event also opens the path's 2 s window, so the burst
+of modified events right after a file appears is absorbed.
 
 ---
 
-#16 — MacAppListener watchdog [ ] [Q3]
+#16 — MacAppListener watchdog [~] live [Q3]
 Wave: 2 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q3)
 Ask: `MacAppListener` has no watchdog: if `_mac_app_helper` exits or
 crashes, the daemon stops receiving app activations silently. Add a
 supervisor that restarts the helper on exit and exposes liveness in the
 Debug tab?
 Verify:
-Deviations:
+Results (wave 2, 2026-11-09):
+⚬ `events/mac_listeners.py`: supervisor thread restarts the helper with
+  backoff 1→60 s, reset after 60 s up; `stop()` never restarts. Liveness:
+  `is_alive`, `restart_count`, `last_error`, `last_exit_code`, `status()`.
+  Runner wired `status()` into `GET /health` as `listeners.nsworkspace`.
+⚬ `events/_mac_app_helper.py` exits on `BrokenPipeError` and when its parent
+  daemon is gone (no orphans after restarts).
+⚬ `tests/test_mac_listeners.py` (9 tests with real fake-helper subprocesses);
+  non-vacuity: no doubling → 2 fail, no restart → 3 fail, no reset → 1 fails.
+Deviations: the helper's exit-when-orphaned check was added (not in the brief). Showing
+liveness in the Debug tab needs a WS field: moved to #19 (wave 5).
 
 ---
 
-#17 — Debounce rapid app switches [ ] [Q4]
+#17 — Debounce rapid app switches [~] live [Q4]
 Wave: 2 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q4)
 Ask: Since Phase 4.7, `app_activated` no longer starts the tool-calling
 agent. It still runs `evaluate_event` on the analysis engine per switch;
 a debounce (sustained focus ≥ 500 ms) is still open.
 Verify:
-Deviations:
+Results (wave 2, 2026-11-09):
+⚬ Debounce in the parent (`mac_listeners.py`): `app_activated` emitted only
+  after 500 ms of focus; a newer switch cancels the pending one; the event
+  keeps the activation time. Tested with #16's suite; non-vacuity: no cancel
+  → 2 fail.
+Deviations: A→B→A within 500 ms emits nothing new (focus never really left A). Parent,
+not helper: the helper is AppKit-only and loses state on every restart.
 
 ---
 
@@ -726,6 +805,9 @@ permission prompt through the MenuBar UI instead of a log line?
 DECISIONS (assistant, 2026-11-09): seen live: the 2026-11-09 runs logged
 "Could not open … chat.db read-only … needs macOS Full Disk Access", and
 nothing told the user.
+FROM WAVE 2 #16 (2026-11-09): add `listener_health: dict[str, dict] |
+None` to `StatusPayload` (filled from `app.state.mac_listener.status()`)
+and show `alive` / `restart_count` in the Debug tab. `/health` already has it.
 Verify:
 Deviations:
 
@@ -750,7 +832,7 @@ Deviations:
 
 ### Memory
 
-#20 — sqlite-vec needs a SQLite with load_extension [ ] [Q7]
+#20 — sqlite-vec needs a SQLite with load_extension [~] live [Q7]
 Wave: 2 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q7)
 Ask: Vector memory requires `sqlite-vec` *and* a Python/SQLite build
 compiled with `load_extension` support. The Homebrew default on macOS
@@ -764,17 +846,37 @@ FROM WAVE 1 #40 (2026-11-09): an intermittent segfault in `ai/memory.py`
 4 paired runs, never alone. Not seen in 3 full runs after #48. Check whether
 a connection is used from another thread after close.
 Verify:
-Deviations:
+Results (wave 2, 2026-11-09):
+⚬ Root cause: this Mac's stdlib sqlite3 (3.53.4) supports
+  `enable_load_extension`; `sqlite-vec` was in requirements but not installed
+  in `.venv` (uv-built, no pip). Installed `sqlite-vec` 0.1.9; vec0 loads.
+⚬ `ai/memory.py`: tries stdlib then `pysqlite3`; warns once per process;
+  rows without vectors are backfilled on connect.
+⚬ The FROM WAVE 1 segfault: `close()` raced `asyncio.to_thread` searches.
+  One `RLock` now guards every connection access; reproduced 1/4 SIGSEGV
+  before, test fails with -11 without the lock.
+⚬ README: uv install line and the `pysqlite3-binary` note (runner).
+Deviations: installed `sqlite-vec` into the shared venv (declared but missing); added
+the backfill.
 
 ---
 
-#21 — Memory retention policy [ ] [Q8]
+#21 — Memory retention policy [~] live [Q8]
 Wave: 2 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q8)
 Ask: Memory has no eviction, namespacing, or TTL; `memory.db` will
 accumulate every preference saved. Add a retention policy (LRU, decayed
 importance, or manual `clear_memory` wired to the existing WS command).
 Verify:
-Deviations:
+Results (wave 2, 2026-11-09):
+⚬ `ai/memory.py`: cap `max_rows=5000`; oldest non-preference rows evicted
+  first (with their vectors); `clear_memory()` (keeps the chat transcript) and
+  `count()`, plus module-level wrappers. The WS `clear_memory` command used to
+  only close the DB; runner changed it to call `clear_memory()`.
+⚬ `tests/test_memory.py` 11 tests; non-vacuity: wrong eviction order → 2
+  fail. Runner tests: `tests/test_wave2_wiring.py`.
+⚬ Runner: tests now use a temp DB (`AGENT_MEMORY_DB`, set in conftest); the
+  integration fixture had been opening the real `~/.bot-inator/memory.db`.
+Deviations: `clear_memory` keeps `chat_log`.
 
 ### Security and providers
 

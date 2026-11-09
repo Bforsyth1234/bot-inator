@@ -20,3 +20,11 @@ os.environ.setdefault(
     "AGENT_SETTINGS_PATH",
     os.path.join(os.path.dirname(__file__), ".no-user-settings.json"),
 )
+# Keep the developer's real ~/.bot-inator/memory.db out of tests: the
+# app lifespan in tests/test_integration.py opens the default Memory.
+import tempfile as _tempfile
+
+os.environ.setdefault(
+    "AGENT_MEMORY_DB",
+    os.path.join(_tempfile.mkdtemp(prefix="bot-inator-test-"), "memory.db"),
+)

@@ -9,6 +9,15 @@ engine to evaluate the rolling window once every :attr:`trigger_every`
 events or after :attr:`trigger_interval` seconds, whichever comes first,
 and we cool down for :attr:`cooldown_seconds` after every hit so the user
 is not flooded with duplicate suggestions.
+
+Adaptive cadence (todo #25): every model call that finds nothing
+(``NO_PATTERN``) doubles :attr:`current_interval`, capped at
+:attr:`max_trigger_interval` (10 min); a match resets it to
+:attr:`trigger_interval`. While backed off, the event-count trigger is
+held: a call needs ``current_interval`` seconds since the last one,
+because with a busy user the count trigger alone fires every few seconds
+and the backed-off interval would otherwise never be reached. Repeat-gate
+skips make no model call and leave the cadence unchanged.
 """
 
 from __future__ import annotations
@@ -111,6 +120,8 @@ class PatternRecognizer:
         trigger_interval: float = 60.0,
         cooldown_seconds: float = 300.0,
         min_repeats: int = 3,
+        max_trigger_interval: float = 600.0,
+        clock: Optional[Callable[[], float]] = None,
         publish: Optional[Callable[[ContextEvent], Awaitable[None]]] = None,
     ) -> None:
         self.event_bus = event_bus
@@ -123,6 +134,11 @@ class PatternRecognizer:
         self.trigger_every = trigger_every
         self.trigger_interval = trigger_interval
         self.cooldown_seconds = cooldown_seconds
+        # Never cap below the base interval (tests use a 3600 s base).
+        self.max_trigger_interval = max(max_trigger_interval, trigger_interval)
+        # Time-based trigger in effect now; doubles on NO_PATTERN.
+        self.current_interval: float = trigger_interval
+        self._clock: Callable[[], float] = clock or time.time
         self._publish = publish or self._default_publish
         self._since_last_eval: int = 0
         self._last_eval_at: float = 0.0
@@ -148,13 +164,17 @@ class PatternRecognizer:
         self._window.append(self._describe(event))
         self._signatures.append(self._signature(event))
         self._since_last_eval += 1
-        now = time.time()
+        now = self._clock()
         if now < self._cooldown_until:
             return None
-        enough_events = self._since_last_eval >= self.trigger_every
         enough_time = (
             self._last_eval_at > 0
-            and (now - self._last_eval_at) >= self.trigger_interval
+            and (now - self._last_eval_at) >= self.current_interval
+        )
+        # Backed off: only the (longer) interval may trigger a call.
+        enough_events = (
+            not self.backed_off
+            and self._since_last_eval >= self.trigger_every
         )
         if not (enough_events or enough_time):
             return None
@@ -169,12 +189,26 @@ class PatternRecognizer:
             return None
         return asyncio.create_task(self._run_detection(), name="pattern-detect")
 
+    @property
+    def backed_off(self) -> bool:
+        """True while NO_PATTERN replies have stretched the interval."""
+        return self.current_interval > self.trigger_interval
+
     # ---- internals ---------------------------------------------------
+
+    def _set_interval(self, value: float, reason: str) -> None:
+        if value == self.current_interval:
+            return
+        logger.info(
+            "pattern detection interval %.0fs -> %.0fs (%s)",
+            self.current_interval, value, reason,
+        )
+        self.current_interval = value
 
     async def _run_detection(self) -> None:
         async with self._eval_lock:
             self._since_last_eval = 0
-            self._last_eval_at = time.time()
+            self._last_eval_at = self._clock()
             prompt = _DETECTION_USER_PREFIX + "\n".join(
                 f"- {line}" for line in list(self._window)
             )
@@ -185,7 +219,13 @@ class PatternRecognizer:
                 return
             suggestion = self._parse(raw or "")
             if suggestion is None:
+                # NO_PATTERN (or an unusable reply): back off.
+                self._set_interval(
+                    min(self.current_interval * 2, self.max_trigger_interval),
+                    "no pattern",
+                )
                 return
+            self._set_interval(self.trigger_interval, "pattern found")
             tool_name = suggestion["tool_name"]
 
             # Guard 1: Skip if identical to the last suggestion
@@ -194,7 +234,7 @@ class PatternRecognizer:
                 return
 
             # Guard 2: Skip if this tool is in per-tool cooldown (recently suggested)
-            now = time.time()
+            now = self._clock()
             tool_cooldown_until = self._tool_cooldowns.get(tool_name, 0.0)
             if now < tool_cooldown_until:
                 logger.debug(

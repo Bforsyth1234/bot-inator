@@ -9,6 +9,7 @@ and emits a JSON line per activation on stdout for the parent to consume.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from AppKit import NSWorkspace, NSWorkspaceDidActivateApplicationNotification
@@ -31,6 +32,9 @@ class _Observer(NSObject):
             }
             sys.stdout.write(json.dumps(payload) + "\n")
             sys.stdout.flush()
+        except BrokenPipeError:
+            # Parent is gone; exit instead of lingering as an orphan.
+            os._exit(0)
         except Exception as exc:  # pragma: no cover - defensive
             sys.stderr.write(f"helper error: {exc!r}\n")
             sys.stderr.flush()
@@ -47,9 +51,12 @@ def main() -> None:
     sys.stderr.write("mac_app_helper: observer registered\n")
     sys.stderr.flush()
     run_loop = NSRunLoop.currentRunLoop()
-    # Run forever; the parent terminates us by closing stdin / sending SIGTERM.
-    while True:
-        run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(60.0))
+    parent = os.getppid()
+    # Run until the parent sends SIGTERM. The parent's supervisor restarts us
+    # on exit (#16), so make sure we never outlive it: wake every 5 s and exit
+    # if we have been re-parented (daemon killed hard without SIGTERM).
+    while os.getppid() == parent:
+        run_loop.runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(5.0))
 
 
 if __name__ == "__main__":

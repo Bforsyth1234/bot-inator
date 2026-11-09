@@ -577,6 +577,82 @@ def _find_similar_existing_tool(
     return None
 
 
+def _tool_description(tool_obj: Any) -> str:
+    """First line of a tool object's description or docstring."""
+    desc = (
+        getattr(tool_obj, "description", None)
+        or getattr(tool_obj, "__doc__", None)
+        or ""
+    )
+    return desc.strip().splitlines()[0].strip() if desc.strip() else ""
+
+
+def _file_tool_description(path: Path, tool_name: str) -> str:
+    """Docstring summary of ``tool_name`` in ``path``, parsed without importing."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return ""
+    funcs = [
+        n for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    funcs.sort(key=lambda n: n.name != tool_name)
+    for node in [*funcs, tree]:
+        doc = ast.get_docstring(node) or ""
+        if doc.strip():
+            return doc.strip().splitlines()[0].strip()
+    return ""
+
+
+def _existing_generated_tool(tool_name: str) -> Optional[dict[str, str]]:
+    """Return ``{"path", "description", "where"}`` when ``tool_name`` is taken.
+
+    A generated tool counts as existing when ``<tool_name>.py`` is in the
+    generated dir or the orchestrator has it loaded as a dynamic tool.
+    Built-ins are not generated tools; the similarity guard and the
+    loader's shadow check cover those.
+    """
+    if _GENERATED_DIR is None:
+        return None
+    path = _GENERATED_DIR / f"{tool_name}.py"
+    on_disk = path.is_file()
+    loaded = tool_name in getattr(_ORCHESTRATOR, "_dynamic_tool_names", set())
+    if not (on_disk or loaded):
+        return None
+    description = ""
+    for tool_obj in getattr(_ORCHESTRATOR, "tools", []):
+        if getattr(tool_obj, "name", getattr(tool_obj, "__name__", "")) == tool_name:
+            description = _tool_description(tool_obj)
+            break
+    if not description and on_disk:
+        description = _file_tool_description(path, tool_name)
+    where = " and ".join(
+        w for w, flag in (("on disk", on_disk), ("loaded", loaded)) if flag
+    )
+    return {"path": str(path), "description": description, "where": where}
+
+
+def _name_collision_error(tool_name: str, existing: dict[str, str]) -> dict[str, Any]:
+    """Error result for a ``generate_custom_tool`` name that is already taken."""
+    desc = existing["description"] or "(no description)"
+    return {
+        "status": "error",
+        "tool_name": tool_name,
+        "error": "name_collision",
+        "existing_tool": tool_name,
+        "existing_description": existing["description"],
+        "path": existing["path"],
+        "message": (
+            f"A generated tool named {tool_name!r} already exists "
+            f"({existing['where']}): {desc} Not drafting a replacement. "
+            f"If {tool_name!r} already does the job, call it directly. "
+            "Otherwise pick a different name for the new tool, or ask the "
+            f"user to delete {tool_name!r} in the Tool Manager first."
+        ),
+    }
+
+
 def _git_identity_args() -> list[str]:
     """Return ``-c user.name=... -c user.email=...`` for the nested commit.
 
@@ -599,35 +675,53 @@ def _git_identity_args() -> list[str]:
     return ["-c", f"user.name={name}", "-c", f"user.email={email}"]
 
 
+# Host config that must not reach the nested repo: a signing setup can
+# prompt (pinentry) or hang until the timeout, and a hooks path can run
+# arbitrary host hooks or veto the commit.
+_GIT_ISOLATION_ARGS: tuple[str, ...] = (
+    "-c", "commit.gpgsign=false",
+    "-c", "tag.gpgsign=false",
+    "-c", f"core.hooksPath={os.devnull}",
+)
+
+
+def _git_failure(step: str, result: "subprocess.CompletedProcess[str]") -> str:
+    """Summary for a failed git step, carrying git's own stderr/stdout."""
+    detail = (result.stderr or result.stdout or "").strip()
+    return f"git {step} failed (exit {result.returncode}): {detail}"[:240]
+
+
 def _git_commit(directory: Path, filename: str, message: str) -> tuple[bool, str]:
     """Best-effort nested-repo commit. Returns ``(ok, summary)``.
 
     Initialises the nested repo on first use. Never raises — git failures
-    are surfaced through the returned summary string so the meta-tool can
-    fold them into its own thought stream.
+    are surfaced through the returned summary string (including git's
+    stderr) so the meta-tool can fold them into its own thought stream.
+    Host commit signing and hooks are disabled for these commands.
     """
     if not directory.exists():
         return False, f"directory missing: {directory}"
     try:
-        if not (directory / ".git").exists():
-            subprocess.run(
-                ["git", "init", "--quiet"],
-                cwd=directory, check=True, capture_output=True,
-                text=True, timeout=10,
+        def _run(*args: str) -> "subprocess.CompletedProcess[str]":
+            return subprocess.run(
+                ["git", *_GIT_ISOLATION_ARGS, *args],
+                cwd=directory, capture_output=True, text=True, timeout=10,
+                stdin=subprocess.DEVNULL,
             )
+
+        if not (directory / ".git").exists():
+            result = _run("init", "--quiet")
+            if result.returncode != 0:
+                return False, _git_failure("init", result)
         ident = _git_identity_args()
-        subprocess.run(
-            ["git", *ident, "add", filename],
-            cwd=directory, check=True, capture_output=True,
-            text=True, timeout=10,
-        )
-        result = subprocess.run(
-            ["git", *ident, "commit", "-m", message],
-            cwd=directory, capture_output=True, text=True, timeout=10,
-        )
+        result = _run(*ident, "add", "--", filename)
+        if result.returncode != 0:
+            return False, _git_failure("add", result)
+        result = _run(*ident, "commit", "-m", message)
         if result.returncode != 0:
             return False, (result.stderr or result.stdout or "").strip()[:240]
-        return True, (result.stdout or "").strip().splitlines()[0][:240]
+        lines = (result.stdout or "").strip().splitlines()
+        return True, (lines[0] if lines else "committed")[:240]
     except FileNotFoundError:
         return False, "git executable not found on PATH"
     except subprocess.TimeoutExpired:
@@ -771,12 +865,21 @@ def generate_custom_tool(
     except ToolGenerationError as exc:
         return {"status": "error", "tool_name": tool_name, "error": str(exc)}
 
+    # Name-collision guard (todo #24): a generated tool with this exact
+    # name already exists (on disk or loaded). Reject before any drafting
+    # or approval work so the agent picks a new name or the user deletes
+    # the old tool first. Runs before the similarity guard, which would
+    # otherwise route an exact-name match to the old tool silently.
+    existing = _existing_generated_tool(tool_name)
+    if existing is not None:
+        return _name_collision_error(tool_name, existing)
+
     # Semantic-duplicate guard: if an existing tool's name/description
     # shares a significant keyword with the requested one (e.g. a pattern
     # recognizer proposal for ``auto_screenshot`` when ``screenshot_tool``
     # already exists), skip drafting and route the turn to the existing
-    # tool via the auto-rerun flag. The exact-name path below still
-    # handles identical names for the cheapest short-circuit.
+    # tool via the auto-rerun flag. Exact-name collisions are rejected
+    # earlier by the name-collision check.
     similar = _find_similar_existing_tool(tool_name, description)
     if similar:
         _mark_for_rerun(similar)
@@ -788,26 +891,6 @@ def generate_custom_tool(
                 f"The existing tool {similar!r} already covers this task. "
                 "Do NOT create a duplicate. Emit final_answer acknowledging "
                 f"this; the orchestrator will invoke {similar!r} "
-                "automatically."
-            ),
-        }
-
-    # Skip drafting if a tool with this name already lives on disk. The
-    # orchestrator hot-loads ``tools/generated/*.py`` at startup, so the
-    # tool is already callable. Flag an auto-rerun so the orchestrator
-    # transparently uses it against the original prompt.
-    existing_path = _GENERATED_DIR / f"{tool_name}.py"
-    if existing_path.exists():
-        loaded = sorted(getattr(_ORCHESTRATOR, "_dynamic_tool_names", set()))
-        _mark_for_rerun(tool_name)
-        return {
-            "status": "exists",
-            "tool_name": tool_name,
-            "path": str(existing_path),
-            "loaded_tools": loaded,
-            "message": (
-                f"Tool {tool_name!r} already exists. Emit final_answer "
-                "acknowledging this; the orchestrator will invoke it "
                 "automatically."
             ),
         }

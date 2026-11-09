@@ -60,16 +60,34 @@ OPEN_HELP_SYSTEM_PROMPT = (
 
 IDEA_JUDGE_SYSTEM_PROMPT = (
     "You review a proposed helper tool for a macOS user before it is "
-    "shown to them. Be strict: the user only wants ideas that are clearly "
-    "useful. Score the idea from 0 to 10:\n"
-    "- 9-10: removes a step the events show the user doing or about to do;\n"
-    "- 6-8: plausibly useful but not shown by the events;\n"
-    "- 0-5: generic, unrelated to the events, already trivial in macOS, "
+    "shown to them. Most proposals should be rejected: the user only "
+    "wants to see an idea when the events prove they need it.\n\n"
+    "First name the manual step the tool removes. Then check the events:\n"
+    "- Do the events show the user doing that step (renaming, moving, "
+    "converting, opening the same kind of thing), or clearly setting up "
+    "to do it next?\n"
+    "- Is it repeated or clearly intentional, or did files or apps merely "
+    "appear?\n"
+    "Files being created or downloaded only show that the files exist, not "
+    "what the user does with them. A few files with similar names, "
+    "especially test, sample, untitled or temporary files, are not "
+    "evidence of a need: an idea built only from them scores at most 4. "
+    "Switching between apps is not evidence of a need either.\n\n"
+    "Score the idea from 0 to 10:\n"
+    "- 9-10: the events show the user doing this step by hand, more than "
+    "once or clearly on purpose, and the tool removes it;\n"
+    "- 7-8: the events show the user about to do this step (for example "
+    "they opened the app or folder the step needs right after the files "
+    "appeared);\n"
+    "- 4-6: plausible, but the events show only files or apps, not the "
+    "step;\n"
+    "- 0-3: generic, unrelated to the events, already one click in macOS, "
     "or not doable with the Python standard library and macOS commands.\n"
     "Ideas similar to ones the user rejected score low. Ideas similar to "
-    "ones they approved may score higher.\n\n"
+    "ones they approved may score higher. When in doubt, score lower.\n\n"
     "Reply with exactly one JSON object and nothing else:\n"
-    '{"score": <integer 0-10>, "reason": "<one sentence>"}'
+    '{"score": <integer 0-10>, "reason": "<one sentence naming the step '
+    'and the event that shows it, or what is missing>"}'
 )
 
 _SNAKE_RE = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
@@ -163,21 +181,31 @@ class IdeaFeedback:
         return "\n".join(lines)
 
 
-def parse_score(raw: str) -> Optional[int]:
-    """Pull an integer 0-10 score out of a judge reply; ``None`` if absent."""
+def parse_judge(raw: str) -> tuple[Optional[int], str]:
+    """Pull ``(score 0-10, reason)`` out of a judge reply.
+
+    ``score`` is ``None`` when the reply has no score; ``reason`` is ``""``
+    when it has none.
+    """
     text = (raw or "").strip()
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
-            score = json.loads(match.group(0)).get("score")
+            data = json.loads(match.group(0))
+            score = data.get("score")
             if isinstance(score, (int, float)):
-                return max(0, min(10, int(score)))
+                return max(0, min(10, int(score))), str(data.get("reason") or "")[:300]
         except (ValueError, AttributeError):
             pass
     match = re.search(r'"?score"?\s*[:=]\s*(\d{1,2})', text, re.IGNORECASE)
     if match:
-        return max(0, min(10, int(match.group(1))))
-    return None
+        return max(0, min(10, int(match.group(1)))), ""
+    return None, ""
+
+
+def parse_score(raw: str) -> Optional[int]:
+    """Pull an integer 0-10 score out of a judge reply; ``None`` if absent."""
+    return parse_judge(raw)[0]
 
 
 def passes_checks(idea: dict[str, Any]) -> bool:
@@ -188,9 +216,46 @@ def passes_checks(idea: dict[str, Any]) -> bool:
     return bool(_SNAKE_RE.match(name)) and len(logic) >= _MIN_LOGIC_CHARS and bool(desc)
 
 
+# Words in the events text that say nothing about what the user is doing:
+# the prompt header, event verbs, path scaffolding and metadata keys.
+_EVENT_STOPWORDS = frozenset(
+    "recent events oldest first created modified deleted renamed moved "
+    "switched imessage received users volumes private var tmp true false "
+    "none null bundle pid com apple sender text rowid action path".split()
+) | {Path.home().name.lower()}
+
+
+def _ground_tokens(text: str, stop: frozenset[str] = frozenset()) -> set[str]:
+    """Content words of ``text`` not in ``stop``, plural-folded (``invoices`` -> ``invoice``)."""
+    out: set[str] = set()
+    for word in _tokens(text):
+        if len(word) < 3 or word.isdigit() or word in stop:
+            continue
+        out.add(word[:-1] if len(word) > 4 and word.endswith("s") else word)
+    return out
+
+
+def grounded_in_events(idea: dict[str, Any], events_text: str) -> bool:
+    """Deterministic pre-judge check: the idea names something in the window.
+
+    True when the idea's name, description or logic shares at least one
+    content word with the events: an app, a file-name word, an extension
+    or a folder. An idea that shares none is unrelated to what the user
+    is doing, which the judge rubric already scores 0-3, so dropping it
+    here only saves a model call.
+    """
+    seen = _ground_tokens(events_text, _EVENT_STOPWORDS)
+    idea_words = _ground_tokens(
+        " ".join(str(idea.get(k) or "") for k in ("tool_name", "description", "expected_logic"))
+    )
+    return bool(seen & idea_words)
+
+
 def _describe(event: ContextEvent) -> str:
     meta = event.metadata or {}
     if event.event_type == "file":
+        if meta.get("from"):
+            return f"file {meta.get('action', '?')}: {meta['from']} -> {meta.get('path', '?')}"
         return f"file {meta.get('action', '?')}: {meta.get('path', '?')}"
     if event.event_type == "imessage_received":
         return f"iMessage received: {str(meta.get('text') or '')[:200]!r}"
@@ -235,6 +300,9 @@ class OpenHelpSuggester:
         self._next_ask_at = 0.0
         self._recent_ideas: dict[str, float] = {}
         self._task: Optional[asyncio.Task[None]] = None
+        # Outcome of the latest filter run (stage, score, reason); read by
+        # :func:`evaluate_windows` and handy when debugging.
+        self.last_verdict: dict[str, Any] = {}
 
     # ---- generate ------------------------------------------------------
 
@@ -281,12 +349,19 @@ class OpenHelpSuggester:
     async def _accept(self, idea: dict[str, Any], events_text: str) -> bool:
         name = str(idea.get("tool_name") or "")
         desc = str(idea.get("description") or "")
+        self.last_verdict = {"tool_name": name, "stage": "checks", "score": None, "reason": ""}
         if not passes_checks(idea):
             logger.info("open_help dropped malformed idea %r", name)
             return False
+        if not grounded_in_events(idea, events_text):
+            self.last_verdict["stage"] = "grounding"
+            logger.info("open_help dropped %r: names nothing in the event window", name)
+            return False
         if time.time() < self._recent_ideas.get(name, 0.0):
+            self.last_verdict["stage"] = "cooldown"
             return False
         if self.feedback.resembles_rejected(name, desc):
+            self.last_verdict["stage"] = "feedback"
             logger.info("open_help dropped %r: resembles a rejected idea", name)
             return False
         history = self.feedback.summary()
@@ -296,15 +371,26 @@ class OpenHelpSuggester:
             f"Expected logic: {str(idea.get('expected_logic'))[:800]}"
             + (f"\n\nThe user's past verdicts:\n{history}" if history else "")
         )
+        self.last_verdict["stage"] = "judge"
         try:
-            score = parse_score(await self._judge(judge_prompt))
+            score, reason = parse_judge(await self._judge(judge_prompt))
         except Exception:
             logger.exception("open_help judge failed")
             return False
+        self.last_verdict.update(score=score, reason=reason)
         if score is None or score < self.min_score:
-            logger.info("open_help dropped %r: judge score %s", name, score)
+            logger.info(
+                "open_help dropped %r: judge score %s (min %s): %s",
+                name, score, self.min_score, reason,
+            )
             return False
+        logger.info(
+            "open_help passed %r: judge score %s (min %s): %s",
+            name, score, self.min_score, reason,
+        )
         idea["judge_score"] = score
+        idea["judge_reason"] = reason
+        self.last_verdict["stage"] = "passed"
         return True
 
     # ---- learn ---------------------------------------------------------
@@ -314,6 +400,126 @@ class OpenHelpSuggester:
         self.feedback.record(tool_name, description, approved)
 
 
+# ---- evaluation (todo #36) -------------------------------------------
+#
+# A fixed set of event windows, each with the idea a generator produced
+# for it and the verdict the filter should reach, lives in
+# ``tests/fixtures/open_help_windows.json``. :func:`evaluate_windows` runs
+# them through the real filter; the unit tests use a fake judge, and
+# ``python -m ai.open_help`` points it at the configured engine to measure
+# the pass rate (a live check: it makes real model calls).
+
+DEFAULT_WINDOWS_PATH = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "open_help_windows.json"
+
+
+def load_windows(path: Optional[Path] = None) -> list[dict[str, Any]]:
+    """Read the evaluation windows (a JSON list of cases)."""
+    return json.loads(Path(path or DEFAULT_WINDOWS_PATH).read_text())
+
+
+def _fixture_event(raw: dict[str, Any]) -> ContextEvent:
+    return ContextEvent(
+        event_type=str(raw["event_type"]),
+        app_name=raw.get("app_name"),
+        window_title=raw.get("window_title"),
+        metadata=dict(raw.get("metadata") or {}),
+    )
+
+
+async def evaluate_windows(
+    cases: list[dict[str, Any]],
+    *,
+    judge: Evaluate,
+    evaluate: Optional[Evaluate] = None,
+    min_score: int = 7,
+) -> list[dict[str, Any]]:
+    """Run each case's window through the open-help filter.
+
+    By default the case's recorded ``idea`` stands in for the generator,
+    so only the filter (checks, grounding, judge) is measured. Pass
+    ``evaluate`` to generate ideas with a real model as well. Feedback is
+    in memory only: the user's ``idea_feedback.json`` is never read.
+    """
+    results = []
+    for case in cases:
+        events = [_fixture_event(e) for e in case["events"]]
+        published: list[ContextEvent] = []
+
+        async def fixed_idea(_: str, idea=case.get("idea")) -> str:
+            return json.dumps(idea) if idea else NO_SUGGESTION
+
+        async def publish(ev: ContextEvent) -> None:
+            published.append(ev)
+
+        suggester = OpenHelpSuggester(
+            event_bus=EventBus(), evaluate=evaluate or fixed_idea, judge=judge,
+            feedback=IdeaFeedback(), interval_seconds=0.0,
+            window_size=max(20, len(events)), min_events=len(events),
+            min_score=min_score, publish=publish,
+        )
+        for event in events:
+            task = suggester.observe(event)
+            if task:
+                await task
+        verdict = suggester.last_verdict or {"stage": "no_idea", "score": None, "reason": ""}
+        got = "pass" if published else "drop"
+        results.append({
+            "id": case["id"],
+            "expected": case["expected"],
+            "got": got,
+            "ok": got == case["expected"],
+            "tool_name": verdict.get("tool_name"),
+            "stage": verdict.get("stage"),
+            "score": verdict.get("score"),
+            "reason": verdict.get("reason"),
+        })
+    return results
+
+
+def summarize(results: list[dict[str, Any]]) -> str:
+    """One line per case plus pass rate and agreement with the expected verdicts."""
+    lines = [
+        f"{'OK ' if r['ok'] else 'BAD'} {r['id']}: expected {r['expected']}, got "
+        f"{r['got']} ({r['stage']}, score {r['score']}) {r['reason'] or ''}".rstrip()
+        for r in results
+    ]
+    passed = sum(r["got"] == "pass" for r in results)
+    agree = sum(r["ok"] for r in results)
+    n = len(results) or 1
+    lines.append(
+        f"pass rate {passed}/{len(results)} ({100 * passed // n}%); "
+        f"matches expected {agree}/{len(results)}"
+    )
+    return "\n".join(lines)
+
+
+def _main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - live check
+    import argparse
+
+    from ai.pattern_recognizer import make_detection_evaluator
+    from config import settings
+    from main import _build_engines, _select_detection_engine
+
+    parser = argparse.ArgumentParser(description="Measure the open-help judge on recorded windows.")
+    parser.add_argument("path", nargs="?", type=Path, default=DEFAULT_WINDOWS_PATH)
+    parser.add_argument("--generate", action="store_true",
+                        help="also generate ideas with the model instead of the recorded ones")
+    parser.add_argument("--min-score", type=int, default=settings.open_help_min_score)
+    args = parser.parse_args(argv)
+    engine = _select_detection_engine(settings.pattern_detection_engine, *_build_engines())
+    judge = make_detection_evaluator(engine, max_tokens=120, system_prompt=IDEA_JUDGE_SYSTEM_PROMPT)
+    evaluate = (
+        make_detection_evaluator(engine, system_prompt=OPEN_HELP_SYSTEM_PROMPT)
+        if args.generate else None
+    )
+    results = asyncio.run(evaluate_windows(
+        load_windows(args.path), judge=judge, evaluate=evaluate, min_score=args.min_score,
+    ))
+    print(f"provider={settings.provider} model={getattr(engine, 'model_name', '?')}")
+    print(summarize(results))
+    return 0
+
+
 __all__ = [
     "GUIDING_QUESTION",
     "IDEA_JUDGE_SYSTEM_PROMPT",
@@ -321,6 +527,15 @@ __all__ = [
     "OPEN_HELP_SYSTEM_PROMPT",
     "IdeaFeedback",
     "OpenHelpSuggester",
+    "evaluate_windows",
+    "grounded_in_events",
+    "load_windows",
+    "parse_judge",
     "parse_score",
     "passes_checks",
+    "summarize",
 ]
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(_main())

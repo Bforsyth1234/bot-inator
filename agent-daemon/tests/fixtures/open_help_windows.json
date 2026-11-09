@@ -1,0 +1,417 @@
+[
+ {
+  "id": "live_invoice_template",
+  "expected": "drop",
+  "note": "2026-11-09 live run: three throwaway invoice .txt files appeared; nothing shows the user writing invoices.",
+  "events": [
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_invoice_1.txt",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_invoice_2.txt",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_invoice_3.txt",
+     "action": "created"
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "create_invoice_template",
+   "description": "Create a new invoice text file from a template with the next invoice number.",
+   "expected_logic": "Input: folder (str, default ~/Downloads), client (str). Find the highest N in invoice_N.txt files, write invoice_{N+1}.txt with a header, client name, date and empty line items. Return the new path. If the folder is missing, return an error."
+  }
+ },
+ {
+  "id": "live_invoice_number_generator",
+  "expected": "drop",
+  "note": "2026-11-09 live run, same window as live_invoice_template.",
+  "events": [
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_invoice_1.txt",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_invoice_2.txt",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_invoice_3.txt",
+     "action": "created"
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "invoice_number_generator",
+   "description": "Return the next unused invoice number based on existing invoice files.",
+   "expected_logic": "Input: folder (str, default ~/Downloads), prefix (str, default 'test_invoice_'). List files matching prefix + digits + .txt, take the highest number, return it plus one. If none exist return 1."
+  }
+ },
+ {
+  "id": "live_csv_merge",
+  "expected": "drop",
+  "note": "2026-11-09 live run: three test receipt .csv files appeared; nothing shows the user combining them.",
+  "events": [
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_receipt_1.csv",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_receipt_2.csv",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_receipt_3.csv",
+     "action": "created"
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "csv_merge",
+   "description": "Merge several receipt CSV files into one CSV with a single header row.",
+   "expected_logic": "Input: paths (list[str]) or folder (str) plus pattern (str, default '*.csv'), output (str). Read each CSV with the csv module, check the headers match, write all rows to output under one header. dry_run defaults to True and only reports the row counts."
+  }
+ },
+ {
+  "id": "live_csv_diff",
+  "expected": "drop",
+  "note": "2026-11-09 live run, same window as live_csv_merge (csv_diff was approved and installed in that run).",
+  "events": [
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_receipt_1.csv",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_receipt_2.csv",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/test_receipt_3.csv",
+     "action": "created"
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "csv_diff",
+   "description": "Show rows that differ between two receipt CSV files.",
+   "expected_logic": "Input: a (str), b (str) paths to CSV files. Read both with the csv module, key rows by their full contents, and return rows only in a, rows only in b, and counts. If either file is missing, return an error naming it."
+  }
+ },
+ {
+  "id": "live_recent_apps",
+  "expected": "drop",
+  "note": "2026-11-09 live run: ordinary app switching; the Dock and Cmd-Tab already show recent apps.",
+  "events": [
+   {
+    "event_type": "app_activated",
+    "app_name": "Finder",
+    "metadata": {
+     "bundle_id": "com.apple.finder",
+     "pid": 100
+    },
+    "window_title": "Downloads"
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Safari",
+    "metadata": {
+     "bundle_id": "com.apple.Safari",
+     "pid": 100
+    },
+    "window_title": "GitHub"
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Terminal",
+    "metadata": {
+     "bundle_id": "com.apple.Terminal",
+     "pid": 100
+    },
+    "window_title": "zsh"
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Finder",
+    "metadata": {
+     "bundle_id": "com.apple.finder",
+     "pid": 100
+    },
+    "window_title": "Downloads"
+   }
+  ],
+  "idea": {
+   "tool_name": "recent_apps",
+   "description": "List the apps the user switched between recently, such as Finder, Safari and Terminal.",
+   "expected_logic": "Input: limit (int, default 10). Read the agent's recent app_activated history and return app names with the time each was last frontmost, newest first. If there is no history, return an empty list."
+  }
+ },
+ {
+  "id": "unrelated_water_reminder",
+  "expected": "drop",
+  "note": "Generic idea that names nothing in the window; the deterministic grounding check should drop it before the judge.",
+  "events": [
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/dev/shop/src/cart.py",
+     "action": "modified"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/dev/shop/src/cart_test.py",
+     "action": "modified"
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Code",
+    "metadata": {
+     "bundle_id": "com.microsoft.VSCode",
+     "pid": 100
+    },
+    "window_title": "cart.py \u2014 shop"
+   }
+  ],
+  "idea": {
+   "tool_name": "hydration_reminder",
+   "description": "Remind me every hour to drink a glass of water.",
+   "expected_logic": "Input: interval_minutes (int, default 60). Schedule a macOS notification with osascript 'display notification' every interval until stopped. Return the schedule. If interval is under 5, return an error."
+  }
+ },
+ {
+  "id": "good_screenshot_rename",
+  "expected": "pass",
+  "note": "User takes screenshots and renames each one by hand to a dated name, three times.",
+  "events": [
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Desktop/Screenshot 2026-11-09 at 10.02.11.png",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Desktop/2026-11-09 checkout bug.png",
+     "action": "renamed",
+     "from": "/Users/me/Desktop/Screenshot 2026-11-09 at 10.02.11.png"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Desktop/Screenshot 2026-11-09 at 10.05.40.png",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Desktop/2026-11-09 login error.png",
+     "action": "renamed",
+     "from": "/Users/me/Desktop/Screenshot 2026-11-09 at 10.05.40.png"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Desktop/Screenshot 2026-11-09 at 10.09.03.png",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Desktop/2026-11-09 cart total.png",
+     "action": "renamed",
+     "from": "/Users/me/Desktop/Screenshot 2026-11-09 at 10.09.03.png"
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "rename_screenshots_by_date",
+   "description": "Rename new Desktop screenshots to a dated name with a short label.",
+   "expected_logic": "Input: path (str) to a screenshot, label (str). Rename 'Screenshot YYYY-MM-DD at HH.MM.SS.png' to 'YYYY-MM-DD <label>.png' in the same folder, adding ' 2' if the name is taken. dry_run defaults to True and only returns the new name. If the file is missing, return an error."
+  }
+ },
+ {
+  "id": "good_heic_to_jpeg",
+  "expected": "pass",
+  "note": "User converts AirDropped HEIC photos to JPEG in Preview one at a time, three times.",
+  "events": [
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/IMG_4101.HEIC",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Preview",
+    "metadata": {
+     "bundle_id": "com.apple.Preview",
+     "pid": 100
+    },
+    "window_title": "IMG_4101.HEIC"
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/IMG_4101.jpg",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/IMG_4102.HEIC",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Preview",
+    "metadata": {
+     "bundle_id": "com.apple.Preview",
+     "pid": 100
+    },
+    "window_title": "IMG_4102.HEIC"
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/IMG_4102.jpg",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/IMG_4103.HEIC",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Preview",
+    "metadata": {
+     "bundle_id": "com.apple.Preview",
+     "pid": 100
+    },
+    "window_title": "IMG_4103.HEIC"
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/IMG_4103.jpg",
+     "action": "created"
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "convert_heic_to_jpeg",
+   "description": "Convert HEIC photos to JPEG next to the original, without opening Preview.",
+   "expected_logic": "Input: paths (list[str]) of .HEIC files. For each, run 'sips -s format jpeg <in> --out <same name>.jpg' unless the .jpg exists. Return the written paths. If a path is missing or not HEIC, skip it and report it."
+  }
+ },
+ {
+  "id": "good_file_bank_statements",
+  "expected": "pass",
+  "note": "User downloads a bank statement CSV, opens it in Numbers, then moves it into a dated Finance folder; twice.",
+  "events": [
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/statement_2026-09.csv",
+     "action": "renamed",
+     "from": "/Users/me/Downloads/statement_2026-09.csv.crdownload"
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Numbers",
+    "metadata": {
+     "bundle_id": "com.apple.iWork.Numbers",
+     "pid": 100
+    },
+    "window_title": "statement_2026-09.csv"
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Documents/Finance/2026/statement_2026-09.csv",
+     "action": "renamed",
+     "from": "/Users/me/Downloads/statement_2026-09.csv"
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/statement_2026-10.csv",
+     "action": "renamed",
+     "from": "/Users/me/Downloads/statement_2026-10.csv.crdownload"
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Numbers",
+    "metadata": {
+     "bundle_id": "com.apple.iWork.Numbers",
+     "pid": 100
+    },
+    "window_title": "statement_2026-10.csv"
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Documents/Finance/2026/statement_2026-10.csv",
+     "action": "renamed",
+     "from": "/Users/me/Downloads/statement_2026-10.csv"
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "file_bank_statement",
+   "description": "Move a downloaded bank statement CSV into Documents/Finance/<year>.",
+   "expected_logic": "Input: path (str) to a statement_YYYY-MM.csv file. Read the year from the name, create ~/Documents/Finance/<year> if needed, and move the file there unless a file with that name exists. dry_run defaults to True and only returns the destination. If the name has no year, return an error."
+  }
+ }
+]
