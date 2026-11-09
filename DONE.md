@@ -843,3 +843,38 @@ Wave-close run: full suite 523 passed, 3 runs in a row (~74 s); Swift
 type-check clean. #22 (sandboxed generated tools) and #51 (idea-text scrub)
 built and wait as `[~] live`. New #53: `open`/`osascript` inside the sandbox
 can reach other apps; needs a decision.
+
+## Live checks — 2026-11-09
+
+#37 — Clear test entries from idea_feedback.json [x]
+Wave: — (live checks) · Agent: user · Added: 2026-11-09 · Source: assistant (live run)
+Ask: The 2026-11-09 test runs saved approvals for test ideas
+(`create_invoice_template`, `invoice_number_generator`, `file_watcher`,
+`app_switcher`, `recent_apps`, `recent_apps_list` ×4) in
+`~/.bot-inator/idea_feedback.json`. The judge sees them as "the user's
+past verdicts" and will favour similar ideas.
+Approach: remove those entries (or the file) while the daemon is stopped.
+Verify: the file holds no entry with an `at` timestamp from the test runs.
+Results (live, 2026-11-09): backed up to
+`~/.bot-inator/idea_feedback.json.bak-2026-11-09` (0600), then removed only
+the 16 entries from the two runner test runs (10:30–11:00). The 30 later
+entries are the user's real verdicts and were kept (several are 4–5
+identical approvals in one minute: the #48 stacked-approval bug).
+Deviations: kept post-11:00 entries the item listed (app_switcher,
+recent_apps_list): they came from the user's own daemon, not the test runs.
+
+---
+
+#54 — Judge replies came back empty on Groq reasoning models [x]
+Wave: live checks (runner) · Added: 2026-11-09 · Source: assistant (#36 live check)
+Ask: Every judge evaluator (open-help, friction, setup scan) used
+`max_tokens=120`. GPT-OSS on Groq spends tokens on hidden reasoning first, so
+the reply was `''` and every judged idea was dropped as unparseable: under
+Groq, those sources never surfaced anything.
+Fix: `JUDGE_MAX_TOKENS = 600` in `ai/open_help.py`, used by all three judges
+in `main.py` and the `python -m ai.open_help` CLI. The same call that
+returned `''` at 120 returned `{"score": 10, …}` at 600.
+Results: `tests/test_judge_budget.py` (budget ≥400; no judge literal under
+400 in main.py / open_help.py); non-vacuity: old code → the test fails.
+Judge eval after the fix: 8/9 match (was 7/9, by accident). Full suite green.
+Deviations: none.

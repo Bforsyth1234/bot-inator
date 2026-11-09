@@ -47,6 +47,11 @@ logger = logging.getLogger(__name__)
 
 GUIDING_QUESTION = "How could I possibly help the user here?"
 
+# Token budget for judge replies. Reasoning models (GPT-OSS on Groq) spend
+# tokens on hidden reasoning first: at 120 the reply came back empty and
+# every judged idea was dropped as unparseable (todo #54, live check).
+JUDGE_MAX_TOKENS = 600
+
 OPEN_HELP_SYSTEM_PROMPT = (
     "You are a proactive macOS assistant watching recent activity on the "
     f"user's Mac. Ask yourself: {GUIDING_QUESTION}\n\n"
@@ -513,7 +518,7 @@ def _main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - live c
     parser.add_argument("--min-score", type=int, default=settings.open_help_min_score)
     args = parser.parse_args(argv)
     engine = _select_detection_engine(settings.pattern_detection_engine, *_build_engines())
-    judge = make_detection_evaluator(engine, max_tokens=120, system_prompt=IDEA_JUDGE_SYSTEM_PROMPT)
+    judge = make_detection_evaluator(engine, max_tokens=JUDGE_MAX_TOKENS, system_prompt=IDEA_JUDGE_SYSTEM_PROMPT)
     evaluate = (
         make_detection_evaluator(engine, system_prompt=OPEN_HELP_SYSTEM_PROMPT)
         if args.generate else None

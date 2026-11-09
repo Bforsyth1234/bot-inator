@@ -47,7 +47,7 @@ checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
 ============================================================ -->
 
-Next ID: #54
+Next ID: #55
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -163,6 +163,8 @@ to see.
 - #48 — Approval wrapping stacked on every agent rebuild · 2026-11-09 · [DONE.md](DONE.md)
 - #49 — Drafting prompt printed wrong import paths for built-ins · 2026-11-09 · [DONE.md](DONE.md)
 - #50 — Flaky restart test: stop() overwrote the last exit code · 2026-11-09 · [DONE.md](DONE.md)
+- #37 — Clear test entries from idea_feedback.json · 2026-11-09 · [DONE.md](DONE.md)
+- #54 — Judge replies came back empty on Groq reasoning models · 2026-11-09 · [DONE.md](DONE.md)
 
 ---
 
@@ -259,21 +261,14 @@ Results (wave 2, 2026-11-09):
   run's, 3 pass) and `python -m ai.open_help` to score them on a real engine.
   `tests/test_open_help.py` 25 tests; non-vacuity: 4 fail when reverted.
 Deviations: none.
+Live (2026-11-09, Groq gpt-oss-120b): first run 1/9 pass, 7/9 match, but
+almost every score was `None`: the 120-token judge budget came back empty on
+a reasoning model (#54). After #54: pass rate 4/9, matches expected 8/9.
+The one miss: `live_invoice_template` passes at 9 (three sequential
+`test_invoice_N.txt` files read as intentional). Target was 3/9 and 9/9.
 
 ---
 
-#37 — Clear test entries from idea_feedback.json [ ]
-Wave: — (live checks) · Agent: user · Added: 2026-11-09 · Source: assistant (live run)
-Ask: The 2026-11-09 test runs saved approvals for test ideas
-(`create_invoice_template`, `invoice_number_generator`, `file_watcher`,
-`app_switcher`, `recent_apps`, `recent_apps_list` ×4) in
-`~/.bot-inator/idea_feedback.json`. The judge sees them as "the user's
-past verdicts" and will favour similar ideas.
-Approach: remove those entries (or the file) while the daemon is stopped.
-Verify: the file holds no entry with an `at` timestamp from the test runs.
-Deviations:
-
----
 
 #38 — Repeated approval prompts after generate_custom_tool fails [~] live
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: assistant (live run)
@@ -1221,6 +1216,12 @@ Results (wave 6, 2026-11-09):
   clients send `auth_header()`. Non-vacuity: no Origin check → 5 fail, no
   token check → 12, no `/health` exemption → 1, no middleware → 16.
 Deviations: `scripts/chat_smoke.py` now sends the token (outside the slot).
+Live (2026-11-09, partial): the rebuilt app connected with the token;
+`~/.bot-inator/token` is `-rw-------`; no token → 401 (HTTP) / 403 (WS);
+Origin `https://evil.example` → 403 on `/api/tools`, `/api/restart` and the
+WS; `/health` open (200); token without Origin accepted. After a daemon
+restart the app reconnected by itself. Still to do: move the token away →
+Offline hint; a real browser console attempt.
 
 ---
 

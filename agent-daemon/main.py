@@ -43,6 +43,7 @@ from ai.idea_sources import (
 from ai.open_help import (
     IDEA_JUDGE_SYSTEM_PROMPT,
     OPEN_HELP_SYSTEM_PROMPT,
+    JUDGE_MAX_TOKENS,
     IdeaFeedback,
     OpenHelpSuggester,
 )
@@ -287,7 +288,7 @@ async def lifespan(app: FastAPI):
                 detection_engine, system_prompt=OPEN_HELP_SYSTEM_PROMPT,
             ),
             judge=make_detection_evaluator(
-                detection_engine, max_tokens=120,
+                detection_engine, max_tokens=JUDGE_MAX_TOKENS,
                 system_prompt=IDEA_JUDGE_SYSTEM_PROMPT,
             ),
             feedback=idea_feedback,
@@ -301,7 +302,7 @@ async def lifespan(app: FastAPI):
             detection_engine, system_prompt=FRICTION_SYSTEM_PROMPT,
         ),
         judge=make_detection_evaluator(
-            detection_engine, max_tokens=120,
+            detection_engine, max_tokens=JUDGE_MAX_TOKENS,
             system_prompt=FRICTION_JUDGE_SYSTEM_PROMPT,
         ),
         feedback=idea_feedback,
@@ -340,7 +341,7 @@ async def lifespan(app: FastAPI):
                 detection_engine, system_prompt=SETUP_SCAN_SYSTEM_PROMPT,
             ),
             judge=make_detection_evaluator(
-                detection_engine, max_tokens=120,
+                detection_engine, max_tokens=JUDGE_MAX_TOKENS,
                 system_prompt=SETUP_JUDGE_SYSTEM_PROMPT,
             ),
             calendar_reader=_calendar_reader_if_granted,
