@@ -39,6 +39,13 @@ cp .env.example .env
 .venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
+If the venv was made with `uv` (it has no `pip`), install with
+`uv pip install --python .venv/bin/python -r requirements.txt` instead.
+Vector memory search needs `sqlite-vec` (in requirements). If the log says
+"Vector memory search disabled (sqlite3 built without load_extension
+support)", also install `pysqlite3-binary`. Without either, recall falls
+back to the most recent memories.
+
 With the default local provider, the first start downloads three MLX models
 from Hugging Face (several GB) and can take a few minutes.
 

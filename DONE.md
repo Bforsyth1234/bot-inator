@@ -769,3 +769,12 @@ Results (wave 1, 2026-11-09):
   tool object; shared-module paths are right. Non-vacuity: with the old
   code both tests fail.
 Deviations: none.
+
+## Wave 2 — closed 2026-11-09
+
+Wave-close run: full suite 287 passed in 11 of 12 runs (1 unidentified
+failure, tracked as #50). No Swift changes. All eight items (#14, #16,
+#17, #20, #21, #24, #25, #36) are built and wait in todo.md as `[~] live`.
+Runner wiring: `GET /health` reports the app-listener status; the WS
+`clear_memory` command now deletes memories; tests use a temp memory DB
+(`AGENT_MEMORY_DB`); README gains the uv / sqlite-vec setup note.

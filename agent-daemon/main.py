@@ -145,7 +145,10 @@ async def lifespan(app: FastAPI):
     bus.bind_loop(asyncio.get_running_loop())
 
     engine, analysis_engine, drafting_engine = _build_engines()
-    memory = Memory()
+    # ``AGENT_MEMORY_DB`` lets tests keep the real ~/.bot-inator/memory.db
+    # untouched (tests/conftest.py sets it to a temp file).
+    memory_db = os.environ.get("AGENT_MEMORY_DB")
+    memory = Memory(db_path=memory_db) if memory_db else Memory()
     set_default_memory(memory)
 
     # Eager-load the engines sequentially. Parallel ``asyncio.gather``
@@ -182,11 +185,13 @@ async def lifespan(app: FastAPI):
 
     listeners: list[Any] = []
     listener_names: list[str] = []
+    app.state.mac_listener = None
     if _listeners_enabled():
         try:
             mac = MacAppListener(bus)
             mac.start()
             listeners.append(mac)
+            app.state.mac_listener = mac
             listener_names.append("nsworkspace")
         except Exception:
             logger.exception("Failed to start MacAppListener")
@@ -306,8 +311,12 @@ def _next_seq() -> int:
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.1.0"}
+async def health() -> dict[str, Any]:
+    body: dict[str, Any] = {"status": "ok", "version": "0.1.0"}
+    mac = getattr(app.state, "mac_listener", None)
+    if mac is not None:
+        body["listeners"] = {"nsworkspace": mac.status()}
+    return body
 
 
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
@@ -578,6 +587,7 @@ async def _handle_command(app: FastAPI, msg: Command) -> None:
                 logger.exception("Failed to pause listener")
         app.state.listeners = []
         app.state.listener_names = []
+        app.state.mac_listener = None
     elif action == "resume_listeners":
         logger.info("resume_listeners requested; no-op in Phase 1")
     elif action == "reload_model":
@@ -587,7 +597,8 @@ async def _handle_command(app: FastAPI, msg: Command) -> None:
             logger.exception("Failed to reload model")
     elif action == "clear_memory":
         try:
-            app.state.memory.close()
+            removed = await asyncio.to_thread(app.state.memory.clear_memory)
+            logger.info("clear_memory removed %s memories", removed)
         except Exception:
             logger.exception("Failed to clear memory")
     elif action == "reload_dynamic_tools":

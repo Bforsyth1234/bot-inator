@@ -146,3 +146,80 @@ def test_missing_directory_is_non_fatal(git_home, tmp_path):
     ok, summary = mtg._git_commit(tmp_path / "nope", "a.py", "add a")
     assert ok is False
     assert "directory missing" in summary
+
+
+# ---- todo #24 / FROM WAVE 1 #30: _git_commit hardening -------------------
+
+
+def test_add_failure_returns_git_stderr(git_home, repo_dir):
+    # ``git add`` of a missing path fails; the summary must carry git's
+    # own message, not the generic CalledProcessError text.
+    ok, summary = mtg._git_commit(repo_dir, "missing.py", "add missing")
+
+    assert ok is False
+    assert summary.startswith("git add failed")
+    assert "pathspec" in summary
+    assert "returned non-zero exit status" not in summary
+
+
+def test_init_failure_returns_git_stderr(git_home, repo_dir, monkeypatch):
+    # Simulate ``git init`` failing (exit 128 with a fatal on stderr).
+    real_run = mtg.subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if "init" in cmd:
+            return mtg.subprocess.CompletedProcess(
+                cmd, 128, stdout="", stderr="fatal: cannot init here",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(mtg.subprocess, "run", fake_run)
+    _write(repo_dir, "a.py", "a = 1\n")
+
+    ok, summary = mtg._git_commit(repo_dir, "a.py", "add a")
+
+    assert ok is False
+    assert summary == "git init failed (exit 128): fatal: cannot init here"
+
+
+def test_empty_commit_stdout_is_not_an_index_error(git_home, repo_dir, monkeypatch):
+    real_run = mtg.subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        result = real_run(cmd, *args, **kwargs)
+        if "commit" in cmd:
+            result.stdout = ""
+        return result
+
+    monkeypatch.setattr(mtg.subprocess, "run", fake_run)
+    _write(repo_dir, "a.py", "a = 1\n")
+
+    ok, summary = mtg._git_commit(repo_dir, "a.py", "add a")
+
+    assert (ok, summary) == (True, "committed")
+    assert _git(repo_dir, "rev-list", "--count", "HEAD") == "1"
+
+
+def test_host_signing_and_hooks_do_not_block_commit(git_home, repo_dir, tmp_path):
+    # A host that signs every commit with a broken signer and runs a
+    # pre-commit hook that vetoes everything.
+    signer = tmp_path / "fake-gpg"
+    signer.write_text("#!/bin/sh\necho 'signer refused' >&2\nexit 1\n")
+    signer.chmod(0o755)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    pre_commit = hooks / "pre-commit"
+    pre_commit.write_text("#!/bin/sh\necho 'hook says no' >&2\nexit 1\n")
+    pre_commit.chmod(0o755)
+    git_home.write_text(
+        "[commit]\n\tgpgsign = true\n"
+        f"[gpg]\n\tprogram = {signer}\n"
+        f"[core]\n\thooksPath = {hooks}\n"
+    )
+    _write(repo_dir, "a.py", "a = 1\n")
+
+    ok, summary = mtg._git_commit(repo_dir, "a.py", "add a")
+
+    assert ok, summary
+    assert _git(repo_dir, "log", "-1", "--format=%s") == "add a"
+    assert _git(repo_dir, "log", "-1", "--format=%G?") == "N"
