@@ -1556,10 +1556,6 @@ def _make_groq_model_class(base: type) -> type:
     Ask for ``tool_choice="auto"`` and treat a plain-text reply as the final
     answer, which is what the model meant.
     """
-    from smolagents.models import (  # type: ignore
-        ChatMessageToolCall,
-        ChatMessageToolCallFunction,
-    )
 
     class _GroqServerModel(base):  # type: ignore[misc, valid-type]
         def _prepare_completion_kwargs(self, *args, **kwargs):
@@ -1592,6 +1588,11 @@ def _make_groq_model_class(base: type) -> type:
                     raise
             content = (message.content or "").strip() if isinstance(message.content, str) else ""
             if tools_to_call_from and not message.tool_calls and content:
+                from smolagents.models import (  # type: ignore
+                    ChatMessageToolCall,
+                    ChatMessageToolCallFunction,
+                )
+
                 message.tool_calls = [ChatMessageToolCall(
                     id=f"call_{uuid.uuid4().hex[:12]}",
                     type="function",
