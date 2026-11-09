@@ -234,6 +234,81 @@ struct UserMessagePayload: Codable, Hashable {
     }
 }
 
+// MARK: - Calendar through the app (#60)
+
+/// EKAuthorizationStatus names, matching the daemon's `tools.calendar_access`.
+enum CalendarAuthorization: String, Codable, Hashable {
+    case notDetermined = "not_determined"
+    case restricted
+    case denied
+    case fullAccess = "full_access"
+    case writeOnly = "write_only"
+}
+
+enum CalendarOp: String, Codable, Hashable {
+    case list
+    case create
+    case requestAccess = "request_access"
+}
+
+/// Server→client: run one EventKit operation for the daemon. `args` is
+/// `{start, end, calendars?}` for `list`, `{title, start, end, calendar?,
+/// location?, notes?}` for `create` (ISO 8601 with offset).
+struct CalendarRequestPayload: Codable, Hashable {
+    let requestId: String
+    let op: CalendarOp
+    let args: JSONValue?
+    let timeoutSeconds: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case op, args
+        case timeoutSeconds = "timeout_seconds"
+    }
+}
+
+/// One event in the #42 shape the daemon's calendar tools return.
+struct CalendarEventDTO: Codable, Hashable {
+    let id: String
+    let title: String
+    let start: String
+    let end: String
+    let calendar: String
+    let location: String
+    let notes: String
+    let url: String
+    let allDay: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, start, end, calendar, location, notes, url
+        case allDay = "all_day"
+    }
+}
+
+/// Client→server answer to a `calendar_request`.
+struct CalendarResponsePayload: Codable, Hashable {
+    let requestId: String
+    let ok: Bool
+    var events: [CalendarEventDTO]? = nil
+    var eventId: String? = nil
+    var calendar: String? = nil
+    var error: String? = nil
+    var authorization: CalendarAuthorization? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case ok, events
+        case eventId = "event_id"
+        case calendar, error, authorization
+    }
+}
+
+/// Client→server: this app serves Calendar, with its current EventKit
+/// authorization (read without prompting). Sent on connect and on change.
+struct CalendarStatusPayload: Codable, Hashable {
+    let authorization: CalendarAuthorization
+}
+
 // MARK: - Discriminated Union
 
 enum WSMessage: Codable, Hashable {
@@ -247,6 +322,9 @@ enum WSMessage: Codable, Hashable {
     case toolsChanged(seq: Int, timestamp: Date, payload: ToolsChangedPayload)
     case command(seq: Int, timestamp: Date, payload: CommandPayload)
     case userMessage(seq: Int, timestamp: Date, payload: UserMessagePayload)
+    case calendarRequest(seq: Int, timestamp: Date, payload: CalendarRequestPayload)
+    case calendarResponse(seq: Int, timestamp: Date, payload: CalendarResponsePayload)
+    case calendarStatus(seq: Int, timestamp: Date, payload: CalendarStatusPayload)
 
     var seq: Int {
         switch self {
@@ -256,7 +334,9 @@ enum WSMessage: Codable, Hashable {
              .codeApprovalResponse(let seq, _, _),
              .status(let seq, _, _), .notice(let seq, _, _),
              .toolsChanged(let seq, _, _), .command(let seq, _, _),
-             .userMessage(let seq, _, _):
+             .userMessage(let seq, _, _),
+             .calendarRequest(let seq, _, _), .calendarResponse(let seq, _, _),
+             .calendarStatus(let seq, _, _):
             return seq
         }
     }
@@ -269,7 +349,9 @@ enum WSMessage: Codable, Hashable {
              .codeApprovalResponse(_, let ts, _),
              .status(_, let ts, _), .notice(_, let ts, _),
              .toolsChanged(_, let ts, _), .command(_, let ts, _),
-             .userMessage(_, let ts, _):
+             .userMessage(_, let ts, _),
+             .calendarRequest(_, let ts, _), .calendarResponse(_, let ts, _),
+             .calendarStatus(_, let ts, _):
             return ts
         }
     }
@@ -289,6 +371,9 @@ enum WSMessage: Codable, Hashable {
         case toolsChanged = "tools_changed"
         case command
         case userMessage = "user_message"
+        case calendarRequest = "calendar_request"
+        case calendarResponse = "calendar_response"
+        case calendarStatus = "calendar_status"
     }
 
     init(from decoder: Decoder) throws {
@@ -328,6 +413,15 @@ enum WSMessage: Codable, Hashable {
         case .userMessage:
             self = .userMessage(seq: seq, timestamp: timestamp,
                                 payload: try container.decode(UserMessagePayload.self, forKey: .payload))
+        case .calendarRequest:
+            self = .calendarRequest(seq: seq, timestamp: timestamp,
+                                    payload: try container.decode(CalendarRequestPayload.self, forKey: .payload))
+        case .calendarResponse:
+            self = .calendarResponse(seq: seq, timestamp: timestamp,
+                                     payload: try container.decode(CalendarResponsePayload.self, forKey: .payload))
+        case .calendarStatus:
+            self = .calendarStatus(seq: seq, timestamp: timestamp,
+                                   payload: try container.decode(CalendarStatusPayload.self, forKey: .payload))
         }
     }
 
@@ -365,6 +459,15 @@ enum WSMessage: Codable, Hashable {
             try container.encode(payload, forKey: .payload)
         case .userMessage(_, _, let payload):
             try container.encode(MessageType.userMessage, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .calendarRequest(_, _, let payload):
+            try container.encode(MessageType.calendarRequest, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .calendarResponse(_, _, let payload):
+            try container.encode(MessageType.calendarResponse, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .calendarStatus(_, _, let payload):
+            try container.encode(MessageType.calendarStatus, forKey: .type)
             try container.encode(payload, forKey: .payload)
         }
     }

@@ -107,6 +107,8 @@ Server → client: `status`, `thought`, `approval_request`,
 Client → server: `approval_response`, `code_approval_response`,
 `command` (`pause_listeners`, `resume_listeners`, `reload_model`,
 `clear_memory`, `reload_dynamic_tools`).
+Calendar (#60): server → client `calendar_request`; client → server
+`calendar_response`, `calendar_status` (see the Calendar flow below).
 
 Thought stages: `event_received` → `analysis` (optional) → `memory`
 (optional) → `reasoning` → `plan` → `tool_result` → `complete`. The
@@ -128,6 +130,29 @@ Approval flow:
 4. Default timeout: 120 s. On timeout or `approved: false`, the wrapper
    returns `{"skipped": True, "reason": "user_denied"}` back into the
    agent loop which surfaces a `no action` thought.
+
+Calendar flow (#60): the menu bar app owns EventKit (the daemon's Python
+is silently denied it), and the daemon asks it over this WebSocket.
+
+1. On connect (after the hello `status`) and whenever it changes (checked
+   every 30 s and after each request), the app sends
+   **`calendar_status`** `{authorization}` (EKAuthorizationStatus name:
+   `not_determined | restricted | denied | full_access | write_only`, read
+   without prompting). Only a connection that sent it can serve Calendar.
+2. `tools/calendar_access.py::AppCalendarBridge` sends
+   **`calendar_request`** `{request_id, op: list | create | request_access,
+   args, timeout_seconds}` to ONE connection (the one that most recently
+   sent `calendar_status`), from the calling worker thread via
+   `run_coroutine_threadsafe`, and blocks on a future keyed by `request_id`.
+   Timeout 15 s; 120 s while the status is `not_determined` (the first
+   request shows the macOS prompt) and for `request_access`.
+3. The app answers **`calendar_response`** `{request_id, ok, events? |
+   event_id? + calendar?, error?, authorization?}`; `main.py` routes it to
+   the bridge. Events are #42 dicts. A disconnect fails pending requests.
+4. `ready()` (watcher / setup-scan gate) = the reported status is
+   `full_access`; the Permissions `calendars` row reads the same status,
+   and its Request click sends `request_access`. No app connected → the
+   tools answer "open the bot-inator menu bar app to use Calendar".
 
 Code-approval flow (Phase 4 meta-tool generation):
 
@@ -345,8 +370,10 @@ bypass the approval gate and run inline; all other tools still emit an
 | `open_app`         |           | `open -a` on an `.app` found in the Applications  |
 |                    |           | folders.                                          |
 | `read_email`       | ✅         | Body of one Mail.app message by id (`.emlx`).     |
-| `list_events`      | ✅         | Calendar events in a range (EventKit/AppleScript).|
-| `create_event`     |           | Adds a Calendar event.                            |
+| `list_events`      | ✅         | Calendar events in a range, via the menu bar      |
+|                    |           | app's EventKit (#60; app must be running).        |
+| `create_event`     |           | Adds a Calendar event (app's EventKit; default    |
+|                    |           | calendar unless one is named).                    |
 | `list_reminders`   | ✅         | Reminders (EventKit/AppleScript), soonest first.  |
 | `create_reminder`  |           | Adds a reminder (optional due date, list, notes). |
 | `generate_custom_tool`|         | Meta-tool: drafts a new `@tool` module on the     |

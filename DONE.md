@@ -944,3 +944,10 @@ included in `main.py` (FastAPI 0.162 keeps them as one `_IncludedRouter`
 entry each, so `tests/test_wave8_wiring.py` calls them through the app);
 `app.state.idea_feedback`; `set_current_idea` in the pattern turn;
 `PermissionsView` in Settings, `DeclinedIdeasView` in Tool Manager.
+
+## Wave 9 — closed 2026-11-09
+
+Wave-close run: full suite 679 passed (×3 by the agent, ×1 by the runner);
+Swift type-check clean; Info.plist valid. #60 (Calendar through EventKit in
+the menu bar app) built and waits as `[~] live`. Every todo item is now
+built; what remains is the combined live-check list.

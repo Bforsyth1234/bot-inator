@@ -156,6 +156,55 @@ class ToolsChangedPayload(BaseModel):
     tool_names: list[str] = Field(default_factory=list)
 
 
+
+# ---- Calendar through the menu bar app (#60) ----------------------------------
+# The app owns EventKit; the daemon asks it over this WebSocket.
+# EKAuthorizationStatus names, as ``tools.calendar_access`` uses them.
+CalendarAuthorization = Literal[
+    "not_determined", "restricted", "denied", "full_access", "write_only"
+]
+CalendarOp = Literal["list", "create", "request_access"]
+
+
+class CalendarRequestPayload(BaseModel):
+    """Server→client: run one EventKit operation in the app.
+
+    ``list`` args: ``{start, end, calendars?}`` (ISO 8601 with offset).
+    ``create`` args: ``{title, start, end, calendar?, location?, notes?}``.
+    ``request_access`` (a Permissions "Request" click) takes no args.
+    Sent to ONE connection (the app that advertised ``calendar_status``).
+    """
+
+    request_id: str
+    op: CalendarOp
+    args: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: int = 15
+
+
+class CalendarResponsePayload(BaseModel):
+    """Client→server answer to a :class:`CalendarRequestPayload`.
+
+    ``events`` (list) are #42 event dicts; ``event_id`` + ``calendar``
+    (create). ``authorization`` is the app's status after the operation.
+    """
+
+    request_id: str
+    ok: bool
+    events: list[dict[str, Any]] | None = None
+    event_id: str | None = None
+    calendar: str | None = None
+    error: str | None = None
+    authorization: CalendarAuthorization | None = None
+
+
+class CalendarStatusPayload(BaseModel):
+    """Client→server: the app can serve calendar requests, and its EventKit
+    authorization (read without prompting). Sent on connect and whenever it
+    changes, so ``ready()`` never has to ask."""
+
+    authorization: CalendarAuthorization
+
+
 CommandAction = Literal[
     "pause_listeners",
     "resume_listeners",
@@ -242,6 +291,22 @@ class UserMessage(_BaseMessage):
     payload: UserMessagePayload
 
 
+
+class CalendarRequest(_BaseMessage):
+    type: Literal["calendar_request"] = "calendar_request"
+    payload: CalendarRequestPayload
+
+
+class CalendarResponse(_BaseMessage):
+    type: Literal["calendar_response"] = "calendar_response"
+    payload: CalendarResponsePayload
+
+
+class CalendarStatus(_BaseMessage):
+    type: Literal["calendar_status"] = "calendar_status"
+    payload: CalendarStatusPayload
+
+
 WSMessage = Annotated[
     Union[
         Thought,
@@ -254,6 +319,9 @@ WSMessage = Annotated[
         ToolsChanged,
         Command,
         UserMessage,
+        CalendarRequest,
+        CalendarResponse,
+        CalendarStatus,
     ],
     Field(discriminator="type"),
 ]

@@ -22,6 +22,10 @@
     <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>bot-inator reads your calendar events to answer questions like "what's on my calendar today?" and to remind you before meetings, and adds events only after you approve them.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>bot-inator reads your calendar events to answer questions like "what's on my calendar today?" and to remind you before meetings, and adds events only after you approve them.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026. All rights reserved.</string>
 </dict>

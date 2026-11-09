@@ -71,6 +71,10 @@ from events.mac_listeners import MacAppListener
 from events.mail_watcher import MailWatcher
 from schemas.ws_messages import (
     ApprovalResponse,
+    CalendarRequest,
+    CalendarRequestPayload,
+    CalendarResponse,
+    CalendarStatus,
     CodeApprovalResponse,
     Command,
     Status,
@@ -79,6 +83,7 @@ from schemas.ws_messages import (
     WSMessage,
 )
 from tools import AVAILABLE_TOOLS
+from tools import calendar_access
 from tools.meta_tool_generator import set_meta_tool_context
 
 logging.basicConfig(
@@ -1012,6 +1017,28 @@ async def _push_listener_health(
         logger.debug("listener health push stopped", exc_info=True)
 
 
+# The Permissions checklist's ``calendars`` row reads what the menu bar app
+# reported over the WS, and its Request click asks the app to prompt (#60).
+calendar_access.register_permission_hooks()
+
+
+def _calendar_sender(websocket: WebSocket):
+    """``calendar_request`` frames go to this one connection only (#60)."""
+
+    async def send(request_id: str, op: str, args: dict, timeout_seconds: int) -> None:
+        frame = CalendarRequest(
+            seq=_next_seq(),
+            timestamp=_now_iso(),
+            payload=CalendarRequestPayload(
+                request_id=request_id, op=op, args=args,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+        await websocket.send_text(frame.model_dump_json())
+
+    return send
+
+
 @app.websocket("/ws/stream")
 async def ws_stream(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -1036,6 +1063,11 @@ async def ws_stream(websocket: WebSocket) -> None:
         _push_listener_health(websocket, hello.payload.listener_health),
         name="ws-listener-health",
     )
+    # Each connection may serve Calendar once it sends ``calendar_status``.
+    conn_id = f"ws_{id(websocket):x}_{_next_seq()}"
+    calendar_access.app_bridge.connect(
+        conn_id, _calendar_sender(websocket), asyncio.get_running_loop(),
+    )
 
     try:
         while True:
@@ -1049,6 +1081,14 @@ async def ws_stream(websocket: WebSocket) -> None:
                 orchestrator.submit_approval_response(msg.payload)
             elif isinstance(msg, CodeApprovalResponse):
                 orchestrator.submit_code_approval_response(msg.payload)
+            elif isinstance(msg, CalendarResponse):
+                calendar_access.app_bridge.submit_response(
+                    conn_id, msg.payload.model_dump(),
+                )
+            elif isinstance(msg, CalendarStatus):
+                calendar_access.app_bridge.set_status(
+                    conn_id, msg.payload.authorization,
+                )
             elif isinstance(msg, Command):
                 await _handle_command(app, msg)
             elif isinstance(msg, UserMessage):
@@ -1069,3 +1109,4 @@ async def ws_stream(websocket: WebSocket) -> None:
     finally:
         health_task.cancel()
         orchestrator.remove_subscriber(_ws_send)
+        calendar_access.app_bridge.disconnect(conn_id)

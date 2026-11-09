@@ -103,6 +103,13 @@ both.
 - **Full Disk Access** for the terminal or process running the daemon,
   so the iMessage watcher can read `~/Library/Messages/chat.db`. Without
   it, that listener logs an error and the rest keeps working.
+- **Calendars** belong to the menu bar app, not the daemon: Calendar tools
+  and the meeting watcher work only while the app is running and
+  connected (otherwise they answer "open the bot-inator menu bar app to use
+  Calendar"). The app asks for Calendar access the first time the agent
+  needs it. An ad-hoc signed rebuild may ask again.
+  `AGENT_CALENDAR_BACKEND=applescript` (or `eventkit`) pins the old
+  in-daemon paths.
 - Notification and Automation prompts may appear the first time a tool
   that needs them runs.
 

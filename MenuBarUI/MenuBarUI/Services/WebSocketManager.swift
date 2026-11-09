@@ -21,6 +21,13 @@ final class WebSocketManager: ObservableObject {
     /// replay doesn't bring a dismissed banner back.
     private var dismissedNoticeIds: Set<String> = []
 
+    /// EventKit for the daemon's calendar tools (#60).
+    private let calendarBridge = CalendarBridge()
+    /// Last `calendar_status` sent on this connection (nil: none yet).
+    private var sentCalendarStatus: CalendarAuthorization?
+    private var calendarStatusTask: Task<Void, Never>?
+    private let calendarStatusInterval: TimeInterval = 30.0
+
     private let url: URL
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
@@ -97,7 +104,9 @@ final class WebSocketManager: ObservableObject {
         task.resume()
         isConnected = true
         reconnectDelay = 1.0
+        sentCalendarStatus = nil  // a new connection needs its own calendar_status
         receiveTask = Task { [weak self] in await self?.receiveLoop() }
+        startCalendarStatusRefresh()
     }
 
     func dismissNotice(id: String) {
@@ -119,6 +128,8 @@ final class WebSocketManager: ObservableObject {
     }
 
     func disconnect() {
+        calendarStatusTask?.cancel()
+        calendarStatusTask = nil
         receiveTask?.cancel()
         reconnectTask?.cancel()
         task?.cancel(with: .goingAway, reason: nil)
@@ -215,6 +226,42 @@ final class WebSocketManager: ObservableObject {
         }
     }
 
+    // MARK: - Calendar (#60)
+
+    /// Tell the daemon this app serves Calendar, with the EventKit status
+    /// (read without prompting). Sent once per connection and on change.
+    private func sendCalendarStatusIfChanged() {
+        guard task != nil else { return }
+        let status = CalendarBridge.authorization()
+        guard status != sentCalendarStatus else { return }
+        sentCalendarStatus = status
+        send(.calendarStatus(seq: nextSeq(), timestamp: Date(),
+                             payload: CalendarStatusPayload(authorization: status)))
+    }
+
+    /// The user can change Calendar access in System Settings at any time.
+    private func startCalendarStatusRefresh() {
+        guard calendarStatusTask == nil else { return }
+        let interval = calendarStatusInterval
+        calendarStatusTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                self?.sendCalendarStatusIfChanged()
+            }
+        }
+    }
+
+    private func handleCalendarRequest(_ payload: CalendarRequestPayload) {
+        let bridge = calendarBridge
+        Task { [weak self] in
+            let response = await bridge.handle(payload)
+            guard let self else { return }
+            self.send(.calendarResponse(seq: self.nextSeq(), timestamp: Date(), payload: response))
+            self.sendCalendarStatusIfChanged()
+        }
+    }
+
     private func nextSeq() -> Int {
         outgoingSeq += 1
         return outgoingSeq
@@ -266,6 +313,11 @@ final class WebSocketManager: ObservableObject {
             let parsed = try decoder.decode(WSMessage.self, from: data)
             debug.framesDecoded += 1
             debug.recordDecoded(parsed)
+            if case .calendarRequest(_, _, let payload) = parsed {
+                // Plumbing, not UI: the watcher sends one a minute (#60).
+                handleCalendarRequest(payload)
+                return
+            }
             messages.append(parsed)
             switch parsed {
             case .approvalRequest(let seq, _, let payload):
@@ -274,6 +326,7 @@ final class WebSocketManager: ObservableObject {
                 pendingCodeApproval = (seq, payload)
             case .status(_, _, let payload):
                 lastStatus = payload
+                sendCalendarStatusIfChanged()
             case .notice(_, _, let payload):
                 showNotice(payload)
             case .toolsChanged(_, _, let payload):
@@ -358,6 +411,9 @@ struct DebugStats {
         case .toolsChanged: key = "tools_changed"
         case .command: key = "command"
         case .userMessage: key = "user_message"
+        case .calendarRequest: key = "calendar_request"
+        case .calendarResponse: key = "calendar_response"
+        case .calendarStatus: key = "calendar_status"
         }
         framesByType[key, default: 0] += 1
     }
