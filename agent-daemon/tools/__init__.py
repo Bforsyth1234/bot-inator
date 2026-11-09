@@ -15,6 +15,7 @@ from .open_url import open_url
 from .read_active_tab import read_active_tab
 from .read_clipboard import read_clipboard
 from .read_email import read_email
+from .reminders import create_reminder, list_reminders
 from .remember_preference import remember_preference
 from .send_imessage import send_imessage
 from .shortcuts import list_shortcuts, run_shortcut
@@ -42,6 +43,8 @@ AVAILABLE_TOOLS = [
     read_email,
     list_events,
     create_event,
+    list_reminders,
+    create_reminder,
     generate_custom_tool,
 ]
 
@@ -60,6 +63,7 @@ READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset({
     "list_windows",
     "read_email",
     "list_events",
+    "list_reminders",
 })
 
 __all__ = [
@@ -82,6 +86,8 @@ __all__ = [
     "read_email",
     "list_events",
     "create_event",
+    "list_reminders",
+    "create_reminder",
     "generate_custom_tool",
     "AVAILABLE_TOOLS",
     "READ_ONLY_TOOL_NAMES",

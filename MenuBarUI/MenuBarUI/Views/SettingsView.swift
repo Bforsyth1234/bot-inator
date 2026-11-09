@@ -5,6 +5,13 @@ import SwiftUI
 struct DaemonSettings: Codable, Equatable {
     var provider: String
     var runningProvider: String
+    // Per-engine overrides (#26): "" means "same as provider". Optional so
+    // an older daemon without them still decodes.
+    var providerMain: String?
+    var providerAnalysis: String?
+    var providerDrafting: String?
+    var runningEngineProviders: [String: String]?
+    var groqApiKeyRequired: Bool?
     var groqApiKeySet: Bool
     var groqApiKeyHint: String
     var groqMainModel: String
@@ -17,6 +24,11 @@ struct DaemonSettings: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case provider
         case runningProvider = "running_provider"
+        case providerMain = "provider_main"
+        case providerAnalysis = "provider_analysis"
+        case providerDrafting = "provider_drafting"
+        case runningEngineProviders = "running_engine_providers"
+        case groqApiKeyRequired = "groq_api_key_required"
         case groqApiKeySet = "groq_api_key_set"
         case groqApiKeyHint = "groq_api_key_hint"
         case groqMainModel = "groq_main_model"
@@ -37,6 +49,9 @@ final class SettingsViewModel: ObservableObject {
 
     // Editable form state.
     @Published var provider = "local"
+    @Published var providerMain = ""
+    @Published var providerAnalysis = ""
+    @Published var providerDrafting = ""
     @Published var apiKey = ""
     @Published var mainModel = ""
     @Published var analysisModel = ""
@@ -53,6 +68,23 @@ final class SettingsViewModel: ObservableObject {
 
     func isLocked(_ field: String) -> Bool {
         saved?.lockedFields.contains(field) ?? false
+    }
+
+    /// True when the form, as edited, puts any engine on Groq.
+    var usesGroq: Bool {
+        [providerMain, providerAnalysis, providerDrafting]
+            .map { $0.isEmpty ? provider : $0 }
+            .contains("groq")
+    }
+
+    /// "Running now" line, per engine when they differ.
+    var runningSummary: String? {
+        guard let saved else { return nil }
+        guard let engines = saved.runningEngineProviders,
+              Set(engines.values).count > 1 else { return saved.runningProvider }
+        return ["main", "analysis", "drafting"]
+            .map { "\($0) \(engines[$0] ?? saved.runningProvider)" }
+            .joined(separator: ", ")
     }
 
     func refresh() async {
@@ -73,6 +105,9 @@ final class SettingsViewModel: ObservableObject {
     func save() async {
         var body: [String: String] = [
             "provider": provider,
+            "provider_main": providerMain,
+            "provider_analysis": providerAnalysis,
+            "provider_drafting": providerDrafting,
             "groq_main_model": mainModel,
             "groq_analysis_model": analysisModel,
             "groq_drafting_model": draftingModel,
@@ -137,6 +172,9 @@ final class SettingsViewModel: ObservableObject {
     private func apply(_ s: DaemonSettings) {
         saved = s
         provider = s.provider
+        providerMain = s.providerMain ?? ""
+        providerAnalysis = s.providerAnalysis ?? ""
+        providerDrafting = s.providerDrafting ?? ""
         mainModel = s.groqMainModel
         analysisModel = s.groqAnalysisModel
         draftingModel = s.groqDraftingModel
@@ -166,15 +204,26 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
                 .disabled(viewModel.isLocked("provider"))
-                if let saved = viewModel.saved {
-                    Text("Running now: \(saved.runningProvider)")
+                if let running = viewModel.runningSummary {
+                    Text("Running now: \(running)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 lockedNote("provider", env: "AGENT_PROVIDER")
+                DisclosureGroup("Per engine") {
+                    enginePicker("Main (agent)", field: "provider_main",
+                                 env: "AGENT_PROVIDER_MAIN",
+                                 selection: $viewModel.providerMain)
+                    enginePicker("Analysis", field: "provider_analysis",
+                                 env: "AGENT_PROVIDER_ANALYSIS",
+                                 selection: $viewModel.providerAnalysis)
+                    enginePicker("Drafting (new tools)", field: "provider_drafting",
+                                 env: "AGENT_PROVIDER_DRAFTING",
+                                 selection: $viewModel.providerDrafting)
+                }
             }
 
-            if viewModel.provider == "groq" {
+            if viewModel.usesGroq {
                 Section("Groq") {
                     SecureField(apiKeyPlaceholder, text: $viewModel.apiKey)
                         .disabled(viewModel.isLocked("groq_api_key"))
@@ -225,6 +274,18 @@ struct SettingsView: View {
     private var apiKeyPlaceholder: String {
         guard let saved = viewModel.saved, saved.groqApiKeySet else { return "API key" }
         return "Saved key \(saved.groqApiKeyHint) (type to replace)"
+    }
+
+    @ViewBuilder
+    private func enginePicker(_ title: String, field: String, env: String,
+                              selection: Binding<String>) -> some View {
+        Picker(title, selection: selection) {
+            Text("Same as default (\(viewModel.provider == "groq" ? "Groq" : "Local"))").tag("")
+            Text("Local").tag("local")
+            Text("Groq (cloud)").tag("groq")
+        }
+        .disabled(viewModel.isLocked(field))
+        lockedNote(field, env: env)
     }
 
     @ViewBuilder

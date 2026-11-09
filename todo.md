@@ -69,7 +69,7 @@ API auth → sandbox for installed tools → live checks.
 | 1 | A: #39 #40 · B: #43 · C: #44 · D: #46 · E: #47 · F: #30 | A `tests/test_groq_engine.py`, `tests/test_dry_run.py`, `tools/draft_dry_run.py` · B `tools/shortcuts.py` · C `tools/find_files.py` · D `tools/notes.py` · E `tools/windows.py` · F `tests/test_git_commit.py` (+ each slot's own new test file) | [x] closed 2026-11-09 (#43 #44 #46 #47 `[~] live`) |
 | 2 | A: #20 #21 · B: #24 · C: #25 · D: #14 · E: #16 #17 · F: #36 | A `ai/memory.py` · B `tools/meta_tool_generator.py` · C `ai/pattern_recognizer.py` · D `events/file_watcher.py` · E `events/mac_listeners.py`, `events/_mac_app_helper.py` · F `ai/open_help.py` | [x] closed 2026-11-09 (all `[~] live`) |
 | 3 | A: #23 #28 #38 · B: #41 · C: #42 · D: #33 #35 · E: #34 | A `ai/orchestrator.py`, tool routes in `main.py`, `ToolManagerView.swift` · B `events/mail_watcher.py`, `tools/read_email.py` · C `tools/calendar_access.py`, `tools/list_events.py`, `tools/create_event.py`, `events/calendar_watcher.py`, `requirements.txt` · D `ai/setup_scan.py`, `ai/starter_catalog.json` · E `events/clipboard_watcher.py`, `ai/friction.py` | [x] closed 2026-11-09 (all `[~] live`) |
-| 4 | A: #32 · B: #45 · C: #15 #18 · D: #26 | A `ai/idea_sources.py`, `ai/open_help.py` · B `tools/reminders.py` (+ additive `tools/calendar_access.py`) · C `ApprovalAlert.swift`, `ApprovalPresenter.swift`, `CodeReviewAlert.swift` · D `config.py`, engine setup + settings routes in `main.py`, `SettingsView.swift` | [ ] |
+| 4 | A: #32 · B: #45 · C: #15 #18 · D: #26 | A `ai/idea_sources.py`, `ai/open_help.py` · B `tools/reminders.py` (+ additive `tools/calendar_access.py`) · C `ApprovalAlert.swift`, `ApprovalPresenter.swift`, `CodeReviewAlert.swift` · D `config.py`, engine setup + settings routes in `main.py`, `SettingsView.swift` | [x] closed 2026-11-09 (all `[~] live`) |
 | 5 | A: #19 #29 #31 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `DebugView.swift`, `ToolManagerView.swift`, `ai/orchestrator.py`, `events/imessage_watcher.py` | [ ] |
 | 6 | A: #27 (alone) | `main.py` (all routes + WS), every Swift HTTP/WS client | [ ] |
 | 7 | A: #22 (alone) | `ai/orchestrator.py` tool execution, new `tools/tool_sandbox.py` | [ ] |
@@ -127,6 +127,11 @@ to see.
 - #42 Calendar: `cd agent-daemon && .venv/bin/python tools/calendar_access.py --check` → record whether the prompt appears and for which app, and whether today's events list; rerun after a restart → `full_access`, no prompt (if silently denied, add `--applescript` and pin `AGENT_CALENDAR_BACKEND`). "What's on my calendar today?" → events, no card. "Add lunch with Sam tomorrow at noon" → card → event in Calendar. An event 10 min out → `event_starting_soon` in Debug.
 - #33/#35 Setup scan: delete `~/.bot-inator/setup_scan.json`, restart (local provider) → log "setup scan done: N idea(s) queued", first idea card ~2 min later; second restart doesn't rescan; with Groq, "shell history skipped".
 - #34 Friction: copy in Mail → Cmd-Tab to Numbers → back, ×5 → `clipboard_changed {app: Mail, kind: text}` (no content), then a friction idea card if the judge passes it. Copy a password from a password manager → no `clipboard_changed`.
+- #32 Idea state: decline a next-step idea, restart, trigger it again → no card; `~/.bot-inator/idea_state.json` holds the cooldown. Email "Invitation: X @ <time>" → read_email then create_event card; "Your order has shipped" → open_url card; "Please submit Y by Friday" → create_reminder card; a meeting with a Zoom link → open_url card before it starts.
+- #45 Reminders: `cd agent-daemon && .venv/bin/python tools/calendar_access.py --check --reminders` → prompt, `full_access`, lists (else add `--applescript`). "Remind me to call the vet tomorrow at 9" → card → reminder at 09:00 with an alert. "What's on my reminders?" → list, no card.
+- #15 Red X: close the approval window → one deny in the daemon log, tool skipped; Approve then close → one response; close the code review window → one `code_approval_response` denial.
+- #18 Cards: for each card (open_url, show_notification, move_file, create_event, create_reminder, create_note, append_note, run_shortcut, open_app) change a field → Approve → the tool ran with the edit; Approve unchanged → no `edited_args`; clear a required field → Approve disabled.
+- #26 Providers: Settings → Drafting = Groq, default Local → save, restart → "Running now" lists each engine; a tool draft goes to Groq while per-event analysis stays on MLX.
 
 ---
 
@@ -184,7 +189,7 @@ by help for effort. None is scheduled into a wave yet.
 
 ### Idea quality (Phase 5)
 
-#32 — Persist idea-source state across restarts [ ] [Q20]
+#32 — Persist idea-source state across restarts [~] live [Q20]
 Wave: 4 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q20, Phase 5.2 "Open")
 Ask: Cooldowns and declined suggestions live in memory and are lost on
 restart. Persist both in `memory.db`.
@@ -204,7 +209,24 @@ minute before it starts." Also add mail kinds from #41 (`.ics` attachment /
 invite subject → create_event; shipping email → tracking follow-up) and the
 reminder kind from #45.
 Verify: restart the daemon; a declined next-step idea is not offered again.
-Deviations:
+Results (wave 4, 2026-11-09):
+⚬ `ai/idea_sources.py` `IdeaState`: cooldowns per source (`next_step`,
+  `chat_gap`, `open_help`) in `~/.bot-inator/idea_state.json`, atomic writes,
+  expired entries pruned, chat-gap keys hashed (no chat text on disk).
+  NextStep/ChatGap check the shared `IdeaFeedback` rejections.
+⚬ FOLLOW_UPS: wave 3 texts applied; new kinds `meeting_with_video_link`,
+  `mail_invite`, `mail_shipping`, `mail_deadline` (conservative, with vetoes
+  for replies, workspace invites, promos; Junk/Spam/Trash/Sent/Drafts
+  skipped). `BUILTIN_FOLLOW_UPS` publish `builtin_tool` + `event_details`
+  with no model call, cooling down per event.
+⚬ Runner: one `IdeaState` + one `IdeaFeedback` shared in `main.py`;
+  `_build_pattern_prompt` has a built-in path (call the built-in, never
+  `generate_custom_tool`); declining the built-in's approval records a
+  rejection (`_current_builtin_idea`). `tests/test_builtin_followups.py`.
+⚬ Tests: `test_idea_state.py` 11, `test_idea_sources.py` +47 cases;
+  non-vacuity 6 / 4 / 3 / 2 failing mutations.
+Deviations: built-in kinds cool down per event, not per kind (a 24 h per-kind cooldown
+would drop the second invite of the day).
 
 ---
 
@@ -541,7 +563,7 @@ changed the test to import the module via `importlib` (the package attribute
 
 ---
 
-#45 — Reminders: list and create [ ]
+#45 — Reminders: list and create [~] live
 Wave: 4 · Agent: _ · Added: 2026-11-09 · Source: user (ranked #3)
 Ask: Catch to-dos from email and messages ("send me the deck by Friday"
 → a reminder) and let the agent see what's due.
@@ -566,7 +588,16 @@ Verify:
 ⚬ Live: "remind me to call the vet tomorrow at 9" → approval card →
   reminder appears in Reminders.app with the right due time.
 Time: about 1 hour once #42 is done.
-Deviations:
+Results (wave 4, 2026-11-09):
+⚬ `tools/reminders.py`: `list_reminders` (read-only; soonest due first,
+  cap 200) and `create_reminder` (gated; ISO local or date-only = all-day;
+  bad dates → error). Additive `calendar_access.py`: EventKit reminders
+  (bounded 30 s fetch, alarm on timed reminders) and AppleScript (argv-only,
+  compiled with `osacompile`); `get_reminder_backend()`;
+  `--check --reminders` diagnostic. 17 tests; non-vacuity via the gate flip
+  and due parsing. Runner: registered (`list_reminders` read-only).
+Deviations: `AGENT_REMINDERS_BACKEND` (falls back to `AGENT_CALENDAR_BACKEND`); timed
+reminders get an alert; an unknown list name is an error.
 
 ---
 
@@ -926,16 +957,23 @@ Deviations:
 
 ### Approvals and UI
 
-#15 — Closing the approval window with the red X [ ] [Q2]
+#15 — Closing the approval window with the red X [~] live [Q2]
 Wave: 4 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q2)
 Ask: Closing the approval window via the red X currently does nothing.
 Should it count as an implicit deny?
 Verify:
-Deviations:
+Results (wave 4, 2026-11-09):
+⚬ `ApprovalPresenter.swift`: a `WindowCloseHandler` (window delegate) sends
+  Deny once when the user closes the approval window (`approval_response`)
+  or the code review window (`code_approval_response`); buttons share the
+  same once-only guard, so click-then-close sends one response. Esc was
+  already Deny. swiftc clean.
+Deviations: when a new request replaces an open window, the old one isn't denied; it
+times out as before.
 
 ---
 
-#18 — Editable approval for more tools [ ] [Q5]
+#18 — Editable approval for more tools [~] live [Q5]
 Wave: 4 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q5)
 Ask: Extend the editable-approval pattern to other tools: `open_url`
 (edit the URL), `show_notification` (edit title/body), `move_file` (edit
@@ -944,7 +982,17 @@ FROM WAVE 3 #42 (2026-11-09): the `create_event` card shows Title, Date,
 Start–End (local time), Calendar ("Default calendar" if empty), Location,
 Notes (truncated).
 Verify:
-Deviations:
+Results (wave 4, 2026-11-09):
+⚬ `ApprovalAlert.swift`: cards from `ApprovalEditSpec` (pure functions:
+  `mergedKwargs`, `initialValues`, `editedArgs`, `isComplete`); positional
+  args mapped by signature order; `edited_args` sent only when a field
+  changed; Approve disabled while a required field is empty. Cards:
+  send_imessage, open_url, show_notification, move_file (`src`, `dst_dir`),
+  create_event, create_reminder, create_note, append_note, run_shortcut,
+  open_app; everything else keeps the JSON view. A scratch harness against
+  the real file passed (mutation of the changed-only guard failed 2 checks).
+Deviations: send_imessage now sends `edited_args` only when something changed (same
+daemon result).
 
 ### Memory
 
@@ -1013,12 +1061,16 @@ Ask: With `AGENT_PROVIDER=groq`, window titles, file paths and iMessage
 text go to Groq inside prompts. Should the UI show which provider is
 active (e.g. Debug tab, or in the status frame), and should iMessage
 content be redacted or kept local-only when the provider is cloud?
+FROM WAVE 4 (2026-11-09): use `settings.is_cloud(role)` /
+`uses_cloud()` (#26) to decide redaction per engine; the placeholder must
+also cover `event_details` in built-in follow-up prompts (#32), which hold
+mail subjects and iMessage text.
 Verify:
 Deviations:
 
 ---
 
-#26 — Per-engine provider override [ ] [Q19]
+#26 — Per-engine provider override [~] live [Q19]
 Wave: 4 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q19)
 Ask: The provider applies to all three engines. A per-engine override
 (local analysis, cloud drafting) would keep per-event traffic on-device
@@ -1026,5 +1078,20 @@ and send only tool drafts to Groq.
 FROM WAVE 3 #33 (2026-11-09): `SetupScanner(cloud=…)` is set from
 `settings.provider`; make it follow the detection engine's provider.
 Verify:
-Deviations:
+Results (wave 4, 2026-11-09):
+⚬ `config.py`: `AGENT_PROVIDER_{MAIN,ANALYSIS,DRAFTING}` overrides (blank =
+  default), helpers `engine_provider(role)`, `engine_providers()`,
+  `is_cloud(role)`, `uses_cloud()`, `detection_is_cloud()`,
+  `groq_key_required()`. `main.py`: engines built per role;
+  `SetupScanner(cloud=settings.detection_is_cloud())`; settings API gains
+  the three fields (invalid → 400), `engine_providers`,
+  `running_engine_providers`, `groq_api_key_required`; the key is required
+  only if an engine uses groq. `SettingsView.swift`: per-engine pickers.
+  `user_settings.py`: the three keys added to `ALLOWED_KEYS`.
+⚬ `tests/test_providers.py` 14, `test_settings_api.py` +5; non-vacuity 3.
+⚬ Runner: eager-load log prints per-engine providers; conftest blanks
+  `AGENT_PROVIDER_*`; the open-help CLI prints per-engine providers.
+Deviations: edited `user_settings.py` (outside the slot; nobody else owned it; without
+it PUT returned 500). An invalid override resolves to local with a warning
+(never falls through to a cloud default, 7c).
 

@@ -17,6 +17,9 @@ from pathlib import Path
 # Only these keys may be written from the UI.
 ALLOWED_KEYS = frozenset({
     "AGENT_PROVIDER",
+    "AGENT_PROVIDER_MAIN",
+    "AGENT_PROVIDER_ANALYSIS",
+    "AGENT_PROVIDER_DRAFTING",
     "GROQ_API_KEY",
     "GROQ_MAIN_MODEL",
     "GROQ_ANALYSIS_MODEL",

@@ -28,3 +28,6 @@ os.environ.setdefault(
     "AGENT_MEMORY_DB",
     os.path.join(_tempfile.mkdtemp(prefix="bot-inator-test-"), "memory.db"),
 )
+# Per-engine overrides from a developer's .env must not leak into tests.
+for _role in ("MAIN", "ANALYSIS", "DRAFTING"):
+    os.environ.setdefault(f"AGENT_PROVIDER_{_role}", "")

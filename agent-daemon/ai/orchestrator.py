@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import importlib.util
 import logging
 import os
@@ -178,6 +179,9 @@ class Orchestrator:
         # that already tried ``generate_custom_tool`` and a second
         # ``generate_custom_tool`` call in one turn is refused (#38).
         self._turn_tool_calls: set[str] = set()
+        # Metadata of the built-in follow-up idea being acted on this turn
+        # (#32), so a declined built-in call is remembered as a rejection.
+        self._current_builtin_idea: Optional[dict[str, Any]] = None
         # Generated tools moved to ``quarantine/`` by the loader (#28):
         # name -> first line of the error. Cleared when the name loads.
         self._quarantined: dict[str, str] = {}
@@ -602,7 +606,12 @@ class Orchestrator:
             await self._emit_thought(
                 event_id, "reasoning", f"Prompt: {prompt[:200]}"
             )
-            result = await self._run_agent(event_id, prompt, max_steps=4)
+            meta = event.metadata or {}
+            self._current_builtin_idea = meta if meta.get("builtin_tool") else None
+            try:
+                result = await self._run_agent(event_id, prompt, max_steps=4)
+            finally:
+                self._current_builtin_idea = None
             await self._emit_thought(event_id, "complete", str(result)[:500])
             return
 
@@ -1027,6 +1036,17 @@ class Orchestrator:
             return False, None
         if tool_name == "generate_custom_tool":
             self._record_idea_feedback(tool_args, bool(resp.approved))
+        idea = self._current_builtin_idea
+        if idea is not None and tool_name == idea.get("builtin_tool"):
+            # A declined built-in follow-up suppresses that kind of idea;
+            # a timeout (handled above) is not a rejection.
+            self._record_idea_feedback(
+                {"kwargs": {
+                    "tool_name": idea.get("tool_name", ""),
+                    "description": idea.get("description", ""),
+                }},
+                bool(resp.approved),
+            )
         return bool(resp.approved), resp.edited_args
 
     def _record_idea_feedback(self, tool_args: dict[str, Any], approved: bool) -> None:
@@ -1120,6 +1140,23 @@ class Orchestrator:
         tool_name = meta.get("tool_name", "new_helper")
         description = meta.get("description", "")
         logic = meta.get("expected_logic", "")
+        builtin = meta.get("builtin_tool")
+        if builtin:
+            # Known follow-up a built-in tool can do directly (#32): no new
+            # tool is drafted; the built-in raises its own approval card.
+            details = json.dumps(meta.get("event_details") or {}, default=str)[:1500]
+            return (
+                "You are an on-device macOS assistant. An event just happened "
+                "that has a known follow-up.\n\n"
+                f"Event details: {details}\n"
+                f"Follow-up: {description}\n\n"
+                f"Call the built-in `{builtin}` tool now to do this follow-up, "
+                "with arguments taken from the event details (if the follow-up "
+                "says to read an email first, call `read_email` with its "
+                "message_id before that). Do NOT call `generate_custom_tool`. "
+                f"`{builtin}` asks the user for approval itself. If the details "
+                "don't support the follow-up, reply with the plain text 'no action'."
+            )
         intro = _PATTERN_SOURCE_INTROS.get(
             meta.get("source", "repetition"), _PATTERN_SOURCE_INTROS["repetition"]
         )

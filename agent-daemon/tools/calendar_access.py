@@ -23,9 +23,14 @@ Dates are ISO 8601 in local time. A naive datetime is local; output always
 carries the local UTC offset. Events come back as ``{id, title, start, end,
 calendar, location, notes (first 500 chars), url, all_day}``.
 
-Extending for reminders (#45): add reminder methods next to the event ones
-and reuse :meth:`EventKitBackend._ensure_access` with
-``EKEntityTypeReminder``; nothing here assumes events are the only entity.
+Reminders (#45) live beside events: both backends also implement
+``list_reminders`` / ``create_reminder`` / ``reminder_lists`` (EventKit with
+``EKEntityTypeReminder``, a separate macOS permission; or Reminders.app via
+AppleScript). Selection uses ``AGENT_REMINDERS_BACKEND``, falling back to
+``AGENT_CALENDAR_BACKEND``; ``auto`` checks the *Reminders* authorization.
+Reminders come back as ``{id, title, due, all_day, list, notes (first 500
+chars), completed}``; ``due`` is ``""`` (none), ``YYYY-MM-DD`` (all-day) or
+an ISO datetime with offset. Diagnostic: ``--check --reminders``.
 """
 
 from __future__ import annotations
@@ -38,10 +43,13 @@ from datetime import date, datetime, timedelta
 from typing import Any, Optional, Protocol, Sequence
 
 ENV_BACKEND = "AGENT_CALENDAR_BACKEND"
+ENV_REMINDERS_BACKEND = "AGENT_REMINDERS_BACKEND"
 NOTES_LIMIT = 500
 # osascript blocks on the first-use Automation prompt until it is answered.
 _OSASCRIPT_TIMEOUT_S = 60
 _ACCESS_TIMEOUT_S = 120
+# EventKit's reminder fetch is asynchronous; never wait on it forever.
+_FETCH_TIMEOUT_S = 30
 # ASCII unit / record separators: never typed in event text.
 _US = "\x1f"
 _RS = "\x1e"
@@ -101,6 +109,32 @@ def make_event(
     }
 
 
+def make_reminder(
+    *, id: str = "", title: str = "", due: Optional[datetime] = None,
+    all_day: bool = False, list: str = "", notes: str = "", completed: bool = False,
+) -> dict[str, Any]:
+    if due is None:
+        due_text = ""
+    elif all_day:
+        due_text = due.date().isoformat() if isinstance(due, datetime) else due.isoformat()
+    else:
+        due_text = iso(due)
+    return {
+        "id": id or "",
+        "title": title or "",
+        "due": due_text,
+        "all_day": bool(all_day and due is not None),
+        "list": list or "",
+        "notes": (notes or "")[:NOTES_LIMIT],
+        "completed": bool(completed),
+    }
+
+
+def sort_reminders(items: "builtins.list[dict[str, Any]]") -> "builtins.list[dict[str, Any]]":
+    """Due first (soonest first), undated last, then by title."""
+    return sorted(items, key=lambda r: (r["due"] == "", r["due"], r["title"].lower()))
+
+
 # ---- interface ---------------------------------------------------------------
 
 
@@ -121,6 +155,24 @@ class CalendarBackend(Protocol):
         location: Optional[str] = None, notes: Optional[str] = None,
     ) -> dict[str, Any]:
         """Create an event; return ``{status, event_id, calendar}``."""
+
+
+class RemindersBackend(Protocol):
+    name: str
+
+    def reminder_lists(self) -> builtins.list[str]:
+        """Names of the reminder lists."""
+
+    def list_reminders(
+        self, lists: Optional[Sequence[str]] = None, include_completed: bool = False,
+    ) -> builtins.list[dict[str, Any]]:
+        """Reminders in ``lists`` (all lists when empty)."""
+
+    def create_reminder(
+        self, title: str, due: Optional[datetime] = None, all_day: bool = False,
+        list_name: Optional[str] = None, notes: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Create a reminder; return ``{status, reminder_id, list}``."""
 
 
 # ---- EventKit ----------------------------------------------------------------
@@ -215,6 +267,12 @@ class EventKitBackend:
             status = self.status(entity)
         ok = {"full_access"} | ({"write_only"} if write else set())
         if status not in ok:
+            if entity == "reminder":
+                raise CalendarAccessError(
+                    f"Reminders access is {status} for this process. Allow it in System "
+                    "Settings > Privacy & Security > Reminders (for the app that runs "
+                    f"the daemon), or set {ENV_REMINDERS_BACKEND}=applescript."
+                )
             raise CalendarAccessError(
                 f"Calendar access is {status} for this process. Allow it in System "
                 "Settings > Privacy & Security > Calendars (for the app that runs "
@@ -297,6 +355,123 @@ class EventKitBackend:
             raise CalendarAccessError(f"EventKit could not save the event: {err}")
         return {"status": "ok", "event_id": str(ev.eventIdentifier() or ""),
                 "calendar": str(cal.title())}
+
+    # reminders (#45) ----------------------------------------------------------
+
+    def _reminder_calendars(self, store: Any) -> builtins.list[Any]:
+        ek, _ = _eventkit()
+        return builtins.list(store.calendarsForEntityType_(ek.EKEntityTypeReminder) or [])
+
+    def reminder_lists(self) -> builtins.list[str]:
+        store = self._ensure_access("reminder")
+        return [str(c.title()) for c in self._reminder_calendars(store)]
+
+    @staticmethod
+    def _fetch_reminders(store: Any, predicate: Any, timeout: Optional[float] = None) -> builtins.list[Any]:
+        """Run the asynchronous fetch and wait for it, at most ``timeout`` s."""
+        done = threading.Event()
+        box: dict[str, Any] = {"items": []}
+
+        def completion(items: Any) -> None:
+            box["items"] = builtins.list(items or [])
+            done.set()
+
+        ident = store.fetchRemindersMatchingPredicate_completion_(predicate, completion)
+        if not done.wait(_FETCH_TIMEOUT_S if timeout is None else timeout):
+            try:
+                store.cancelFetchRequest_(ident)
+            except Exception:
+                pass
+            raise CalendarAccessError("timed out waiting for EventKit to fetch reminders")
+        return box["items"]
+
+    @staticmethod
+    def _due_components(due: datetime, all_day: bool) -> Any:
+        _, foundation = _eventkit()
+        d = _local(due)
+        comps = foundation.NSDateComponents.alloc().init()
+        comps.setCalendar_(foundation.NSCalendar.currentCalendar())
+        comps.setYear_(d.year)
+        comps.setMonth_(d.month)
+        comps.setDay_(d.day)
+        if not all_day:
+            comps.setTimeZone_(foundation.NSTimeZone.localTimeZone())
+            comps.setHour_(d.hour)
+            comps.setMinute_(d.minute)
+            comps.setSecond_(d.second)
+        return comps
+
+    def _due_of(self, rem: Any) -> tuple[Optional[datetime], bool]:
+        _, foundation = _eventkit()
+        comps = rem.dueDateComponents()
+        if comps is None:
+            return None, False
+        undefined = foundation.NSDateComponentUndefined
+        if int(comps.hour()) == undefined:
+            return datetime(int(comps.year()), int(comps.month()), int(comps.day())).astimezone(), True
+        cal = comps.calendar() or foundation.NSCalendar.currentCalendar()
+        nsdate = cal.dateFromComponents_(comps)
+        if nsdate is None:
+            return None, False
+        return self._from_nsdate(nsdate), False
+
+    def _reminder_to_dict(self, rem: Any) -> dict[str, Any]:
+        due, all_day = self._due_of(rem)
+        cal = rem.calendar()
+        return make_reminder(
+            id=str(rem.calendarItemIdentifier() or ""),
+            title=str(rem.title() or ""),
+            due=due, all_day=all_day,
+            list=str(cal.title()) if cal is not None else "",
+            notes=str(rem.notes() or ""),
+            completed=bool(rem.isCompleted()),
+        )
+
+    def list_reminders(self, lists=None, include_completed=False):
+        store = self._ensure_access("reminder")
+        cals = None
+        if lists:
+            wanted = set(lists)
+            cals = [c for c in self._reminder_calendars(store) if str(c.title()) in wanted]
+            if not cals:
+                raise CalendarAccessError(f"No reminders list named {', '.join(lists)!r}.")
+        if include_completed:
+            pred = store.predicateForRemindersInCalendars_(cals)
+        else:
+            pred = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
+                None, None, cals,
+            )
+        items = [self._reminder_to_dict(r) for r in self._fetch_reminders(store, pred)]
+        return sort_reminders(items)
+
+    def create_reminder(self, title, due=None, all_day=False, list_name=None, notes=None):
+        ek, _ = _eventkit()
+        store = self._ensure_access("reminder", write=True)
+        if list_name:
+            cal = next((c for c in self._reminder_calendars(store)
+                        if str(c.title()) == list_name), None)
+            if cal is None:
+                raise CalendarAccessError(f"No reminders list named {list_name!r}.")
+        else:
+            cal = store.defaultCalendarForNewReminders()
+            if cal is None:
+                raise CalendarAccessError("No default list for new reminders.")
+        if not cal.allowsContentModifications():
+            raise CalendarAccessError(f"Reminders list {str(cal.title())!r} is read-only.")
+        rem = ek.EKReminder.reminderWithEventStore_(store)
+        rem.setTitle_(title)
+        rem.setCalendar_(cal)
+        if notes:
+            rem.setNotes_(notes)
+        if due is not None:
+            rem.setDueDateComponents_(self._due_components(due, all_day))
+            if not all_day:  # a timed reminder should actually alert at that time
+                rem.addAlarm_(ek.EKAlarm.alarmWithAbsoluteDate_(self._nsdate(due)))
+        ok, err = store.saveReminder_commit_error_(rem, True, None)
+        if not ok:
+            raise CalendarAccessError(f"EventKit could not save the reminder: {err}")
+        return {"status": "ok", "reminder_id": str(rem.calendarItemIdentifier() or ""),
+                "list": str(cal.title())}
 
 
 # ---- AppleScript ---------------------------------------------------------------
@@ -394,6 +569,87 @@ end run
 '''
 
 
+# Reminders.app (#45). argv: 1 = list name ("" = all), 2 = "true" to include
+# completed. Fields: id, name, due date, allday due date, list, body, completed.
+_REMINDERS_LIST_SCRIPT = _AS_HELPERS + '''
+on dOf(v)
+    if v is missing value then return ""
+    return my isoOf(v)
+end dOf
+
+on run argv
+    set US to character id 31
+    set RS to character id 30
+    set wanted to item 1 of argv
+    set withDone to (item 2 of argv) is "true"
+    set out to {}
+    tell application "Reminders"
+        if wanted is not "" and not (exists list wanted) then return "NO_LIST"
+        repeat with l in lists
+            set lName to name of l as text
+            if wanted is "" or lName is wanted then
+                if withDone then
+                    set rs to every reminder of l
+                else
+                    set rs to (every reminder of l whose completed is false)
+                end if
+                repeat with r in rs
+                    set rec to {my txt(id of r), my txt(name of r), my dOf(due date of r), my dOf(allday due date of r), lName, my txt(body of r), (completed of r) as text}
+                    set AppleScript's text item delimiters to US
+                    set end of out to rec as text
+                    set AppleScript's text item delimiters to ""
+                end repeat
+            end if
+        end repeat
+    end tell
+    set AppleScript's text item delimiters to RS
+    set s to out as text
+    set AppleScript's text item delimiters to ""
+    return s
+end run
+'''
+
+# argv: 1 = title, 2 = list ("" = default list), 3 = notes, 4 = due parts
+# ("" = no due date), 5 = "true" for an all-day due date.
+_REMINDERS_CREATE_SCRIPT = _AS_HELPERS + '''
+on run argv
+    set t to item 1 of argv
+    set lName to item 2 of argv
+    tell application "Reminders"
+        if lName is "" then
+            set l to default list
+        else
+            if not (exists list lName) then return "NO_LIST"
+            set l to list lName
+        end if
+        set r to make new reminder at end of reminders of l with properties {name:t}
+        if (item 3 of argv) is not "" then set body of r to (item 3 of argv)
+        if (item 4 of argv) is not "" then
+            set d to my mkDate(item 4 of argv)
+            if (item 5 of argv) is "true" then
+                set allday due date of r to d
+            else
+                set due date of r to d
+                set remind me date of r to d
+            end if
+        end if
+        return "OK" & (character id 31) & (id of r) & (character id 31) & (name of l)
+    end tell
+end run
+'''
+
+_REMINDER_LISTS_SCRIPT = '''
+on run argv
+    tell application "Reminders"
+        set AppleScript's text item delimiters to (character id 30)
+        set s to (name of every list) as text
+        set AppleScript's text item delimiters to ""
+        return s
+    end tell
+end run
+'''
+
+
 def _parts(dt: datetime) -> str:
     d = _local(dt)
     return f"{d.year} {d.month} {d.day} {d.hour} {d.minute} {d.second}"
@@ -467,6 +723,60 @@ class AppleScriptBackend:
         return {"status": "ok", "event_id": f[1] if len(f) > 1 else "",
                 "calendar": f[2] if len(f) > 2 else (calendar or "")}
 
+    # reminders (#45) ----------------------------------------------------------
+
+    def reminder_lists(self):
+        try:
+            out = _run_osascript(_REMINDER_LISTS_SCRIPT)
+        except Exception as exc:
+            raise CalendarAccessError(_osascript_error(exc)) from exc
+        return [n for n in out.split(_RS) if n]
+
+    def list_reminders(self, lists=None, include_completed=False):
+        names = builtins.list(lists or []) or [""]
+        items: builtins.list[dict[str, Any]] = []
+        for name in names:
+            try:
+                out = _run_osascript(
+                    _REMINDERS_LIST_SCRIPT, name, "true" if include_completed else "false",
+                )
+            except Exception as exc:
+                raise CalendarAccessError(_osascript_error(exc)) from exc
+            if out == "NO_LIST":
+                raise CalendarAccessError(f"No reminders list named {name!r}.")
+            for record in filter(None, out.split(_RS)):
+                f = record.split(_US)
+                if len(f) < 7:
+                    continue
+                due_s, allday_s = f[2].strip(), f[3].strip()
+                due: Optional[datetime] = None
+                all_day = False
+                if allday_s and (not due_s or due_s.endswith("T00:00:00")):
+                    due, all_day = parse_local(allday_s), True
+                elif due_s:
+                    due = parse_local(due_s)
+                items.append(make_reminder(
+                    id=f[0], title=f[1], due=due, all_day=all_day, list=f[4],
+                    notes=f[5], completed=f[6].strip() == "true",
+                ))
+        return sort_reminders(items)
+
+    def create_reminder(self, title, due=None, all_day=False, list_name=None, notes=None):
+        try:
+            out = _run_osascript(
+                _REMINDERS_CREATE_SCRIPT, title, list_name or "", notes or "",
+                _parts(due) if due is not None else "", "true" if all_day else "false",
+            )
+        except Exception as exc:
+            raise CalendarAccessError(_osascript_error(exc)) from exc
+        if out == "NO_LIST":
+            raise CalendarAccessError(f"No reminders list named {list_name!r}.")
+        f = out.split(_US)
+        if f[0] != "OK":
+            raise CalendarAccessError(f"Unexpected reply from Reminders: {out!r}")
+        return {"status": "ok", "reminder_id": f[1] if len(f) > 1 else "",
+                "list": f[2] if len(f) > 2 else (list_name or "")}
+
 
 # ---- selection -------------------------------------------------------------------
 
@@ -501,6 +811,50 @@ def get_backend() -> CalendarBackend:
     elif choice == "eventkit":
         raise CalendarAccessError("pyobjc-framework-EventKit is not installed")
     return AppleScriptBackend()
+
+
+_reminder_override: Optional[RemindersBackend] = None
+
+
+def set_reminder_backend(backend: Optional[RemindersBackend]) -> None:
+    """Force a reminders backend (tests); ``None`` returns to env selection."""
+    global _reminder_override
+    _reminder_override = backend
+
+
+def get_reminder_backend() -> RemindersBackend:
+    """Like :func:`get_backend`, but for reminders: ``AGENT_REMINDERS_BACKEND``
+    (falling back to ``AGENT_CALENDAR_BACKEND``), and ``auto`` looks at the
+    Reminders authorization, which macOS tracks separately from Calendar."""
+    if _reminder_override is not None:
+        return _reminder_override
+    raw = os.environ.get(ENV_REMINDERS_BACKEND) or os.environ.get(ENV_BACKEND) or "auto"
+    choice = raw.strip().lower()
+    if choice == "applescript":
+        return AppleScriptBackend()
+    if choice not in {"eventkit", "auto"}:
+        raise CalendarAccessError(
+            f"{ENV_REMINDERS_BACKEND}={choice!r}; use eventkit, applescript or auto"
+        )
+    global _eventkit_backend
+    if eventkit_available():
+        if _eventkit_backend is None:
+            _eventkit_backend = EventKitBackend()
+        if choice == "eventkit":
+            return _eventkit_backend
+        if _eventkit_backend.status("reminder") not in {"denied", "restricted"}:
+            return _eventkit_backend
+    elif choice == "eventkit":
+        raise CalendarAccessError("pyobjc-framework-EventKit is not installed")
+    return AppleScriptBackend()
+
+
+def list_reminders(lists=None, include_completed=False):
+    return get_reminder_backend().list_reminders(lists, include_completed)
+
+
+def create_reminder(title, due=None, all_day=False, list_name=None, notes=None):
+    return get_reminder_backend().create_reminder(title, due, all_day, list_name, notes)
 
 
 def list(start, end, calendars=None):  # noqa: A001 - interface name from #42
@@ -557,6 +911,47 @@ def _check(use_applescript: bool) -> int:  # pragma: no cover - live check
     return 0
 
 
+def _check_reminders(use_applescript: bool) -> int:  # pragma: no cover - live check
+    print(f"{ENV_REMINDERS_BACKEND}={os.environ.get(ENV_REMINDERS_BACKEND) or '(unset)'}  "
+          f"{ENV_BACKEND}={os.environ.get(ENV_BACKEND) or '(unset)'}")
+    backend: RemindersBackend
+    if use_applescript:
+        backend = AppleScriptBackend()
+        print("Backend: applescript (Reminders.app; may show an Automation prompt)")
+    else:
+        if not eventkit_available():
+            print("EventKit: NOT importable. Install pyobjc-framework-EventKit, "
+                  "or rerun with --applescript.")
+            return 2
+        ek = EventKitBackend()
+        before = ek.status("reminder")
+        print(f"EventKit Reminders status before: {before}")
+        if before == "not_determined":
+            print("Requesting Reminders access (a macOS prompt should appear now)...")
+            print(f"Granted: {ek.request_access('reminder')}")
+        after = ek.status("reminder")
+        print(f"EventKit Reminders status after: {after}")
+        if after != "full_access":
+            print("RESULT: EventKit has no Reminders access from this process. If no "
+                  "prompt appeared, it was silently denied: try `--reminders "
+                  f"--applescript`, then pin {ENV_REMINDERS_BACKEND}=applescript.")
+            return 1
+        backend = ek
+    try:
+        names = backend.reminder_lists()
+        open_items = backend.list_reminders()
+    except CalendarAccessError as exc:
+        print(f"RESULT: listing failed: {exc}")
+        return 1
+    print(f"Reminder lists ({len(names)}): {', '.join(names)}")
+    print(f"Open reminders: {len(open_items)}")
+    for r in open_items[:10]:
+        print(f"  {r['due'] or '(no due date)'}  {r['title']}  [{r['list']}]")
+    print(f"RESULT: {backend.name} works for reminders. Pin it with "
+          f"{ENV_REMINDERS_BACKEND}={backend.name} in agent-daemon/.env.")
+    return 0
+
+
 if __name__ == "__main__":  # pragma: no cover
     import argparse
     import sys
@@ -564,8 +959,10 @@ if __name__ == "__main__":  # pragma: no cover
     parser = argparse.ArgumentParser(description="Calendar permission check (#42)")
     parser.add_argument("--check", action="store_true", help="request access, list today")
     parser.add_argument("--applescript", action="store_true", help="check the AppleScript backend")
+    parser.add_argument("--reminders", action="store_true",
+                        help="with --check: request Reminders access and list reminder lists (#45)")
     ns = parser.parse_args()
     if not ns.check:
         parser.print_help()
         sys.exit(0)
-    sys.exit(_check(ns.applescript))
+    sys.exit(_check_reminders(ns.applescript) if ns.reminders else _check(ns.applescript))
