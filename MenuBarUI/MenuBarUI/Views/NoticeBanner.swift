@@ -9,13 +9,19 @@ struct NoticeBanner: View {
 
     var body: some View {
         if !ws.notices.isEmpty {
-            VStack(spacing: 6) {
-                ForEach(ws.notices) { notice in
-                    NoticeRow(notice: notice) { ws.dismissNotice(id: notice.id) }
+            // Capped so several notices can't push the popover's tabs and
+            // button bar out of view; extra notices scroll.
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(ws.notices) { notice in
+                        NoticeRow(notice: notice) { ws.dismissNotice(id: notice.id) }
+                    }
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .frame(maxHeight: 170)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -33,7 +39,7 @@ private struct NoticeRow: View {
                 Text(notice.body)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(3)
                 if let url = settingsURL {
                     Button("Open Settings") { NSWorkspace.shared.open(url) }
                         .controlSize(.small)
