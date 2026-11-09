@@ -841,5 +841,5 @@ Deviations:
 
 Wave-close run: full suite 523 passed, 3 runs in a row (~74 s); Swift
 type-check clean. #22 (sandboxed generated tools) and #51 (idea-text scrub)
-built and wait as `[~] live`. New #52: `open`/`osascript` inside the sandbox
+built and wait as `[~] live`. New #53: `open`/`osascript` inside the sandbox
 can reach other apps; needs a decision.

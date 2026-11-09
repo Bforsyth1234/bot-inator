@@ -47,7 +47,7 @@ checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
 ============================================================ -->
 
-Next ID: #53
+Next ID: #54
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -509,7 +509,7 @@ Deviations: DELETE also notifies (deleting a disabled/quarantined copy sent noth
 
 ---
 
-#51 — Tool detail view: summary, run conditions, and source for every tool [~] live
+#51 — Tool detail view: summary, run conditions, and source for every tool [ ]
 Wave: _ · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: The app should show detailed data on every tool it has, both the
 built-ins it shipped with and the ones it generated. For each tool:
@@ -540,14 +540,7 @@ returning summary, conditions, gate, source path, error text),
 (`ToolManagerView.swift`) and wave 6 (`main.py` routes, auth): schedule
 after wave 6 so the new route gets the auth token.
 Verify:
-Results (wave 7, 2026-11-09):
-⚬ `ai/privacy.py`: `note_personal_event` records iMessage text and mail
-  subjects from the last hour; `scrub_idea_text` (applied when
-  `should_redact("main")`) replaces 3+-word runs found in that text and any
-  quoted string of 3+ words in the idea's description/expected_logic.
-  `tests/test_idea_privacy.py` 5 tests incl. "dinner at 7 with Sam";
-  non-vacuity: no scrub → fails.
-Deviations: none.
+Deviations:
 
 ---
 
@@ -749,7 +742,7 @@ tools in shared modules; fixed by the runner at wave close (see #48).
 
 ### Privacy
 
-#51 — Idea text from a local engine can quote personal text into a cloud prompt [ ]
+#51 — Idea text from a local engine can quote personal text into a cloud prompt [~] live
 Wave: 7 (with #22) · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 5 report)
 Ask: #31 redacts personal text at each source, but when the detection engine
 is local and the main engine is cloud, the idea the local engine writes
@@ -761,7 +754,14 @@ quoted strings longer than N chars) before building the pattern prompt;
 test with a fake idea that quotes an iMessage.
 Verify: a test where a local idea quotes "dinner at 7 with Sam" and the cloud
 main prompt contains the placeholder instead.
-Deviations:
+Results (wave 7, 2026-11-09):
+⚬ `ai/privacy.py`: `note_personal_event` records iMessage text and mail
+  subjects from the last hour; `scrub_idea_text` (applied when
+  `should_redact("main")`) replaces 3+-word runs found in that text and any
+  quoted string of 3+ words in the idea's description/expected_logic.
+  `tests/test_idea_privacy.py` 5 tests incl. "dinner at 7 with Sam";
+  non-vacuity: no scrub → fails.
+Deviations: none.
 
 #52 — Settings toggle for sending personal text to cloud engines [ ]
 Wave: _ (after wave 6) · Agent: _ · Added: 2026-11-09 · Source: user
@@ -793,7 +793,7 @@ Deviations:
 
 ---
 
-#52 — Sandboxed tools can still reach outside via `open` / `osascript` [ ]
+#53 — Sandboxed tools can still reach outside via `open` / `osascript` [ ]
 Wave: — (after live checks) · Agent: _ · Added: 2026-11-09 · Source: assistant (wave 7 report)
 Ask: #22 allows `/usr/bin/osascript` and `/usr/bin/open` in the sandbox so
 generated tools can notify and open things. Both can ask another app (e.g.
