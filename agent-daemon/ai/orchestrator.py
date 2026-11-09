@@ -307,7 +307,11 @@ class Orchestrator:
                     )
                     continue
                 try:
-                    tool_obj = self._import_tool_module(name, path)
+                    exclude = frozenset(
+                        getattr(t, "name", getattr(t, "__name__", ""))
+                        for t in self.tools
+                    ) - {name}
+                    tool_obj = self._import_tool_module(name, path, exclude)
                 except Exception:
                     logger.exception(
                         "Failed to load dynamic tool from %s; skipping", path
@@ -351,8 +355,19 @@ class Orchestrator:
             return True
 
     @staticmethod
-    def _import_tool_module(name: str, path: Path) -> Any:
-        """Import ``path`` as ``tools.generated.<name>`` and return its Tool."""
+    def _import_tool_module(
+        name: str, path: Path, exclude: frozenset[str] = frozenset()
+    ) -> Any:
+        """Import ``path`` as ``tools.generated.<name>`` and return its Tool.
+
+        A generated module may import other tools (``from
+        tools.show_notification import show_notification``), so its
+        namespace can hold several Tool objects. The tool named after the
+        file wins. Otherwise the first Tool whose name is not in
+        ``exclude`` (built-ins and other loaded tools) is returned.
+        Returning an imported tool would register it twice and break the
+        agent rebuild ("Each tool ... should have a unique name").
+        """
         mod_name = f"tools.generated.{name}"
         sys.modules.pop(mod_name, None)
         spec = importlib.util.spec_from_file_location(mod_name, path)
@@ -365,10 +380,16 @@ class Orchestrator:
             from smolagents import Tool  # type: ignore
         except ImportError:
             Tool = None  # type: ignore
-        for attr in vars(module).values():
-            if Tool is not None and isinstance(attr, Tool):
+        candidates = [
+            attr for attr in vars(module).values()
+            if (Tool is not None and isinstance(attr, Tool))
+            or (callable(attr) and isinstance(getattr(attr, "name", None), str))
+        ]
+        for attr in candidates:
+            if getattr(attr, "name", None) == name:
                 return attr
-            if callable(attr) and getattr(attr, "name", None) == name:
+        for attr in candidates:
+            if Tool is not None and isinstance(attr, Tool) and attr.name not in exclude:
                 return attr
         return None
 

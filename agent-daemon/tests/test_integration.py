@@ -1179,3 +1179,47 @@ def test_pattern_recognizer_signature_ignores_titles_and_paths() -> None:
     ) == PatternRecognizer._signature(
         ContextEvent(event_type="app_activated", app_name="Preview", window_title="b.pdf")
     )
+
+
+def test_load_dynamic_tools_ignores_imported_builtin_tools(tmp_path) -> None:
+    """A generated tool that imports a built-in must not re-register it.
+
+    Regression (2026-11-09 live run): ``recent_apps.py`` imported
+    ``show_notification`` and the loader picked that up instead of
+    ``recent_apps``, so the agent rebuild failed on duplicate names.
+    """
+    import asyncio as _asyncio
+    from unittest.mock import patch as _patch
+
+    from ai.mlx_engine import MLXEngine
+    from ai.orchestrator import Orchestrator
+    from events.event_bus import EventBus
+    from tools import AVAILABLE_TOOLS
+
+    (tmp_path / "recent_apps.py").write_text(
+        '"""Recent apps."""\n'
+        'from smolagents import tool\n'
+        'from tools.show_notification import show_notification\n\n'
+        '@tool\n'
+        'def recent_apps() -> dict:\n'
+        '    """List recent apps."""\n'
+        '    return {"status": "ok"}\n'
+    )
+
+    loop = _asyncio.new_event_loop()
+    try:
+        bus = EventBus()
+        bus.bind_loop(loop)
+        with _patch.object(Orchestrator, "_build_agent", return_value=None):
+            orch = Orchestrator(
+                engine=MLXEngine(), event_bus=bus, tools=list(AVAILABLE_TOOLS),
+                generated_tools_dir=tmp_path,
+            )
+            loaded = orch.load_dynamic_tools()
+            loaded_again = orch.load_dynamic_tools()
+    finally:
+        loop.close()
+    names = [t.name for t in orch.tools]
+    assert loaded == loaded_again == ["recent_apps"]
+    assert names.count("show_notification") == 1
+    assert names.count("recent_apps") == 1
