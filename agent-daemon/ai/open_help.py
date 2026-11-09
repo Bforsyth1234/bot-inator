@@ -40,6 +40,7 @@ from ai.idea_sources import (
     _PROPOSAL_FORMAT,
     parse_suggestion,
 )
+from ai.privacy import redact_event
 from events.event_bus import ContextEvent, EventBus
 
 logger = logging.getLogger(__name__)
@@ -313,7 +314,8 @@ class OpenHelpSuggester:
         """Buffer ``event``; ask the guiding question when due."""
         if event.event_type in self._SKIP_TYPES:
             return None
-        self._window.append(event)
+        # The window goes to the detection engine and its judge (#31).
+        self._window.append(redact_event(event, "detection"))
         self._new_since_ask += 1
         now = time.time()
         if self._new_since_ask < self.min_events or now < self._next_ask_at:

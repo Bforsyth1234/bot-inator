@@ -10,6 +10,8 @@ struct DebugView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 connectionSection
+                providersSection
+                listenerHealthSection
                 countersSection
                 stagesSection
                 errorsSection
@@ -37,6 +39,52 @@ struct DebugView: View {
             row("Reconnects scheduled", "\(ws.debug.reconnectsScheduled)")
             if let err = ws.debug.lastConnectError {
                 row("Last connect error", err, mono: true)
+            }
+        }
+    }
+
+    /// Which provider each engine runs on, and whether personal text is
+    /// kept off cloud engines (#31).
+    private var providersSection: some View {
+        section(title: "Engines") {
+            if let providers = ws.lastStatus?.engineProviders, !providers.isEmpty {
+                ForEach(["main", "analysis", "drafting"], id: \.self) { role in
+                    if let provider = providers[role] {
+                        row(role, provider == "local" ? "local (on this Mac)" : "\(provider) (cloud)")
+                    }
+                }
+                if providers.values.contains(where: { $0 != "local" }) {
+                    row("Personal text to cloud",
+                        ws.lastStatus?.cloudPersonalText == true
+                            ? "sent (AGENT_CLOUD_PERSONAL_TEXT=1)"
+                            : "kept on this Mac")
+                }
+            } else {
+                Text("Not reported by the daemon.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Liveness of supervised listeners (#16/#19).
+    private var listenerHealthSection: some View {
+        section(title: "Listener health") {
+            if let health = ws.lastStatus?.listenerHealth, !health.isEmpty {
+                ForEach(health.keys.sorted(), id: \.self) { name in
+                    if let entry = health[name] {
+                        row(name, entry.alive == true ? "alive" : "down")
+                        row("  restarts", "\(entry.restartCount ?? 0)")
+                        if let pid = entry.pid { row("  pid", "\(pid)") }
+                        if let err = entry.lastError, !err.isEmpty {
+                            row("  last error", err, mono: true)
+                        }
+                    }
+                }
+            } else {
+                Text("No supervised listeners running.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -113,7 +161,7 @@ struct DebugView: View {
 
     private var placeholderSection: some View {
         section(title: "More diagnostics") {
-            Text("Reserved for upcoming tools (daemon log tail, listener health, manual event injection).")
+            Text("Reserved for upcoming tools (daemon log tail, manual event injection).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

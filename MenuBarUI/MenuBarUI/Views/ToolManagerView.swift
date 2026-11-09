@@ -39,6 +39,20 @@ final class ToolManagerViewModel: ObservableObject {
         self.session = session
     }
 
+    private var debounceTask: Task<Void, Never>?
+
+    /// Refresh shortly after a `tools_changed` broadcast (#29). A burst of
+    /// frames (disable, then the window's own refresh) collapses into one
+    /// fetch.
+    func refreshSoon(delay: TimeInterval = 0.3) {
+        debounceTask?.cancel()
+        debounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.refresh()
+        }
+    }
+
     func refresh() async {
         isLoading = true
         defer { isLoading = false }
@@ -113,6 +127,9 @@ struct ToolManagerView: View {
         }
         .frame(minWidth: 440, minHeight: 420)
         .task { await viewModel.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: .toolsChanged)) { _ in
+            viewModel.refreshSoon()
+        }
     }
 
     private var header: some View {

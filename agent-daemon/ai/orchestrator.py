@@ -33,10 +33,17 @@ from schemas.ws_messages import (
     CodeApprovalRequest,
     CodeApprovalRequestPayload,
     CodeApprovalResponsePayload,
+    NOTICE_EVENT_TYPE,
+    Notice,
+    NoticePayload,
     Thought,
     ThoughtPayload,
+    ToolsChanged,
+    ToolsChangedPayload,
 )
 from tools import READ_ONLY_TOOL_NAMES
+
+from . import privacy
 
 from .mlx_engine import MLXEngine
 from .memory import Memory
@@ -185,6 +192,9 @@ class Orchestrator:
         # Generated tools moved to ``quarantine/`` by the loader (#28):
         # name -> first line of the error. Cleared when the name loads.
         self._quarantined: dict[str, str] = {}
+        # Active notices by id (#19): each id is published once per run and
+        # replayed to clients that connect later (:meth:`notice_frames`).
+        self._notices: dict[str, NoticePayload] = {}
         self._agent: Any = None
 
     def mark_tool_ready_for_rerun(self, tool_name: str) -> None:
@@ -196,6 +206,64 @@ class Orchestrator:
         The flag is consumed by :meth:`_handle_user_message`.
         """
         self._pending_rerun_tool = tool_name
+
+    # ---- notices (#19) -----------------------------------------------
+
+    def publish_notice(self, notice: NoticePayload | dict[str, Any]) -> bool:
+        """Broadcast ``notice`` unless its id was already published this run.
+
+        Call on the event loop (listener threads go through the event bus
+        with a ``system_notice`` event). Returns ``True`` when broadcast.
+        """
+        if not isinstance(notice, NoticePayload):
+            notice = NoticePayload.model_validate(notice)
+        if notice.id in self._notices:
+            return False
+        self._notices[notice.id] = notice
+        logger.info("Notice %s: %s", notice.id, notice.title)
+        self._schedule(self._send(self._notice_frame(notice)))
+        return True
+
+    def notice_frames(self) -> list[Notice]:
+        """A fresh ``notice`` frame per active notice, for a new client."""
+        return [self._notice_frame(n) for n in self._notices.values()]
+
+    def _notice_frame(self, notice: NoticePayload) -> Notice:
+        return Notice(seq=self._next_seq(), timestamp=_now_iso(), payload=notice)
+
+    # ---- tools_changed (#29) -----------------------------------------
+
+    def notify_tools_changed(self, reason: str, tool_names: list[str]) -> None:
+        """Broadcast one ``tools_changed`` frame, from any thread."""
+        frame = ToolsChanged(
+            seq=self._next_seq(),
+            timestamp=_now_iso(),
+            payload=ToolsChangedPayload(
+                reason=reason, tool_names=sorted(set(tool_names)),
+            ),
+        )
+        self._schedule(self._send(frame))
+
+    def _schedule(self, coro: Any) -> None:
+        """Run ``coro`` on the bus's loop, from the loop or any thread.
+
+        On the loop thread it runs as a task, i.e. after the current
+        synchronous code (a route moving files) finishes.
+        """
+        loop = getattr(self.event_bus, "loop", None)
+        if loop is None or loop.is_closed():
+            coro.close()
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            loop.create_task(coro)
+        elif loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, loop)
+        else:
+            coro.close()
 
     # ---- lifecycle ----------------------------------------------------
 
@@ -334,6 +402,7 @@ class Orchestrator:
             if target is None or not target.exists():
                 return sorted(self._dynamic_tool_names)
 
+            before = set(self._dynamic_tool_names)
             loaded: list[str] = []
             quarantined: list[tuple[str, str]] = []
             for path in sorted(target.iterdir()):
@@ -380,6 +449,17 @@ class Orchestrator:
                 self._agent = self._build_agent()
             for name, first_line in quarantined:
                 self._report_quarantine(name, first_line)
+            # One frame per call, not per tool (#29). A reload that loads
+            # the same names (startup, ``reload_dynamic_tools``) is a change
+            # too: the tool objects were replaced.
+            if quarantined:
+                self.notify_tools_changed(
+                    "quarantined",
+                    [n for n, _ in quarantined]
+                    + sorted(self._dynamic_tool_names ^ before),
+                )
+            elif loaded:
+                self.notify_tools_changed("loaded", loaded)
             return sorted(self._dynamic_tool_names)
 
     def _rebuild_agent_isolating(
@@ -473,25 +553,12 @@ class Orchestrator:
 
     def _report_quarantine(self, name: str, first_line: str) -> None:
         """Emit a ``tool_result`` thought for a quarantined tool, from any thread."""
-        loop = getattr(self.event_bus, "loop", None)
-        if loop is None or loop.is_closed():
-            return
-        coro = self._emit_thought(
+        self._schedule(self._emit_thought(
             getattr(self, "_current_event_id", "evt_tools"),
             "tool_result",
             f"Generated tool {name} failed to load and was moved to "
             f"quarantine/: {first_line}",
-        )
-        try:
-            running = asyncio.get_running_loop()
-        except RuntimeError:
-            running = None
-        if running is loop:
-            loop.create_task(coro)
-        elif loop.is_running():
-            asyncio.run_coroutine_threadsafe(coro, loop)
-        else:
-            coro.close()
+        ))
 
     def unload_dynamic_tool(self, name: str) -> bool:
         """Remove a previously-loaded dynamic tool from the active agent.
@@ -508,6 +575,7 @@ class Orchestrator:
             self._remove_tool(name)
             self._agent = self._build_agent()
             logger.info("Unloaded dynamic tool: %s", name)
+            self.notify_tools_changed("unloaded", [name])
             return True
 
     @staticmethod
@@ -583,6 +651,14 @@ class Orchestrator:
                 logger.exception("Error handling event: %s", event)
 
     async def _handle_event(self, event: ContextEvent) -> None:
+        if event.event_type == NOTICE_EVENT_TYPE:
+            # A listener thread's notice (#19): not an observation, so no
+            # thought, no observers, no agent.
+            try:
+                self.publish_notice(event.metadata.get("notice") or {})
+            except Exception:
+                logger.exception("Invalid notice dropped: %r", event.metadata)
+            return
         event_id = event.metadata.get("event_id") or f"evt_{uuid.uuid4().hex[:12]}"
         self._turn_tool_calls = set()
         await self._emit_thought(event_id, "event_received", self._describe_event(event))
@@ -747,8 +823,10 @@ class Orchestrator:
         analysis is unavailable.
         """
         try:
+            # Personal text stays local when the analysis engine is a
+            # cloud one (#31).
             return await self.analysis_engine.evaluate_event(
-                self._describe_event(event)
+                self._describe_event(privacy.redact_event(event, "analysis"))
             )
         except Exception:
             logger.exception("evaluate_event failed")
@@ -933,6 +1011,9 @@ class Orchestrator:
             )
             if tool_name == "generate_custom_tool":
                 result = orchestrator._flag_quarantined_install(result)
+            if tool_name == "read_email":
+                # The result goes back into the main engine's prompt (#31).
+                result = privacy.redact_email_result(result, "main")
             label = f"{tool_name} (read-only)" if is_read_only else tool_name
             asyncio.run_coroutine_threadsafe(
                 orchestrator._emit_thought(event_id, "tool_result", f"{label}: {result}"),
@@ -1104,6 +1185,8 @@ class Orchestrator:
     def _build_prompt(
         self, event: ContextEvent, memories: Optional[list[str]] = None
     ) -> str:
+        # Every prompt built here goes to the main engine (#31).
+        event = privacy.redact_event(event, "main")
         if event.event_type == "imessage_received":
             return self._build_imessage_prompt(event, memories=memories)
 
@@ -1144,7 +1227,12 @@ class Orchestrator:
         if builtin:
             # Known follow-up a built-in tool can do directly (#32): no new
             # tool is drafted; the built-in raises its own approval card.
-            details = json.dumps(meta.get("event_details") or {}, default=str)[:1500]
+            # Mail subjects and iMessage text stay local when the main
+            # engine is a cloud one (#31); the redacted copy keeps the ids.
+            raw_details = meta.get("event_details") or {}
+            if privacy.should_redact("main"):
+                raw_details = meta.get("event_details_redacted", privacy.PLACEHOLDER)
+            details = json.dumps(raw_details, default=str)[:1500]
             return (
                 "You are an on-device macOS assistant. An event just happened "
                 "that has a known follow-up.\n\n"
@@ -1217,6 +1305,7 @@ class Orchestrator:
     def _build_imessage_prompt(
         event: ContextEvent, memories: Optional[list[str]] = None
     ) -> str:
+        event = privacy.redact_event(event, "main")
         sender = event.metadata.get("sender", "unknown")
         text = event.metadata.get("text", "")
         memory_block = Orchestrator._format_memories(memories)
