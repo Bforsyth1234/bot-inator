@@ -1,6 +1,6 @@
-"""Shared access to the Mac's calendars: EventKit first, AppleScript fallback.
+"""Shared access to the Mac's calendars: the menu bar app's EventKit (#60).
 
-One interface, two backends (#42):
+One interface, three backends (#42, #60):
 
 * :class:`EventKitBackend` talks to Apple's EventKit through
   ``pyobjc-framework-EventKit``. It sees every calendar the Calendar app
@@ -12,12 +12,18 @@ One interface, two backends (#42):
   so ranges are capped at 14 days, and it does not expand recurring events.
   As in ``tools/notes.py`` the scripts are fixed constants and every user
   value reaches them as ``osascript`` arguments read with ``on run argv``.
+* :class:`AppCalendarBackend` (#60, the default) asks the menu bar app,
+  which owns EventKit and can show the normal Calendar prompt, over the
+  daemon's WebSocket (``calendar_request`` / ``calendar_response``, see
+  :class:`AppCalendarBridge`). The daemon's own Python is silently denied
+  EventKit (no Info.plist usage string).
 
-Backend selection: ``AGENT_CALENDAR_BACKEND`` = ``eventkit``, ``applescript``
-or ``auto`` (default). ``auto`` uses EventKit unless it cannot be imported
-or access was denied/restricted, then AppleScript. Run the permission check
-(``python tools/calendar_access.py --check`` from ``agent-daemon``) and pin
-whichever backend it reports working.
+Backend selection: ``AGENT_CALENDAR_BACKEND`` = ``app``, ``eventkit``,
+``applescript`` or ``auto`` (default). ``auto`` = ``app``: when the app
+isn't connected calendar tools answer "open the bot-inator menu bar app to
+use Calendar" (no slow AppleScript fallback). ``eventkit`` / ``applescript``
+are explicit pins; ``python tools/calendar_access.py --check`` from
+``agent-daemon`` diagnoses them.
 
 Dates are ISO 8601 in local time. A naive datetime is local; output always
 carries the local UTC offset. Events come back as ``{id, title, start, end,
@@ -35,12 +41,16 @@ an ISO datetime with offset. Diagnostic: ``--check --reminders``.
 
 from __future__ import annotations
 
+import asyncio
 import builtins
+import concurrent.futures
+import itertools
 import os
 import subprocess
 import threading
+import uuid
 from datetime import date, datetime, timedelta
-from typing import Any, Optional, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
 
 ENV_BACKEND = "AGENT_CALENDAR_BACKEND"
 ENV_REMINDERS_BACKEND = "AGENT_REMINDERS_BACKEND"
@@ -778,6 +788,223 @@ class AppleScriptBackend:
                 "list": f[2] if len(f) > 2 else (list_name or "")}
 
 
+# ---- menu bar app (#60) ----------------------------------------------------------
+#
+# The daemon's Python can't get the Calendar prompt (no Info.plist usage
+# string), so the menu bar app owns EventKit. ``main.py`` registers each WS
+# connection with :data:`app_bridge`; the app advertises its EventKit status
+# with a ``calendar_status`` frame (read without prompting) and answers
+# ``calendar_request`` frames with ``calendar_response``.
+
+APP_NOT_CONNECTED = (
+    "Calendar isn't available: open the bot-inator menu bar app to use Calendar."
+)
+APP_TIMEOUT_S = 15.0
+# Before the user has answered the macOS prompt the first request waits on it.
+APP_PROMPT_TIMEOUT_S = 120.0
+
+# send(request_id, op, args, timeout_seconds), a coroutine run on the loop.
+AppSend = Callable[[str, str, dict, int], Awaitable[None]]
+
+
+class _AppConnection:
+    def __init__(self, conn_id: str, send: AppSend, loop: asyncio.AbstractEventLoop) -> None:
+        self.conn_id = conn_id
+        self.send = send
+        self.loop = loop
+        self.authorization: Optional[str] = None  # None: not a calendar-capable client
+        self.advertised_at = 0
+
+
+class AppCalendarBridge:
+    """Request/response to the menu bar app over the WebSocket.
+
+    Works from any thread except the event loop's own (tools and the watcher
+    run in worker threads): the frame is sent with
+    ``run_coroutine_threadsafe`` and the caller blocks on a future keyed by
+    ``request_id`` until :meth:`submit_response` resolves it.
+
+    With several connections, requests go to ONE: the one that most
+    recently sent ``calendar_status``.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._conns: dict[str, _AppConnection] = {}
+        self._pending: dict[str, tuple[str, concurrent.futures.Future]] = {}
+        self._counter = itertools.count(1)
+
+    # connection lifecycle (called on the loop by main.py) --------------------
+
+    def connect(self, conn_id: str, send: AppSend, loop: asyncio.AbstractEventLoop) -> None:
+        with self._lock:
+            self._conns[conn_id] = _AppConnection(conn_id, send, loop)
+
+    def disconnect(self, conn_id: str) -> None:
+        with self._lock:
+            self._conns.pop(conn_id, None)
+            dropped = [rid for rid, (cid, _) in self._pending.items() if cid == conn_id]
+            futures = [self._pending.pop(rid)[1] for rid in dropped]
+        for fut in futures:
+            if not fut.done():
+                fut.set_exception(CalendarAccessError(
+                    "The menu bar app disconnected before answering. " + APP_NOT_CONNECTED))
+
+    def set_status(self, conn_id: str, authorization: str) -> None:
+        with self._lock:
+            conn = self._conns.get(conn_id)
+            if conn is None:
+                return
+            conn.authorization = authorization
+            conn.advertised_at = next(self._counter)
+
+    # state (never prompts) -----------------------------------------------------
+
+    def _pick(self) -> Optional[_AppConnection]:
+        with self._lock:
+            capable = [c for c in self._conns.values() if c.authorization is not None]
+        return max(capable, key=lambda c: c.advertised_at) if capable else None
+
+    def connected(self) -> bool:
+        return self._pick() is not None
+
+    def authorization(self) -> Optional[str]:
+        conn = self._pick()
+        return conn.authorization if conn else None
+
+    # request / response ----------------------------------------------------------
+
+    def submit_response(self, conn_id: str, payload: dict[str, Any]) -> bool:
+        """Resolve a pending request (main.py, on ``calendar_response``)."""
+        request_id = str(payload.get("request_id") or "")
+        with self._lock:
+            entry = self._pending.pop(request_id, None)
+            auth = payload.get("authorization")
+            conn = self._conns.get(conn_id)
+            if auth and conn is not None:
+                conn.authorization = auth
+        if entry is None or entry[1].done():
+            return False
+        entry[1].set_result(payload)
+        return True
+
+    def request(self, op: str, args: dict[str, Any], timeout: Optional[float] = None) -> dict[str, Any]:
+        conn = self._pick()
+        if conn is None:
+            raise CalendarAccessError(APP_NOT_CONNECTED)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is conn.loop:
+            raise CalendarAccessError(
+                "calendar_access was called on the event loop; run it in a thread")
+        if timeout is None:
+            prompt = op == "request_access" or conn.authorization == "not_determined"
+            timeout = APP_PROMPT_TIMEOUT_S if prompt else APP_TIMEOUT_S
+        request_id = f"cal_{uuid.uuid4().hex[:12]}"
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        with self._lock:
+            self._pending[request_id] = (conn.conn_id, fut)
+        payload: Any = None
+        try:
+            sent = asyncio.run_coroutine_threadsafe(
+                conn.send(request_id, op, args, int(timeout)), conn.loop)
+            sent.result(timeout=APP_TIMEOUT_S)
+            payload = fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise CalendarAccessError(
+                f"The menu bar app didn't answer the calendar request within {timeout:.0f} s."
+            ) from None
+        except CalendarAccessError:
+            raise
+        except Exception as exc:
+            raise CalendarAccessError(f"Couldn't reach the menu bar app: {exc}") from exc
+        finally:
+            with self._lock:
+                self._pending.pop(request_id, None)
+        if not payload.get("ok"):
+            raise CalendarAccessError(str(payload.get("error") or "the menu bar app's calendar request failed"))
+        return payload
+
+
+app_bridge = AppCalendarBridge()
+
+
+def _app_permission_check() -> dict[str, str]:
+    """Permissions row ``calendars`` (#59): what the app reported. Never prompts."""
+    auth = app_bridge.authorization()
+    if auth is None:
+        return {"status": "unknown", "detail": "open the bot-inator menu bar app to check"}
+    status = {"full_access": "granted", "not_determined": "not_asked",
+              "denied": "denied", "restricted": "denied",
+              "write_only": "denied"}.get(auth, "unknown")
+    detail = "" if status == "granted" else f"EventKit status in the menu bar app: {auth}"
+    return {"status": status, "detail": detail}
+
+
+def _app_permission_request() -> dict[str, Any]:
+    """Permissions "Request" click: the app shows the macOS Calendar prompt."""
+    auth = app_bridge.authorization()
+    if auth is None:
+        return {"action": "none", "detail": "open the bot-inator menu bar app, then click Request"}
+    if auth in {"denied", "restricted", "write_only"}:
+        return {"action": "none", "detail": (
+            f"Calendar access is {auth} for the menu bar app; change it in System Settings "
+            "> Privacy & Security > Calendars")}
+    try:
+        reply = app_bridge.request("request_access", {})
+    except CalendarAccessError as exc:
+        return {"action": "none", "detail": str(exc)}
+    return {"action": "prompted", "detail": str(reply.get("authorization") or "")}
+
+
+def register_permission_hooks() -> None:
+    """Point the Permissions ``calendars`` row at the app (#59 hook)."""
+    from ai import permissions  # lazy: tools must not import the AI stack at import time
+
+    permissions.set_external_check("calendars", _app_permission_check)
+    permissions.set_external_request("calendars", _app_permission_request)
+
+
+class AppCalendarBackend:
+    """Calendar through the menu bar app's EventKit (#60)."""
+
+    name = "app"
+    max_range_days = 31
+
+    def __init__(self, bridge: Optional[AppCalendarBridge] = None) -> None:
+        self._bridge = bridge or app_bridge
+
+    def ready(self) -> bool:
+        return self._bridge.authorization() == "full_access"
+
+    def list(self, start, end, calendars=None):
+        args: dict[str, Any] = {"start": iso(start), "end": iso(end)}
+        if calendars:
+            args["calendars"] = builtins.list(calendars)
+        reply = self._bridge.request("list", args)
+        events = []
+        for ev in reply.get("events") or []:
+            events.append(make_event(
+                id=str(ev.get("id") or ""), title=str(ev.get("title") or ""),
+                start=parse_local(str(ev["start"])), end=parse_local(str(ev["end"])),
+                calendar=str(ev.get("calendar") or ""), location=str(ev.get("location") or ""),
+                notes=str(ev.get("notes") or ""), url=str(ev.get("url") or ""),
+                all_day=bool(ev.get("all_day")),
+            ))
+        return sorted(events, key=lambda e: e["start"])
+
+    def create(self, title, start, end, calendar=None, location=None, notes=None):
+        args: dict[str, Any] = {"title": title, "start": iso(start), "end": iso(end)}
+        for key, value in (("calendar", calendar), ("location", location), ("notes", notes)):
+            if value:
+                args[key] = value
+        reply = self._bridge.request("create", args)
+        return {"status": "ok", "event_id": str(reply.get("event_id") or ""),
+                "calendar": str(reply.get("calendar") or calendar or "")}
+
+
 # ---- selection -------------------------------------------------------------------
 
 _override: Optional[CalendarBackend] = None
@@ -796,21 +1023,21 @@ def get_backend() -> CalendarBackend:
     choice = (os.environ.get(ENV_BACKEND) or "auto").strip().lower()
     if choice == "applescript":
         return AppleScriptBackend()
-    if choice not in {"eventkit", "auto"}:
+    if choice in {"app", "auto"}:
+        # #60: the menu bar app owns EventKit. No AppleScript fallback under
+        # auto (it timed out live); when the app isn't connected the backend
+        # answers with "open the bot-inator menu bar app".
+        return AppCalendarBackend()
+    if choice != "eventkit":
         raise CalendarAccessError(
-            f"{ENV_BACKEND}={choice!r}; use eventkit, applescript or auto"
+            f"{ENV_BACKEND}={choice!r}; use app, eventkit, applescript or auto"
         )
     global _eventkit_backend
-    if eventkit_available():
-        if _eventkit_backend is None:
-            _eventkit_backend = EventKitBackend()
-        if choice == "eventkit":
-            return _eventkit_backend
-        if _eventkit_backend.status() not in {"denied", "restricted"}:
-            return _eventkit_backend
-    elif choice == "eventkit":
+    if not eventkit_available():
         raise CalendarAccessError("pyobjc-framework-EventKit is not installed")
-    return AppleScriptBackend()
+    if _eventkit_backend is None:
+        _eventkit_backend = EventKitBackend()
+    return _eventkit_backend
 
 
 _reminder_override: Optional[RemindersBackend] = None
@@ -830,6 +1057,8 @@ def get_reminder_backend() -> RemindersBackend:
         return _reminder_override
     raw = os.environ.get(ENV_REMINDERS_BACKEND) or os.environ.get(ENV_BACKEND) or "auto"
     choice = raw.strip().lower()
+    if choice == "app":  # the app serves events only (#60); reminders stay as before
+        choice = "auto"
     if choice == "applescript":
         return AppleScriptBackend()
     if choice not in {"eventkit", "auto"}:

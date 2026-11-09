@@ -323,14 +323,13 @@ def test_backend_selection(monkeypatch) -> None:
     monkeypatch.setenv(ca.ENV_BACKEND, "bogus")
     with pytest.raises(ca.CalendarAccessError):
         ca.get_backend()
+    # #60: auto means the menu bar app, with no AppleScript fallback.
+    for choice in ("auto", "app"):
+        monkeypatch.setenv(ca.ENV_BACKEND, choice)
+        assert ca.get_backend().name == "app"
     if not ca.eventkit_available():
         pytest.skip("pyobjc-framework-EventKit not installed")
     monkeypatch.setenv(ca.ENV_BACKEND, "eventkit")
-    assert ca.get_backend().name == "eventkit"
-    monkeypatch.setenv(ca.ENV_BACKEND, "auto")
-    monkeypatch.setattr(ca.EventKitBackend, "status", lambda self, entity="event": "denied")
-    assert ca.get_backend().name == "applescript"
-    monkeypatch.setattr(ca.EventKitBackend, "status", lambda self, entity="event": "not_determined")
     assert ca.get_backend().name == "eventkit"
 
 

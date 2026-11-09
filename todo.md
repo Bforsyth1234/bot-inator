@@ -79,7 +79,7 @@ API auth → sandbox for installed tools → live checks.
 | 6 | A: #27 (alone) | `main.py` (all routes + WS), every Swift HTTP/WS client | [x] closed 2026-11-09 (`[~] live`) |
 | 7 | A: #22 #51 (alone) | `ai/orchestrator.py` tool execution, new `tools/tool_sandbox.py` | [x] closed 2026-11-09 (`[~] live`) |
 | 8 | A: #52 · B: #53 · C: #56 · D: #58 · E: #59 · F: #61 | A `ai/privacy.py`, `user_settings.py`, settings routes in `main.py`, `SettingsView.swift` · B `tools/tool_sandbox.py` · C new `routes/ideas.py`, `IdeaFeedback` in `ai/open_help.py`, `ai/idea_match.py`, new `DeclinedIdeasView.swift` · D `tools/read_active_tab.py` · E new `ai/permissions.py`, new `routes/permissions.py`, new `PermissionsView.swift` · F `ToolManagerView.swift`, new `ToolDetailView.swift`, new `routes/tool_detail.py`, provenance in `tools/meta_tool_generator.py` (+ each slot's new test file) | [x] closed 2026-11-09 (all `[~] live`) |
-| 9 | A: #60 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, new `CalendarBridge.swift`, `Info.plist`, `tools/calendar_access.py`, WS routing in `main.py` | [ ] |
+| 9 | A: #60 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, new `CalendarBridge.swift`, `Info.plist`, `tools/calendar_access.py`, WS routing in `main.py` | [x] closed 2026-11-09 (`[~] live`) |
 | — | #37 + every `[~] live` item | Live checks list (below) — needs the user at the Mac | [ ] |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -150,6 +150,7 @@ to see.
 - #58 Page text: turn on Chrome → View → Developer → Allow JavaScript from Apple Events (Safari → Develop → Allow JavaScript from Apple Events). Open an article → "summarize the page I'm on" → summary, no card. Setting off → the agent names the menu item. Bank page → sensitive-site error.
 - #59 Permissions: Settings → Permissions lists 11 rows; "Request" on Automation → Calendar shows the macOS prompt; "Open Settings" on FDA opens it; refresh after granting turns the row green.
 - #61 Tool detail: Tool Manager → click find_files → "Runs without asking"; open_url → "Needs your approval"; "Open in editor" opens the file as text; a newly generated tool shows its idea and trigger.
+- #60 Calendar (app): rebuild and restart the menu bar app (README), then "what's on my calendar today?" → the macOS Calendar prompt comes from the app → Allow → events in seconds, no card; Settings → Permissions shows Calendars granted. "Add lunch with Sam tomorrow at noon" → card → event in the default calendar. An event 10 min out → `event_starting_soon` in Debug. Quit the app → calendar tools answer "open the bot-inator menu bar app". (A re-signed rebuild may ask again.)
 - #22 Sandbox: re-enable csv_diff in Manage Tools, run it from chat → one approval → correct result. A generated tool that calls show_notification still shows the notification. Check the daemon log has no "refusing to load generated tools (no sandbox)".
 - #51 Idea scrub: with Groq main and local detection (and `AGENT_CLOUD_PERSONAL_TEXT` not set to 1), an iMessage-derived idea's prompt shows `[personal text kept on this Mac]` instead of the message words.
 
@@ -975,7 +976,7 @@ entries); the cache clear just drops vectors for removed ideas.
 
 ### Events and listeners
 
-#60 — Calendar through EventKit in the menu bar app [ ]
+#60 — Calendar through EventKit in the menu bar app [~] live
 Wave: 9 · Agent: _ · Added: 2026-11-09 · Source: user (live check of #42)
 Ask: Calendar doesn't work from the daemon. Live check (2026-11-09):
 EventKit is silently denied to the daemon's Python (no prompt, status stays
@@ -1038,7 +1039,31 @@ Verify:
   10 minutes out → `event_starting_soon` in Debug. Quit the app → calendar
   tools answer with the "open the app" error.
 Time: about half a day.
-Deviations:
+Results (wave 9, 2026-11-09):
+⚬ Frames: `calendar_request {request_id, op: list|create|request_access, args,
+  timeout_seconds}` (daemon→app), `calendar_response {request_id, ok,
+  events?|event_id?, error?, authorization?}` and `calendar_status
+  {authorization}` (app→daemon). Round trips in `tests/test_app_calendar.py`.
+⚬ App `Services/CalendarBridge.swift`: one `EKEventStore` on a private serial
+  queue; access requested only on the first daemon request
+  (`requestFullAccessToEvents`); list over all event calendars (recurrences
+  expanded) → the #42 dict; create in the default calendar when none named.
+  `WebSocketManager` sends `calendar_status` after hello, every 30 s if
+  changed, and after each request. Info.plist usage strings added.
+⚬ Daemon `AppCalendarBridge` / `AppCalendarBackend` in
+  `tools/calendar_access.py`: request/response via
+  `run_coroutine_threadsafe` + futures (15 s; 120 s while access is
+  undetermined); a disconnect fails pending requests. Requests go to the one
+  connection that sent `calendar_status` most recently, never broadcast.
+  `ready()` = app reported `full_access`. `auto`/`app` with no app → "open
+  the bot-inator menu bar app to use Calendar". The Permissions `calendars`
+  row reads the app's status; its Request sends `request_access`.
+⚬ Non-vacuity: no response routing → the WS route test times out; no
+  `set_result` → the list test fails; `auto` = AppleScript → 3 fail.
+⚬ Gates: 679 passed ×3; swiftc clean; `plutil -lint` OK.
+Deviations: added the `request_access` op and the `calendar_status` frame;
+`auto` no longer uses in-daemon EventKit or AppleScript (explicit pins still
+work); `test_calendar.py::test_backend_selection` updated.
 
 ---
 
