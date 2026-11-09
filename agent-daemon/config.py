@@ -19,6 +19,17 @@ user_settings.apply_to_environ()
 load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 
+# Groq model defaults. GPT-OSS models are the general chat models in
+# Groq's production tier that a developer-plan key can use; the Llama
+# models are Enterprise-only and qwen3-32b is no longer listed
+# (checked 2026-11-09 against https://console.groq.com/docs/models).
+GROQ_DEFAULT_MODELS: dict[str, str] = {
+    "GROQ_MAIN_MODEL": "openai/gpt-oss-120b",
+    "GROQ_ANALYSIS_MODEL": "openai/gpt-oss-20b",
+    "GROQ_DRAFTING_MODEL": "openai/gpt-oss-120b",
+}
+
+
 def _env(key: str, default: str) -> str:
     value = os.environ.get(key)
     return value if value else default
@@ -46,9 +57,9 @@ class Settings:
     # Groq settings. ``groq_api_key`` falls back to the ``GROQ_API_KEY``
     # environment variable so the secret is never committed. Model ids
     # follow Groq's catalogue (https://console.groq.com/docs/models) and
-    # mirror the local-engine triplet: a generalist chat model for the
-    # main tool-calling loop, a fast analysis model, and a code-specialist
-    # for the meta-tool generator's drafts.
+    # mirror the local-engine triplet: a large model for the main
+    # tool-calling loop and the meta-tool generator's drafts, and a small
+    # fast model for analysis.
     groq_api_base: str = field(
         default_factory=lambda: _env(
             "GROQ_API_BASE", "https://api.groq.com/openai/v1"
@@ -59,17 +70,17 @@ class Settings:
     )
     groq_main_model: str = field(
         default_factory=lambda: _env(
-            "GROQ_MAIN_MODEL", "llama-3.3-70b-versatile"
+            "GROQ_MAIN_MODEL", GROQ_DEFAULT_MODELS["GROQ_MAIN_MODEL"]
         )
     )
     groq_analysis_model: str = field(
         default_factory=lambda: _env(
-            "GROQ_ANALYSIS_MODEL", "llama-3.1-8b-instant"
+            "GROQ_ANALYSIS_MODEL", GROQ_DEFAULT_MODELS["GROQ_ANALYSIS_MODEL"]
         )
     )
     groq_drafting_model: str = field(
         default_factory=lambda: _env(
-            "GROQ_DRAFTING_MODEL", "qwen/qwen3-32b"
+            "GROQ_DRAFTING_MODEL", GROQ_DEFAULT_MODELS["GROQ_DRAFTING_MODEL"]
         )
     )
     # Which engine the pattern recognizer uses to spot repeated workflows

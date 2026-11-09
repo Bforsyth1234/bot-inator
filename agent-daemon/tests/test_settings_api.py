@@ -62,6 +62,18 @@ def test_omitted_key_keeps_saved_key(client):
     assert saved["GROQ_MAIN_MODEL"] == "some-model"
 
 
+def test_default_model_is_not_pinned(client):
+    from config import GROQ_DEFAULT_MODELS
+    client.put("/api/settings", json={
+        "provider": "groq", "groq_api_key": "gsk_test_1234abcd",
+        "groq_main_model": GROQ_DEFAULT_MODELS["GROQ_MAIN_MODEL"],
+        "groq_analysis_model": "custom-small",
+    })
+    saved = json.loads(client.settings_path.read_text())
+    assert "GROQ_MAIN_MODEL" not in saved
+    assert saved["GROQ_ANALYSIS_MODEL"] == "custom-small"
+
+
 def test_groq_without_key_rejected(client):
     resp = client.put("/api/settings", json={"provider": "groq"})
     assert resp.status_code == 400

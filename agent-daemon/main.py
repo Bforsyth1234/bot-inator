@@ -41,7 +41,7 @@ from ai.open_help import (
 # GroqEngine is imported lazily inside ``lifespan`` so the daemon still
 # boots cleanly when ``settings.provider == "local"`` and the optional
 # Groq dependency tree is missing.
-from config import settings
+from config import GROQ_DEFAULT_MODELS, settings
 from events.event_bus import ContextEvent, EventBus
 from events.file_watcher import FileWatcher
 from events.imessage_watcher import IMessageWatcher
@@ -480,7 +480,12 @@ async def put_settings(body: SettingsUpdate) -> dict[str, Any]:
     for field_name, env_key, _ in _SETTING_FIELDS[2:]:
         value = getattr(body, field_name)
         if value is not None:
-            updates[env_key] = value.strip()
+            value = value.strip()
+            # Don't pin the built-in default: storing "" lets a future
+            # default change reach this user.
+            if value == GROQ_DEFAULT_MODELS[env_key]:
+                value = ""
+            updates[env_key] = value
 
     # Refuse to save Groq without a key, or the next start would fail.
     current = user_settings.read()

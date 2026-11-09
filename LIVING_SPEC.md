@@ -237,9 +237,9 @@ serialised to avoid `huggingface_hub` lock contention.
 
 | Engine             | Local (MLX)                         | Groq (`GROQ_*_MODEL`)       | Used by                                         |
 |--------------------|-------------------------------------|-----------------------------|-------------------------------------------------|
-| `engine` (main)    | Hermes-3-Llama-3.1-8B-4bit          | `llama-3.3-70b-versatile`   | smolagents tool loop; pattern detection and idea sources by default. |
-| `analysis_engine`  | Qwen2.5-1.5B-Instruct-4bit          | `llama-3.1-8b-instant`      | `_analyse_event` → `evaluate_event`.            |
-| `drafting_engine`  | Qwen2.5-Coder-14B-Instruct-4bit     | `qwen/qwen3-32b`            | `generate_custom_tool` drafts + `draft_critic`. |
+| `engine` (main)    | Hermes-3-Llama-3.1-8B-4bit          | `openai/gpt-oss-120b`       | smolagents tool loop; pattern detection and idea sources by default. |
+| `analysis_engine`  | Qwen2.5-1.5B-Instruct-4bit          | `openai/gpt-oss-20b`        | `_analyse_event` → `evaluate_event`.            |
+| `drafting_engine`  | Qwen2.5-Coder-14B-Instruct-4bit     | `openai/gpt-oss-120b`       | `generate_custom_tool` drafts + `draft_critic`. |
 
 The detection engine is picked by `main._select_detection_engine` from
 `AGENT_PATTERN_ENGINE` (`main` / `analysis` / `drafting`).
