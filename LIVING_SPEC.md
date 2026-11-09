@@ -314,6 +314,8 @@ bypass the approval gate and run inline; all other tools still emit an
 | `read_email`       | ✅         | Body of one Mail.app message by id (`.emlx`).     |
 | `list_events`      | ✅         | Calendar events in a range (EventKit/AppleScript).|
 | `create_event`     |           | Adds a Calendar event.                            |
+| `list_reminders`   | ✅         | Reminders (EventKit/AppleScript), soonest first.  |
+| `create_reminder`  |           | Adds a reminder (optional due date, list, notes). |
 | `generate_custom_tool`|         | Meta-tool: drafts a new `@tool` module on the     |
 |                    |           | main engine, runs static safety checks, emits a   |
 |                    |           | `code_approval_request` for human review, and —   |

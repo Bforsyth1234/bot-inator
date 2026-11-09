@@ -790,3 +790,12 @@ clipboard watchers started; friction detector and setup scanner wired with
 one shared `IdeaFeedback`; `mail_received`, `event_starting_soon` and
 `clipboard_changed` feed idea sources but don't start the tool-calling
 agent; event descriptions and source intros added.
+
+## Wave 4 — closed 2026-11-09
+
+Wave-close run: full suite 457 passed, 3 runs in a row; Swift type-check
+clean. All five items (#32, #45, #15, #18, #26) are built and wait in
+todo.md as `[~] live`. Runner wiring: Reminders tools registered
+(`list_reminders` read-only); one shared `IdeaState` and `IdeaFeedback`;
+the pattern prompt calls built-in follow-up tools directly and a declined
+built-in is remembered as a rejection; conftest blanks `AGENT_PROVIDER_*`.

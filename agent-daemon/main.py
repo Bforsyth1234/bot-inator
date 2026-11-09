@@ -30,6 +30,7 @@ from ai.idea_sources import (
     CHAT_GAP_SYSTEM_PROMPT,
     NEXT_STEP_SYSTEM_PROMPT,
     ChatGapDetector,
+    IdeaState,
     NextStepSuggester,
 )
 from ai.open_help import (
@@ -93,38 +94,38 @@ def _listeners_enabled() -> bool:
 def _build_engines() -> tuple[Any, Any, Any]:
     """Construct the (main, analysis, drafting) engine triplet.
 
-    Provider is read from :data:`settings.provider`. ``"groq"`` builds
-    three :class:`~ai.groq_engine.GroqEngine` instances pointed at the
-    configured Groq endpoint; anything else (default ``"local"``) keeps
-    the original MLX-on-Apple-Silicon stack. Each engine is isolated so
-    the tool-calling agent, the lightweight analysis loop, and the
-    meta-tool drafter can run on different model ids without sharing
-    state. Unknown provider names fall back to ``"local"`` with a warning
-    so a typo in ``AGENT_PROVIDER`` cannot brick startup.
+    Each engine's provider is :meth:`settings.engine_provider` for its
+    role: ``AGENT_PROVIDER_<ROLE>`` when set, else ``AGENT_PROVIDER``
+    (#26), so e.g. local main + analysis with Groq drafting is allowed.
+    ``"groq"`` builds a :class:`~ai.groq_engine.GroqEngine` on that role's
+    Groq model; ``"local"`` an :class:`MLXEngine` on its MLX model. Each
+    engine is isolated so they can run on different model ids without
+    sharing state. Unknown provider names resolve to ``"local"`` with a
+    warning (see :func:`config.normalize_provider`) so a typo can neither
+    brick startup nor send data to the cloud.
     """
-    provider = (settings.provider or "local").lower()
-    if provider == "groq":
-        from ai.groq_engine import GroqEngine  # noqa: WPS433
-        return (
-            GroqEngine(settings.groq_main_model,
-                       api_key=settings.groq_api_key,
-                       api_base=settings.groq_api_base),
-            GroqEngine(settings.groq_analysis_model,
-                       api_key=settings.groq_api_key,
-                       api_base=settings.groq_api_base),
-            GroqEngine(settings.groq_drafting_model,
-                       api_key=settings.groq_api_key,
-                       api_base=settings.groq_api_base),
-        )
-    if provider != "local":
-        logger.warning(
-            "Unknown AGENT_PROVIDER=%r; falling back to local MLX", provider
-        )
-    return (
-        MLXEngine(settings.model_path),
-        MLXEngine(settings.analysis_model_path),
-        MLXEngine(settings.drafting_model_path),
-    )
+    local_models = {
+        "main": settings.model_path,
+        "analysis": settings.analysis_model_path,
+        "drafting": settings.drafting_model_path,
+    }
+    groq_models = {
+        "main": settings.groq_main_model,
+        "analysis": settings.groq_analysis_model,
+        "drafting": settings.groq_drafting_model,
+    }
+    engines: list[Any] = []
+    for role in ("main", "analysis", "drafting"):
+        if settings.engine_provider(role) == "groq":
+            from ai.groq_engine import GroqEngine  # noqa: WPS433
+            engines.append(GroqEngine(
+                groq_models[role],
+                api_key=settings.groq_api_key,
+                api_base=settings.groq_api_base,
+            ))
+        else:
+            engines.append(MLXEngine(local_models[role]))
+    return engines[0], engines[1], engines[2]
 
 
 def _select_detection_engine(
@@ -177,7 +178,7 @@ async def lifespan(app: FastAPI):
     if os.environ.get("AGENT_EAGER_LOAD", "1") != "0":
         logger.info(
             "Eager-loading %s models: main=%s analysis=%s drafting=%s",
-            settings.provider,
+            settings.engine_providers(),
             engine.model_name,
             analysis_engine.model_name,
             drafting_engine.model_name,
@@ -243,25 +244,32 @@ async def lifespan(app: FastAPI):
         event_bus=bus,
         evaluate=make_detection_evaluator(detection_engine),
     )
+    # One feedback store and one cooldown store for every idea source: two
+    # instances on the same file would overwrite each other.
+    idea_feedback = IdeaFeedback(settings.idea_feedback_path)
+    idea_state = IdeaState(settings.idea_feedback_path.with_name("idea_state.json"))
     idea_sources = [
         NextStepSuggester(
             event_bus=bus,
             evaluate=make_detection_evaluator(
                 detection_engine, system_prompt=NEXT_STEP_SYSTEM_PROMPT,
             ),
+            state=idea_state,
+            feedback=idea_feedback,
         ),
         ChatGapDetector(
             event_bus=bus,
             evaluate=make_detection_evaluator(
                 detection_engine, system_prompt=CHAT_GAP_SYSTEM_PROMPT,
             ),
+            state=idea_state,
+            feedback=idea_feedback,
         ),
     ]
     # One feedback store for every judged source: two IdeaFeedback
     # instances on the same file would overwrite each other's verdicts.
     # Exactly one source records verdicts (the orchestrator calls every
     # source's record_feedback).
-    idea_feedback = IdeaFeedback(settings.idea_feedback_path)
     if settings.open_help_enabled:
         idea_sources.append(OpenHelpSuggester(
             event_bus=bus,
@@ -273,6 +281,7 @@ async def lifespan(app: FastAPI):
                 system_prompt=IDEA_JUDGE_SYSTEM_PROMPT,
             ),
             feedback=idea_feedback,
+            state=idea_state,
             interval_seconds=settings.open_help_interval_seconds,
             min_score=settings.open_help_min_score,
         ))
@@ -314,7 +323,8 @@ async def lifespan(app: FastAPI):
     if _listeners_enabled() and os.environ.get("AGENT_SETUP_SCAN", "1") != "0":
         setup_scanner = SetupScanner(
             event_bus=bus,
-            cloud=settings.provider != "local",
+            # The scan's signals go to the detection engine (#26).
+            cloud=settings.detection_is_cloud(),
             feedback=idea_feedback,
             evaluate=make_detection_evaluator(
                 detection_engine, system_prompt=SETUP_SCAN_SYSTEM_PROMPT,
@@ -518,23 +528,62 @@ class SettingsUpdate(BaseModel):
     """Body for ``PUT /api/settings``. Omitted fields are left unchanged.
 
     ``groq_api_key``: omit or ``null`` keeps the saved key, ``""`` clears it.
+    ``provider_<role>``: ``""`` (or ``"default"``) means "same as
+    ``provider``"; otherwise ``"local"`` or ``"groq"``.
     """
 
     provider: Optional[str] = None
+    provider_main: Optional[str] = None
+    provider_analysis: Optional[str] = None
+    provider_drafting: Optional[str] = None
     groq_api_key: Optional[str] = None
     groq_main_model: Optional[str] = None
     groq_analysis_model: Optional[str] = None
     groq_drafting_model: Optional[str] = None
 
 
-# (request field, env/settings-file key, attribute on ``settings``)
-_SETTING_FIELDS = (
-    ("provider", "AGENT_PROVIDER", "provider"),
-    ("groq_api_key", "GROQ_API_KEY", "groq_api_key"),
-    ("groq_main_model", "GROQ_MAIN_MODEL", "groq_main_model"),
-    ("groq_analysis_model", "GROQ_ANALYSIS_MODEL", "groq_analysis_model"),
-    ("groq_drafting_model", "GROQ_DRAFTING_MODEL", "groq_drafting_model"),
+_ENGINE_ROLES = ("main", "analysis", "drafting")
+# (request field, env/settings-file key, engine role) for the #26 overrides.
+_OVERRIDE_FIELDS = tuple(
+    (f"provider_{role}", f"AGENT_PROVIDER_{role.upper()}", role)
+    for role in _ENGINE_ROLES
 )
+_MODEL_FIELDS = (
+    ("groq_main_model", "GROQ_MAIN_MODEL"),
+    ("groq_analysis_model", "GROQ_ANALYSIS_MODEL"),
+    ("groq_drafting_model", "GROQ_DRAFTING_MODEL"),
+)
+
+
+def _running_value(field_name: str) -> str:
+    """What this process uses for ``field_name`` (overrides normalized)."""
+    if field_name.startswith("provider_"):
+        return settings.engine_override(field_name[len("provider_"):])
+    return str(getattr(settings, field_name) or "")
+
+
+# (request field, env/settings-file key)
+_SETTING_FIELDS = (
+    ("provider", "AGENT_PROVIDER"),
+    *((f, k) for f, k, _ in _OVERRIDE_FIELDS),
+    ("groq_api_key", "GROQ_API_KEY"),
+    *_MODEL_FIELDS,
+)
+
+
+def _clean_provider(value: str) -> str:
+    """Lower-case a provider name; ``""`` when blank or invalid."""
+    value = (value or "").strip().lower()
+    return value if value in user_settings.PROVIDERS else ""
+
+
+def _effective_providers(values: dict[str, str]) -> dict[str, str]:
+    """Per-engine providers from a ``field -> value`` view (#26)."""
+    default = _clean_provider(values["provider"]) or "local"
+    return {
+        role: _clean_provider(values[f"provider_{role}"]) or default
+        for role in _ENGINE_ROLES
+    }
 
 
 def _key_hint(key: str) -> str:
@@ -550,16 +599,29 @@ def _settings_view() -> dict[str, Any]:
     saved_file = user_settings.read()
     saved: dict[str, str] = {}
     running: dict[str, str] = {}
-    for field_name, env_key, attr in _SETTING_FIELDS:
-        running[field_name] = str(getattr(settings, attr) or "")
+    for field_name, env_key in _SETTING_FIELDS:
+        running[field_name] = _running_value(field_name)
         if env_key in user_settings.shell_exported:
             # A shell export beats the file, so a restart won't change it.
             saved[field_name] = running[field_name]
+        elif field_name.startswith("provider_"):
+            # A blank override is meaningful ("same as default"), so an
+            # override missing from the file is blank, unless it came
+            # from .env (still in effect after a restart).
+            saved[field_name] = (
+                _clean_provider(saved_file.get(env_key, ""))
+                or running[field_name]
+            )
         else:
             saved[field_name] = saved_file.get(env_key) or running[field_name]
+    saved_engines = _effective_providers(saved)
     return {
         "provider": saved["provider"].lower(),
         "running_provider": running["provider"].lower(),
+        **{f: saved[f] for f, _, _ in _OVERRIDE_FIELDS},
+        "engine_providers": saved_engines,
+        "running_engine_providers": settings.engine_providers(),
+        "groq_api_key_required": "groq" in saved_engines.values(),
         "groq_api_key_set": bool(saved["groq_api_key"]),
         "groq_api_key_hint": _key_hint(saved["groq_api_key"]),
         "groq_main_model": saved["groq_main_model"],
@@ -569,7 +631,7 @@ def _settings_view() -> dict[str, Any]:
         "can_restart": _can_self_restart(),
         # Fields the UI can't change because they're exported in the shell.
         "locked_fields": [
-            field_name for field_name, env_key, _ in _SETTING_FIELDS
+            field_name for field_name, env_key in _SETTING_FIELDS
             if env_key in user_settings.shell_exported
         ],
     }
@@ -596,9 +658,21 @@ async def put_settings(body: SettingsUpdate) -> dict[str, Any]:
         if provider not in user_settings.PROVIDERS:
             raise HTTPException(status_code=400, detail="unknown provider")
         updates["AGENT_PROVIDER"] = provider
+    for field_name, env_key, role in _OVERRIDE_FIELDS:
+        value = getattr(body, field_name)
+        if value is None:
+            continue
+        value = value.strip().lower()
+        if value == "default":
+            value = ""
+        if value and value not in user_settings.PROVIDERS:
+            raise HTTPException(
+                status_code=400, detail=f"unknown provider for {role} engine"
+            )
+        updates[env_key] = value
     if body.groq_api_key is not None:
         updates["GROQ_API_KEY"] = body.groq_api_key.strip()
-    for field_name, env_key, _ in _SETTING_FIELDS[2:]:
+    for field_name, env_key in _MODEL_FIELDS:
         value = getattr(body, field_name)
         if value is not None:
             value = value.strip()
@@ -608,15 +682,24 @@ async def put_settings(body: SettingsUpdate) -> dict[str, Any]:
                 value = ""
             updates[env_key] = value
 
-    # Refuse to save Groq without a key, or the next start would fail.
+    # Refuse to save a Groq engine without a key, or the next start would
+    # fail. The key is required only if some engine uses Groq (#26).
     current = user_settings.read()
-    next_provider = updates.get(
-        "AGENT_PROVIDER", current.get("AGENT_PROVIDER", settings.provider)
-    )
-    next_key = updates.get(
-        "GROQ_API_KEY", current.get("GROQ_API_KEY", settings.groq_api_key)
-    )
-    if next_provider == "groq" and not next_key:
+
+    def _next(field_name: str, env_key: str) -> str:
+        if env_key in user_settings.shell_exported:
+            return _running_value(field_name)
+        if env_key in updates:
+            return updates[env_key]
+        if env_key in current:
+            return current[env_key]
+        return _running_value(field_name)
+
+    next_values = {f: _next(f, k) for f, k in _SETTING_FIELDS}
+    if (
+        "groq" in _effective_providers(next_values).values()
+        and not next_values["groq_api_key"]
+    ):
         raise HTTPException(
             status_code=400, detail="a Groq API key is required for Groq"
         )

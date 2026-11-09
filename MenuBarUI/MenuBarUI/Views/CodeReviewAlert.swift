@@ -8,12 +8,12 @@ struct CodeReviewAlert: View {
     let payload: CodeApprovalRequestPayload
     /// Invoked on Approve/Deny. `editedCode` is non-nil only when the user
     /// modified the draft in the editor; the backend writes that text to
-    /// disk in place of the original.
+    /// disk in place of the original. The presenter closes the window; its
+    /// red X sends a denial (#15).
     let onDecision: (_ approved: Bool, _ editedCode: String?, _ note: String) -> Void
 
     @State private var draft: String = ""
     @State private var userNote: String = ""
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -96,7 +96,6 @@ struct CodeReviewAlert: View {
             Spacer()
             Button(role: .destructive) {
                 onDecision(false, nil, userNote)
-                dismiss()
             } label: {
                 Label("Deny", systemImage: "xmark.circle.fill")
             }
@@ -106,7 +105,6 @@ struct CodeReviewAlert: View {
                 let edited: String? =
                     (draft != payload.code) ? draft : nil
                 onDecision(true, edited, userNote)
-                dismiss()
             } label: {
                 Label("Approve & Install", systemImage: "checkmark.circle.fill")
             }

@@ -1,4 +1,5 @@
 """Daemon configuration settings."""
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,9 +31,40 @@ GROQ_DEFAULT_MODELS: dict[str, str] = {
 }
 
 
+logger = logging.getLogger(__name__)
+
+PROVIDERS = user_settings.PROVIDERS
+# The three engines, in ``_build_engines`` order. Each one's provider is
+# ``AGENT_PROVIDER_<ROLE>`` when set, else ``AGENT_PROVIDER`` (#26).
+ENGINE_ROLES: tuple[str, ...] = ("main", "analysis", "drafting")
+PROVIDER_OVERRIDE_KEYS: dict[str, str] = {
+    role: f"AGENT_PROVIDER_{role.upper()}" for role in ENGINE_ROLES
+}
+
+
 def _env(key: str, default: str) -> str:
     value = os.environ.get(key)
     return value if value else default
+
+
+def normalize_provider(value: str, *, source: str = "provider") -> str:
+    """Return ``value`` as a known provider, ``""`` if blank.
+
+    An unknown name becomes ``"local"`` with a warning: a typo must not
+    brick startup, and it must not send data to the cloud either
+    (invariant 7c), so it never falls through to a cloud default.
+    """
+    key = (value or "").strip().lower()
+    if not key or key in PROVIDERS:
+        return key
+    logger.warning("Unknown %s=%r; using local", source, value)
+    return "local"
+
+
+def detection_role(choice: str) -> str:
+    """The engine role named by ``AGENT_PATTERN_ENGINE``; unknown → main."""
+    key = (choice or "main").strip().lower()
+    return key if key in ENGINE_ROLES else "main"
 
 
 @dataclass
@@ -41,11 +73,26 @@ class Settings:
 
     host: str = "127.0.0.1"
     port: int = 8000
-    # Inference provider for all three engines (main, analysis, drafting).
-    # ``"local"`` runs MLX on Apple Silicon; ``"groq"`` calls Groq's
-    # OpenAI-compatible endpoint instead. Selected via ``AGENT_PROVIDER``.
+    # Default inference provider for the three engines (main, analysis,
+    # drafting). ``"local"`` runs MLX on Apple Silicon; ``"groq"`` calls
+    # Groq's OpenAI-compatible endpoint instead. Selected via
+    # ``AGENT_PROVIDER``. Use :meth:`engine_provider` rather than reading
+    # this directly: each engine can override it.
     provider: str = field(
         default_factory=lambda: _env("AGENT_PROVIDER", "local").lower()
+    )
+    # Per-engine overrides (#26): ``AGENT_PROVIDER_MAIN``,
+    # ``AGENT_PROVIDER_ANALYSIS``, ``AGENT_PROVIDER_DRAFTING``. Blank means
+    # "same as ``provider``". E.g. local main + analysis keeps per-event
+    # traffic on-device and sends only tool drafts to Groq.
+    provider_main: str = field(
+        default_factory=lambda: _env("AGENT_PROVIDER_MAIN", "")
+    )
+    provider_analysis: str = field(
+        default_factory=lambda: _env("AGENT_PROVIDER_ANALYSIS", "")
+    )
+    provider_drafting: str = field(
+        default_factory=lambda: _env("AGENT_PROVIDER_DRAFTING", "")
     )
     model_path: str = "mlx-community/Hermes-3-Llama-3.1-8B-4bit"
     analysis_model_path: str = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
@@ -118,6 +165,41 @@ class Settings:
         / "tools"
         / "generated"
     )
+
+
+    # --- provider resolution (#26) -------------------------------------
+    # Resolved on each call (not cached) so tests can patch the fields.
+
+    def default_provider(self) -> str:
+        return normalize_provider(self.provider, source="AGENT_PROVIDER") or "local"
+
+    def engine_override(self, role: str) -> str:
+        """``role``'s override (``"local"``/``"groq"``), ``""`` if none."""
+        return normalize_provider(
+            getattr(self, f"provider_{role}"),
+            source=PROVIDER_OVERRIDE_KEYS[role],
+        )
+
+    def engine_provider(self, role: str) -> str:
+        """The provider ``role`` runs on: its override, else the default."""
+        return self.engine_override(role) or self.default_provider()
+
+    def engine_providers(self) -> dict[str, str]:
+        return {role: self.engine_provider(role) for role in ENGINE_ROLES}
+
+    def is_cloud(self, role: str) -> bool:
+        return self.engine_provider(role) != "local"
+
+    def uses_cloud(self) -> bool:
+        """True when any engine sends prompts off the machine."""
+        return any(self.is_cloud(role) for role in ENGINE_ROLES)
+
+    def detection_is_cloud(self) -> bool:
+        """True when the pattern/idea/setup-scan engine is a cloud one."""
+        return self.is_cloud(detection_role(self.pattern_detection_engine))
+
+    def groq_key_required(self) -> bool:
+        return any(p == "groq" for p in self.engine_providers().values())
 
 
 settings = Settings()

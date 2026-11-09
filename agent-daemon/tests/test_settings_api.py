@@ -24,6 +24,8 @@ def client(tmp_path, monkeypatch):
     from config import settings
     monkeypatch.setattr(settings, "provider", "local")
     monkeypatch.setattr(settings, "groq_api_key", "")
+    for role in ("main", "analysis", "drafting"):
+        monkeypatch.setattr(settings, f"provider_{role}", "")
     with TestClient(app) as test_client:
         test_client.settings_path = path
         yield test_client
@@ -108,3 +110,80 @@ def test_apply_to_environ_respects_exports(tmp_path, monkeypatch):
         assert os.environ["AGENT_PROVIDER"] == "local"
     finally:
         monkeypatch.setattr(user_settings, "shell_exported", frozenset())
+
+
+# --- per-engine provider override (#26) ---------------------------------
+
+
+def test_get_defaults_engine_overrides(client):
+    body = client.get("/api/settings").json()
+    assert body["provider_main"] == ""
+    assert body["provider_analysis"] == ""
+    assert body["provider_drafting"] == ""
+    assert body["engine_providers"] == {
+        "main": "local", "analysis": "local", "drafting": "local",
+    }
+    assert body["groq_api_key_required"] is False
+
+
+def test_override_round_trip(client):
+    resp = client.put("/api/settings", json={
+        "provider_drafting": "GROQ", "groq_api_key": "gsk_test_1234abcd",
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["provider"] == "local"
+    assert body["provider_drafting"] == "groq"
+    assert body["engine_providers"] == {
+        "main": "local", "analysis": "local", "drafting": "groq",
+    }
+    assert body["running_engine_providers"]["drafting"] == "local"
+    assert body["groq_api_key_required"] is True
+    assert body["restart_required"] is True
+    assert "gsk_test_1234abcd" not in resp.text
+    saved = json.loads(client.settings_path.read_text())
+    assert saved["AGENT_PROVIDER_DRAFTING"] == "groq"
+
+    # "" (or "default") clears the override: back to the default.
+    body = client.put("/api/settings", json={"provider_drafting": "default"}).json()
+    assert body["provider_drafting"] == ""
+    assert body["engine_providers"]["drafting"] == "local"
+    assert "AGENT_PROVIDER_DRAFTING" not in json.loads(client.settings_path.read_text())
+
+
+def test_override_needs_key_only_when_some_engine_uses_groq(client):
+    # Groq drafting without a key: rejected.
+    resp = client.put("/api/settings", json={"provider_drafting": "groq"})
+    assert resp.status_code == 400
+    assert not client.settings_path.exists()
+    # Groq default but every engine overridden to local: no key needed.
+    resp = client.put("/api/settings", json={
+        "provider": "groq", "provider_main": "local",
+        "provider_analysis": "local", "provider_drafting": "local",
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["groq_api_key_required"] is False
+    # Clearing one override brings Groq back for that engine: rejected.
+    resp = client.put("/api/settings", json={"provider_main": ""})
+    assert resp.status_code == 400
+    assert json.loads(client.settings_path.read_text())["AGENT_PROVIDER_MAIN"] == "local"
+
+
+def test_invalid_override_rejected(client):
+    resp = client.put("/api/settings", json={"provider_analysis": "openai"})
+    assert resp.status_code == 400
+    assert "analysis" in resp.json()["detail"]
+
+
+def test_shell_export_locks_override(client, monkeypatch):
+    from config import settings
+    monkeypatch.setattr(user_settings, "shell_exported",
+                        frozenset({"AGENT_PROVIDER_MAIN"}))
+    monkeypatch.setattr(settings, "provider_main", "groq")
+    body = client.get("/api/settings").json()
+    assert "provider_main" in body["locked_fields"]
+    assert body["provider_main"] == "groq"
+    assert body["running_engine_providers"]["main"] == "groq"
+    # Saving needs a key, because the exported override is Groq.
+    resp = client.put("/api/settings", json={"provider_main": "local"})
+    assert resp.status_code == 400

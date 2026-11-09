@@ -35,6 +35,7 @@ from typing import Any, Optional
 from ai.idea_sources import (
     NO_SUGGESTION,
     Evaluate,
+    IdeaState,
     Publish,
     _PROPOSAL_FORMAT,
     parse_suggestion,
@@ -285,6 +286,7 @@ class OpenHelpSuggester:
         min_score: int = 7,
         idea_cooldown_seconds: float = 7 * 24 * 3600.0,
         publish: Optional[Publish] = None,
+        state: Optional[IdeaState] = None,
     ) -> None:
         self.event_bus = event_bus
         self._evaluate = evaluate
@@ -298,7 +300,8 @@ class OpenHelpSuggester:
         self._window: deque[ContextEvent] = deque(maxlen=window_size)
         self._new_since_ask = 0
         self._next_ask_at = 0.0
-        self._recent_ideas: dict[str, float] = {}
+        # Per-idea cooldown, persisted across restarts (todo #32).
+        self.state = state if state is not None else IdeaState()
         self._task: Optional[asyncio.Task[None]] = None
         # Outcome of the latest filter run (stage, score, reason); read by
         # :func:`evaluate_windows` and handy when debugging.
@@ -338,7 +341,7 @@ class OpenHelpSuggester:
             return
         idea["source"] = self.source_name
         idea["trigger"] = "open_help"
-        self._recent_ideas[idea["tool_name"]] = time.time() + self.idea_cooldown_seconds
+        self.state.start(self.source_name, idea["tool_name"], self.idea_cooldown_seconds)
         try:
             await self._publish(ContextEvent(event_type="pattern_detected", metadata=idea))
         except Exception:
@@ -357,7 +360,7 @@ class OpenHelpSuggester:
             self.last_verdict["stage"] = "grounding"
             logger.info("open_help dropped %r: names nothing in the event window", name)
             return False
-        if time.time() < self._recent_ideas.get(name, 0.0):
+        if self.state.active(self.source_name, name):
             self.last_verdict["stage"] = "cooldown"
             return False
         if self.feedback.resembles_rejected(name, desc):
@@ -438,7 +441,8 @@ async def evaluate_windows(
     By default the case's recorded ``idea`` stands in for the generator,
     so only the filter (checks, grounding, judge) is measured. Pass
     ``evaluate`` to generate ideas with a real model as well. Feedback is
-    in memory only: the user's ``idea_feedback.json`` is never read.
+    in memory only: the user's ``idea_feedback.json`` and
+    ``idea_state.json`` are never read.
     """
     results = []
     for case in cases:
@@ -453,7 +457,7 @@ async def evaluate_windows(
 
         suggester = OpenHelpSuggester(
             event_bus=EventBus(), evaluate=evaluate or fixed_idea, judge=judge,
-            feedback=IdeaFeedback(), interval_seconds=0.0,
+            feedback=IdeaFeedback(), state=IdeaState(), interval_seconds=0.0,
             window_size=max(20, len(events)), min_events=len(events),
             min_score=min_score, publish=publish,
         )
@@ -515,7 +519,7 @@ def _main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - live c
     results = asyncio.run(evaluate_windows(
         load_windows(args.path), judge=judge, evaluate=evaluate, min_score=args.min_score,
     ))
-    print(f"provider={settings.provider} model={getattr(engine, 'model_name', '?')}")
+    print(f"providers={settings.engine_providers()} model={getattr(engine, 'model_name', '?')}")
     print(summarize(results))
     return 0
 
