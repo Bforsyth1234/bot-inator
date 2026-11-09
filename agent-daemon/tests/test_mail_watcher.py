@@ -195,3 +195,15 @@ def test_read_email_tool_uses_mail_root_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(re_mod.MAIL_ROOT_ENV, str(tmp_path / "mail"))
     r = read_email(message_id=101)
     assert r["status"] == "ok" and r["subject"] == "Lunch on Friday?"
+
+
+def test_outbox_and_sendlater_are_own_mail() -> None:
+    """Live check (2026-11-09): the real index has Outbox and SendLater."""
+    import importlib
+
+    mw = importlib.import_module("events.mail_watcher")
+    for url in ("imap://x/Outbox", "imap://x/SendLater", "imap://x/Send%20Later",
+                "imap://x/%5BGmail%5D/Sent%20Mail", "imap://x/Sent%20Items"):
+        assert mw.is_own_mailbox(url), url
+    for url in ("imap://x/INBOX", "imap://x/%5BMailbox%5D/To%20Reply", "imap://x/Job%20Hunt"):
+        assert not mw.is_own_mailbox(url), url

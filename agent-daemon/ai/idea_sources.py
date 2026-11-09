@@ -210,7 +210,7 @@ _MAIL_KINDS: tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...] = (
         re.IGNORECASE,
     )),
 )
-_SKIP_MAILBOXES = re.compile(r"junk|spam|trash|deleted|sent|draft|outbox", re.IGNORECASE)
+_SKIP_MAILBOXES = re.compile(r"junk|spam|trash|deleted|sent|draft|outbox|send ?later", re.IGNORECASE)
 _VIDEO_URL_RE = re.compile(r"^https://\S+$", re.IGNORECASE)
 
 

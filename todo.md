@@ -985,6 +985,12 @@ Results (wave 3, 2026-11-09):
   get it without an approval card per email).
 Deviations: schema inspection became the live check (no Full Disk Access here); Drafts
 skipped with Sent.
+Live (2026-11-09): `--schema` on the real index (`V10`): "Schema check: OK"
+(messages, subjects, addresses, mailboxes all as assumed; no SCHEMA change).
+The mailbox list showed Outbox and SendLater (own outgoing mail) not marked
+own: added to the watcher's own-mail pattern and the idea-source skip list,
+with a test. Daemon has Full Disk Access now (no notice at start). Still to
+do: send yourself an email → `mail_received`; "what did my last email say?".
 
 ---
 
@@ -1088,6 +1094,10 @@ Results (wave 3, 2026-11-09):
   `event_starting_soon` excluded from starting the agent.
 Deviations: AppleScript backend does not expand recurrences. The diagnostic runs as a
 script path (`-m` hits the tools/ai circular import).
+Live (2026-11-09): `--check` → EventKit silently denied for the Python
+process (no prompt; status stays `not_determined`), as the spike feared.
+Same for Reminders (#45). Next: `--applescript`, then pin
+`AGENT_CALENDAR_BACKEND=applescript` / `AGENT_REMINDERS_BACKEND=applescript`.
 
 ---
 
