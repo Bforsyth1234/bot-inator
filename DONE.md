@@ -836,3 +836,100 @@ Fixed in `events/mac_listeners.py` (an intentional stop no longer updates
 Also at wave 6 close: conftest pins `AGENT_CLOUD_PERSONAL_TEXT=0` so a
 developer `.env` opt-in doesn't change test results.
 Deviations:
+
+## Wave 7 — closed 2026-11-09
+
+Wave-close run: full suite 523 passed, 3 runs in a row (~74 s); Swift
+type-check clean. #22 (sandboxed generated tools) and #51 (idea-text scrub)
+built and wait as `[~] live`. New #53: `open`/`osascript` inside the sandbox
+can reach other apps; needs a decision.
+
+## Live checks — 2026-11-09
+
+#37 — Clear test entries from idea_feedback.json [x]
+Wave: — (live checks) · Agent: user · Added: 2026-11-09 · Source: assistant (live run)
+Ask: The 2026-11-09 test runs saved approvals for test ideas
+(`create_invoice_template`, `invoice_number_generator`, `file_watcher`,
+`app_switcher`, `recent_apps`, `recent_apps_list` ×4) in
+`~/.bot-inator/idea_feedback.json`. The judge sees them as "the user's
+past verdicts" and will favour similar ideas.
+Approach: remove those entries (or the file) while the daemon is stopped.
+Verify: the file holds no entry with an `at` timestamp from the test runs.
+Results (live, 2026-11-09): backed up to
+`~/.bot-inator/idea_feedback.json.bak-2026-11-09` (0600), then removed only
+the 16 entries from the two runner test runs (10:30–11:00). The 30 later
+entries are the user's real verdicts and were kept (several are 4–5
+identical approvals in one minute: the #48 stacked-approval bug).
+Deviations: kept post-11:00 entries the item listed (app_switcher,
+recent_apps_list): they came from the user's own daemon, not the test runs.
+
+---
+
+#54 — Judge replies came back empty on Groq reasoning models [x]
+Wave: live checks (runner) · Added: 2026-11-09 · Source: assistant (#36 live check)
+Ask: Every judge evaluator (open-help, friction, setup scan) used
+`max_tokens=120`. GPT-OSS on Groq spends tokens on hidden reasoning first, so
+the reply was `''` and every judged idea was dropped as unparseable: under
+Groq, those sources never surfaced anything.
+Fix: `JUDGE_MAX_TOKENS = 600` in `ai/open_help.py`, used by all three judges
+in `main.py` and the `python -m ai.open_help` CLI. The same call that
+returned `''` at 120 returned `{"score": 10, …}` at 600.
+Results: `tests/test_judge_budget.py` (budget ≥400; no judge literal under
+400 in main.py / open_help.py); non-vacuity: old code → the test fails.
+Judge eval after the fix: 8/9 match (was 7/9, by accident). Full suite green.
+Deviations: none.
+
+---
+
+#55 — Chat and event turns failed on Groq (tool-call rejections) [x]
+Wave: live checks (runner) · Added: 2026-11-09 · Source: user ("it has not answered")
+Ask: "list my shortcuts" ran `list_shortcuts` and then the chat stayed
+silent. Groq validates tool calls server-side and failed the whole turn
+with a 400 in three ways seen in the log: (1) "Tool choice is required"
+(smolagents sends `tool_choice="required"`; the model answered in text after
+the tool result); (2) "Failed to parse tool call arguments as JSON"; (3)
+`create_reminder` "`/due`: expected string, but got null" (the model sends
+null for optional params; also "called tool 'answer' which was not in
+request.tools").
+Fix (`ai/orchestrator.py`): `_make_groq_model_class` wraps
+`OpenAIServerModel`: `tool_choice="auto"` and a plain-text reply becomes the
+`final_answer`; optional parameters are nullable in the schemas sent to Groq
+(`_allow_null_optionals`); one retry on a tool-call rejection 400
+(`_is_tool_call_rejection`), other errors raise. `gated_forward` drops
+null arguments so tool defaults apply. Local MLX is unchanged.
+Results: `tests/test_groq_model.py` (5) and a null-argument test in
+`tests/test_tool_wrapping.py`. Live: "list my shortcuts" → `list_shortcuts`
+→ "Your shortcuts are: Open App, What's a shortcut?, Take a Break, Text Last
+Image, Shazam shortcut"; no 400s in the log.
+Deviations: none.
+
+---
+
+#57 — Repeated approved calls; declined tool ideas asked again [x]
+Wave: live checks (runner) · Added: 2026-11-09 · Source: user ("it opened goole.com 3 times"; "i keep denying send imessage … it should just remember i denied it and stop asking me"; "we should not let a reworded one be asked")
+Cause 1: after `open_url` ran, GPT-OSS replied with no visible text;
+smolagents treated that as a parse error and the model called `open_url`
+again, three times in one turn.
+Cause 2: `send_imessage` was never registered (since April), so for every
+incoming iMessage the responder asked to *generate* a send tool: one build
+card per message, and denials were not consulted.
+Fix (`ai/orchestrator.py`, new `ai/idea_match.py`):
+- An empty reply after a tool result ends the turn ("Done.").
+- A side-effecting call with the same tool and arguments runs at most once
+  per turn (`_turn_done`); a repeat returns the first result, no approval.
+- Before any `generate_custom_tool` approval, `_previously_declined` asks
+  `DeclinedIdeaMatcher`: same name / word overlap → declined; model2vec
+  (`minishlab/potion-base-8M`, local) cosine ≥0.80 → declined; 0.55–0.80 →
+  one judge call ("is this the same tool?"). Declined → error
+  `user_declined_before`, no card. Without model2vec only names/word overlap
+  count. `model2vec` added to requirements.
+- `send_imessage` stays unregistered (the user doesn't want it; others
+  might, and their own approve/deny now sticks). iMessages still reach the
+  agent.
+Results: tests `test_tool_wrapping.py` (+3), `test_groq_model.py` (+2),
+`test_idea_match.py` (5). Real check (user's 7 send_imessage denials, Groq
+judge): 8/8: "send a text message", "reply to the iMessage sender", "text
+someone", a reworded Chrome↔Claude switcher → declined; "read my
+iMessages", "send an email", "add a calendar event", "file invoices" →
+allowed. Removing denials is #56.
+Deviations: none.

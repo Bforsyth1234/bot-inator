@@ -71,7 +71,9 @@ SQL_NEW_MESSAGES = """
 
 # A mailbox whose last path component matches this is the user's own mail.
 _OWN_MAILBOX_RE = re.compile(
-    r"^(sent|sent messages|sent mail|sent items|gesendet|envoyés|drafts)$",
+    # Outbox / SendLater hold the user's own outgoing mail (seen in the real
+    # index during the live check).
+    r"^(sent|sent messages|sent mail|sent items|gesendet|envoyés|drafts|outbox|send ?later)$",
     re.IGNORECASE,
 )
 # ---------------------------------------------------------------------------

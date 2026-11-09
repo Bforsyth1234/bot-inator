@@ -65,6 +65,10 @@ struct RootPopoverView: View {
                 DebugView()
                     .tabItem { Label("Debug", systemImage: "ladybug") }
             }
+            // The tab view takes what's left; banners and the button bar
+            // must never push each other out of the fixed-height popover.
+            .frame(maxHeight: .infinity)
+            .layoutPriority(-1)
             Divider()
             HStack {
                 Button {
@@ -96,6 +100,8 @@ struct RootPopoverView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
         }
         .frame(width: 420, height: 600)
     }

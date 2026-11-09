@@ -211,6 +211,16 @@ class Orchestrator:
         # that already tried ``generate_custom_tool`` and a second
         # ``generate_custom_tool`` call in one turn is refused (#38).
         self._turn_tool_calls: set[str] = set()
+        # What started the current agent turn: "chat", "pattern" or
+        # "event". generate_custom_tool is only allowed for chat and
+        # pattern turns (a background event must not open a build card).
+        self._turn_kind: str = "event"
+        # Side-effecting calls already run this turn, keyed by tool + args,
+        # so a model that repeats a call can't run it twice.
+        self._turn_done: dict[str, Any] = {}
+        # ``ai.idea_match.DeclinedIdeaMatcher`` set by main.py: catches
+        # reworded repeats of a declined tool idea.
+        self.declined_matcher: Optional[Any] = None
         # Metadata of the built-in follow-up idea being acted on this turn
         # (#32), so a declined built-in call is remembered as a rejection.
         self._current_builtin_idea: Optional[dict[str, Any]] = None
@@ -428,6 +438,8 @@ class Orchestrator:
                 return sorted(self._dynamic_tool_names)
 
             before = set(self._dynamic_tool_names)
+            if self._refuse_unsandboxed(target):
+                return sorted(self._dynamic_tool_names)
             loaded: list[str] = []
             quarantined: list[tuple[str, str]] = []
             for path in sorted(target.iterdir()):
@@ -446,11 +458,17 @@ class Orchestrator:
                         getattr(t, "name", getattr(t, "__name__", ""))
                         for t in self.tools
                     ) - {name}
-                    tool_obj = self._import_tool_module(name, path, exclude)
+                    tool_obj = self._load_tool(name, path, exclude)
                 except Exception as exc:
                     logger.exception("Failed to load dynamic tool from %s", path)
+                    # A sandboxed import failure carries the child's error
+                    # and traceback (#22), so quarantine reports the same
+                    # ``ModuleNotFoundError: ...`` line as an in-process one.
+                    child_error = getattr(exc, "child_error", None)
                     quarantined.append((name, self._quarantine_tool(
-                        target, name, exc, traceback.format_exc()
+                        target, name, child_error or exc,
+                        getattr(exc, "child_traceback", "")
+                        or traceback.format_exc(),
                     )))
                     continue
                 if tool_obj is None:
@@ -603,6 +621,58 @@ class Orchestrator:
             self.notify_tools_changed("unloaded", [name])
             return True
 
+    def _load_tool(
+        self, name: str, path: Path, exclude: frozenset[str] = frozenset()
+    ) -> Any:
+        """Load ``path`` as a sandboxed proxy, or in-process when opted out (#22)."""
+        from tools import tool_sandbox
+
+        if not tool_sandbox.sandbox_enabled():
+            return self._import_tool_module(name, path, exclude)
+        return tool_sandbox.load_sandboxed_tool(name, path, exclude)
+
+    def _refuse_unsandboxed(self, target: Path) -> bool:
+        """With the sandbox on but unusable, load no generated tool (#22).
+
+        Every ``*.py`` tool in ``target`` is unloaded (if loaded), recorded
+        like a quarantined tool (so an install reports an error) and
+        reported as a ``tool_result`` thought. Files stay where they are:
+        they load again once the sandbox works or ``AGENT_TOOL_SANDBOX=0``.
+        Returns True when loading was refused.
+        """
+        from tools import tool_sandbox
+
+        if not tool_sandbox.sandbox_enabled() or tool_sandbox.sandbox_available():
+            return False
+        reason = (
+            "not loaded: the tool sandbox is unavailable "
+            f"({tool_sandbox.sandbox_problem() or 'self-test failed'}); "
+            f"set {tool_sandbox.SANDBOX_ENV}=0 to run generated tools unsandboxed"
+        )
+        refused: list[str] = []
+        for path in sorted(target.iterdir()):
+            if path.name.startswith(".") or path.is_dir() or path.suffix != ".py":
+                continue
+            name = path.stem
+            if name in self._builtin_tool_names:
+                continue
+            if name in self._dynamic_tool_names:
+                self._remove_tool(name)
+            self._quarantined[name] = reason
+            refused.append(name)
+        if not refused:
+            return True
+        self._agent = self._build_agent()
+        for name in refused:
+            logger.warning("Generated tool %s %s", name, reason)
+            self._schedule(self._emit_thought(
+                getattr(self, "_current_event_id", "evt_tools"),
+                "tool_result",
+                f"Generated tool {name} {reason}",
+            ))
+        self.notify_tools_changed("quarantined", refused)
+        return True
+
     @staticmethod
     def _import_tool_module(
         name: str, path: Path, exclude: frozenset[str] = frozenset()
@@ -686,6 +756,10 @@ class Orchestrator:
             return
         event_id = event.metadata.get("event_id") or f"evt_{uuid.uuid4().hex[:12]}"
         self._turn_tool_calls = set()
+        self._turn_done = {}
+        self._turn_kind = "event"
+        # Personal text an idea may quote later (#51).
+        privacy.note_personal_event(event)
         await self._emit_thought(event_id, "event_received", self._describe_event(event))
 
         if self.pattern_recognizer is not None:
@@ -709,6 +783,7 @@ class Orchestrator:
             )
             meta = event.metadata or {}
             self._current_builtin_idea = meta if meta.get("builtin_tool") else None
+            self._turn_kind = "pattern"
             try:
                 result = await self._run_agent(event_id, prompt, max_steps=4)
             finally:
@@ -784,6 +859,8 @@ class Orchestrator:
         # allow a moderate budget without leaving the loop unbounded.
         self._pending_rerun_tool = None
         self._turn_tool_calls = set()
+        self._turn_done = {}
+        self._turn_kind = "chat"
         result = await self._run_agent(event_id, prompt, max_steps=6)
         reply = str(result) if result is not None else ""
 
@@ -903,7 +980,7 @@ class Orchestrator:
                     "Groq engine cannot drive the agent loop"
                 )
                 return None
-            return OpenAIServerModel(
+            return _make_groq_model_class(OpenAIServerModel)(
                 model_id=self.engine.model_name,
                 api_base=self.engine.api_base,
                 api_key=self.engine.api_key,
@@ -994,7 +1071,11 @@ class Orchestrator:
             loop = orchestrator.event_bus.loop or asyncio.get_event_loop()
             event_id = getattr(orchestrator, "_current_event_id", "evt_unknown")
             call_args: list[Any] = list(args)
-            call_kwargs: dict[str, Any] = dict(kwargs)
+            # Models (GPT-OSS on Groq) send null for optional parameters;
+            # drop them so the tool's own defaults apply.
+            call_kwargs: dict[str, Any] = {
+                k: v for k, v in kwargs.items() if v is not None
+            }
             if (
                 tool_name == "generate_custom_tool"
                 and tool_name in orchestrator._turn_tool_calls
@@ -1017,6 +1098,44 @@ class Orchestrator:
                     loop,
                 )
                 return result
+            refusal: Optional[dict[str, Any]] = None
+            if tool_name == "generate_custom_tool":
+                declined = orchestrator._previously_declined(call_args, call_kwargs)
+                if declined:
+                    # The user denied this tool idea before: don't ask again
+                    # (live check: one card per incoming iMessage asking to
+                    # build a send-iMessage tool).
+                    refusal = {
+                        "status": "error",
+                        "error": "user_declined_before",
+                        "declined_tool": declined,
+                        "message": (
+                            "The user already declined this tool. Do not "
+                            "ask again; reply 'no action' or answer without it."
+                        ),
+                    }
+            done_key = ""
+            if not is_read_only and refusal is None:
+                done_key = tool_name + json.dumps(
+                    {"a": call_args, "k": call_kwargs}, sort_keys=True, default=str,
+                )
+                done = getattr(orchestrator, "_turn_done", {})
+                if done_key in done:
+                    refusal = {
+                        "skipped": True,
+                        "reason": "already_done_this_turn",
+                        "result": done[done_key],
+                        "message": "This exact call already ran this turn; "
+                        "don't repeat it. Emit final_answer.",
+                    }
+            if refusal is not None:
+                asyncio.run_coroutine_threadsafe(
+                    orchestrator._emit_thought(
+                        event_id, "tool_result", f"{tool_name}: {refusal}"
+                    ),
+                    loop,
+                )
+                return refusal
             orchestrator._turn_tool_calls.add(tool_name)
             if not is_read_only:
                 coro = orchestrator._request_approval(
@@ -1040,6 +1159,9 @@ class Orchestrator:
             )
             if tool_name == "generate_custom_tool":
                 result = orchestrator._flag_quarantined_install(result)
+            done_store = getattr(orchestrator, "_turn_done", None)
+            if done_key and done_store is not None:
+                done_store[done_key] = result
             if tool_name == "read_email":
                 # The result goes back into the main engine's prompt (#31).
                 result = privacy.redact_email_result(result, "main")
@@ -1071,14 +1193,12 @@ class Orchestrator:
             return result
         if self._pending_rerun_tool == name:
             self._pending_rerun_tool = None
-        return {
-            "status": "error",
-            "tool_name": name,
-            "error": (
-                "installed but failed to load; moved to quarantine/: "
-                f"{self._quarantined[name]}"
-            ),
-        }
+        reason = self._quarantined[name]
+        if reason.startswith("not loaded:"):  # sandbox unavailable (#22)
+            error = f"installed but {reason}"
+        else:
+            error = f"installed but failed to load; moved to quarantine/: {reason}"
+        return {"status": "error", "tool_name": name, "error": error}
 
     @staticmethod
     def _apply_edits(
@@ -1158,6 +1278,37 @@ class Orchestrator:
                 bool(resp.approved),
             )
         return bool(resp.approved), resp.edited_args
+
+    def _previously_declined(self, args: list[Any], kwargs: dict[str, Any]) -> str:
+        """Name of a declined tool idea this generate_custom_tool call
+        matches (same name, or close enough by words), else "".
+
+        Uses the shared ``IdeaFeedback`` the idea sources hold, so a Deny on
+        any build card is remembered across turns and restarts.
+        """
+        name = str(kwargs.get("tool_name") or (args[0] if args else "") or "")
+        desc = str(kwargs.get("description") or (args[1] if len(args) > 1 else "") or "")
+        if not name:
+            return ""
+        matcher = getattr(self, "declined_matcher", None)
+        if matcher is not None:
+            try:
+                return matcher.match(name, desc)
+            except Exception:
+                logger.exception("declined_matcher failed")
+        seen: set[int] = set()
+        for source in self.idea_sources:
+            feedback = getattr(source, "feedback", None)
+            check = getattr(feedback, "resembles_rejected", None)
+            if check is None or id(feedback) in seen:
+                continue
+            seen.add(id(feedback))
+            try:
+                if check(name, desc):
+                    return name
+            except Exception:
+                logger.exception("resembles_rejected failed")
+        return ""
 
     def _record_idea_feedback(self, tool_args: dict[str, Any], approved: bool) -> None:
         """Tell idea sources the user approved or rejected a tool idea.
@@ -1252,8 +1403,10 @@ class Orchestrator:
         """
         meta = event.metadata
         tool_name = meta.get("tool_name", "new_helper")
-        description = meta.get("description", "")
-        logic = meta.get("expected_logic", "")
+        # A local detection engine may have quoted an iMessage or a mail
+        # subject into the idea; a cloud main engine must not see it (#51).
+        description = privacy.scrub_idea_text(meta.get("description", ""), "main")
+        logic = privacy.scrub_idea_text(meta.get("expected_logic", ""), "main")
         builtin = meta.get("builtin_tool")
         if builtin:
             # Known follow-up a built-in tool can do directly (#32): no new
@@ -1443,6 +1596,119 @@ class Orchestrator:
             + (f" in {event.app_name}" if event.app_name else "")
             + (f" — {event.window_title}" if event.window_title else "")
         )
+
+
+_TOOL_CALL_REJECTIONS = (
+    "tool_use_failed",
+    "Failed to parse tool call",
+    "Tool call validation failed",
+    "Tool choice is required",
+    "which was not in request.tools",
+)
+
+
+def _is_tool_call_rejection(exc: Exception) -> bool:
+    """True for Groq 400s caused by a malformed or invalid tool call."""
+    text = str(exc)
+    return "400" in text and any(marker in text for marker in _TOOL_CALL_REJECTIONS)
+
+
+def _allow_null_optionals(spec: dict[str, Any]) -> None:
+    """Let optional parameters be null in a tool's JSON schema (in place).
+
+    GPT-OSS sends ``null`` for optional parameters it doesn't use; Groq then
+    rejects the call against a plain ``"type": "string"``. ``gated_forward``
+    drops null arguments so the tool's own defaults apply.
+    """
+    params = (spec.get("function") or {}).get("parameters") or {}
+    required = set(params.get("required") or [])
+    for name, prop in (params.get("properties") or {}).items():
+        if name in required or not isinstance(prop, dict):
+            continue
+        kind = prop.get("type")
+        if isinstance(kind, str) and kind != "null":
+            prop["type"] = [kind, "null"]
+        elif isinstance(kind, list) and "null" not in kind:
+            prop["type"] = kind + ["null"]
+
+
+def _has_tool_result(messages: Any) -> bool:
+    """True when the conversation already contains a tool's observation."""
+    for msg in messages or []:
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        role = getattr(role, "value", role)
+        if role in ("tool-response", "tool"):
+            return True
+    return False
+
+
+def _make_groq_model_class(base: type) -> type:
+    """``OpenAIServerModel`` that tolerates a plain-text reply on Groq.
+
+    smolagents sends ``tool_choice="required"``. Groq enforces it server-side:
+    when a model (GPT-OSS) answers in plain text after a tool result, Groq
+    returns 400 "Tool choice is required, but model did not call a tool" and
+    the whole chat turn fails (found in the 2026-11-09 live checks: the user
+    asked "list my shortcuts", ``list_shortcuts`` ran, then no reply).
+    Ask for ``tool_choice="auto"`` and treat a plain-text reply as the final
+    answer, which is what the model meant.
+    """
+
+    class _GroqServerModel(base):  # type: ignore[misc, valid-type]
+        def _prepare_completion_kwargs(self, *args, **kwargs):
+            completion = super()._prepare_completion_kwargs(*args, **kwargs)
+            for spec in completion.get("tools") or []:
+                _allow_null_optionals(spec)
+            return completion
+
+        def generate(self, messages, stop_sequences=None, response_format=None,
+                     tools_to_call_from=None, **kwargs):
+            if tools_to_call_from:
+                kwargs.setdefault("tool_choice", "auto")
+            # Groq validates tool calls server-side and fails the whole turn
+            # with a 400 when the model emits bad JSON or a wrong tool name.
+            # The model is stochastic, so one retry usually succeeds.
+            for attempt in range(2):
+                try:
+                    message = super().generate(
+                        messages,
+                        stop_sequences=stop_sequences,
+                        response_format=response_format,
+                        tools_to_call_from=tools_to_call_from,
+                        **kwargs,
+                    )
+                    break
+                except Exception as exc:  # openai.BadRequestError, lazily typed
+                    if attempt == 0 and _is_tool_call_rejection(exc):
+                        logger.info("Groq rejected a tool call (%s); retrying once", exc)
+                        continue
+                    raise
+            content = (message.content or "").strip() if isinstance(message.content, str) else ""
+            if (
+                tools_to_call_from and not message.tool_calls and not content
+                and _has_tool_result(messages)
+            ):
+                # Reasoning models sometimes answer a tool result with no
+                # visible text. smolagents then retried and the model
+                # called the same tool again (live check: one 'open
+                # goole.com' opened it 3 times). End the turn instead.
+                content = "Done."
+            if tools_to_call_from and not message.tool_calls and content:
+                from smolagents.models import (  # type: ignore
+                    ChatMessageToolCall,
+                    ChatMessageToolCallFunction,
+                )
+
+                message.tool_calls = [ChatMessageToolCall(
+                    id=f"call_{uuid.uuid4().hex[:12]}",
+                    type="function",
+                    function=ChatMessageToolCallFunction(
+                        name="final_answer", arguments={"answer": content},
+                    ),
+                )]
+            return message
+
+    return _GroqServerModel
 
 
 def _make_mlx_model_class() -> type:

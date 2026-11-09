@@ -27,3 +27,6 @@ playwright>=1.48.0,<2.0
 # Utilities
 orjson>=3.10.0,<4.0
 python-dotenv>=1.0.0,<2.0
+# Local embeddings for matching reworded repeats of declined tool ideas
+# (ai/idea_match.py). Optional: without it only exact/word matches count.
+model2vec>=0.4,<1.0

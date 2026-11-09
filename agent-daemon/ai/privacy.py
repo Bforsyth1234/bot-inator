@@ -26,6 +26,10 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
+import threading
+import time
+from collections import deque
 from typing import Any, Optional
 
 from events.event_bus import ContextEvent
@@ -99,3 +103,110 @@ def redact_email_result(result: Any, role: Optional[str]) -> Any:
             f"runs in the cloud ({OPT_IN_ENV}=1 allows sending them)."
         )
     return out
+
+
+# ---- idea text written by a local engine (#51) -----------------------------
+#
+# A local detection engine sees raw iMessage text and mail subjects, and the
+# idea it writes (``description``, ``expected_logic``) can quote them. When
+# the main engine is a cloud one, ``scrub_idea_text`` removes those quotes
+# before the pattern prompt is built. Deterministic, two rules:
+#
+# 1. any run of >= ``SCRUB_MIN_WORDS`` consecutive words that also appears,
+#    in order, in personal text seen in the last ``RECENT_PERSONAL_SECONDS``
+#    (the window the idea was drawn from) is replaced by the placeholder;
+# 2. any quoted string ("...", “...”, '...') of >= ``SCRUB_MIN_WORDS``
+#    words is replaced too, since a quote that long is likely someone
+#    else's words even when it came from outside the remembered window.
+
+SCRUB_MIN_WORDS = 3
+RECENT_PERSONAL_SECONDS = 3600.0
+_RECENT_PERSONAL_MAX = 200
+_recent_personal: "deque[tuple[float, str]]" = deque(maxlen=_RECENT_PERSONAL_MAX)
+_recent_lock = threading.Lock()
+
+_WORD_RE = re.compile(r"[\w][\w'’]*")
+_QUOTED_RE = re.compile(
+    r'"[^"\n]{3,400}"|“[^”\n]{3,400}”|(?<!\w)\'[^\'\n]{3,400}\'(?!\w)'
+)
+
+
+def note_personal_event(event: ContextEvent, now: Optional[float] = None) -> None:
+    """Remember the personal text of ``event`` for :func:`scrub_idea_text`."""
+    fields = PERSONAL_EVENT_FIELDS.get(event.event_type)
+    if not fields:
+        return
+    meta = event.metadata or {}
+    stamp = time.time() if now is None else now
+    with _recent_lock:
+        for key in fields:
+            text = meta.get(key)
+            if isinstance(text, str) and text.strip() and text != PLACEHOLDER:
+                _recent_personal.append((stamp, text))
+
+
+def recent_personal_texts(now: Optional[float] = None) -> list[str]:
+    cutoff = (time.time() if now is None else now) - RECENT_PERSONAL_SECONDS
+    with _recent_lock:
+        return [text for stamp, text in _recent_personal if stamp >= cutoff]
+
+
+def clear_recent_personal() -> None:
+    """Forget remembered personal text (tests)."""
+    with _recent_lock:
+        _recent_personal.clear()
+
+
+def _words(text: str) -> list[tuple[str, int, int]]:
+    return [(m.group(0).lower(), m.start(), m.end()) for m in _WORD_RE.finditer(text)]
+
+
+def _personal_ngrams(personal: list[str], n: int) -> set[tuple[str, ...]]:
+    grams: set[tuple[str, ...]] = set()
+    for text in personal:
+        words = [w for w, _, _ in _words(text)]
+        for i in range(len(words) - n + 1):
+            grams.add(tuple(words[i:i + n]))
+    return grams
+
+
+def scrub_personal_text(text: str, personal: list[str]) -> str:
+    """``text`` with quotes of ``personal`` and long quoted strings replaced."""
+    if not text:
+        return text
+    n = SCRUB_MIN_WORDS
+    grams = _personal_ngrams(personal, n)
+    tokens = _words(text)
+    covered = [False] * len(tokens)
+    for i in range(len(tokens) - n + 1):
+        if tuple(w for w, _, _ in tokens[i:i + n]) in grams:
+            for j in range(i, i + n):
+                covered[j] = True
+    spans: list[tuple[int, int]] = []
+    i = 0
+    while i < len(tokens):
+        if not covered[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(tokens) and covered[j + 1]:
+            j += 1
+        spans.append((tokens[i][1], tokens[j][2]))
+        i = j + 1
+    for start, end in reversed(spans):
+        text = text[:start] + PLACEHOLDER + text[end:]
+
+    def quoted(m: "re.Match[str]") -> str:
+        inner = m.group(0)[1:-1]
+        if PLACEHOLDER in inner or len(_WORD_RE.findall(inner)) < n:
+            return m.group(0)
+        return m.group(0)[0] + PLACEHOLDER + m.group(0)[-1]
+
+    return _QUOTED_RE.sub(quoted, text)
+
+
+def scrub_idea_text(text: Any, role: Optional[str] = "main") -> Any:
+    """Idea text as the ``role`` engine may see it (#51)."""
+    if not isinstance(text, str) or not text or not should_redact(role):
+        return text
+    return scrub_personal_text(text, recent_personal_texts())

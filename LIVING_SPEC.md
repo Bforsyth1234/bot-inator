@@ -349,6 +349,27 @@ bypass the approval gate and run inline; all other tools still emit an
 with ``"<name> (read-only)"`` so the MenuBar stream still reflects
 every call.
 
+**Generated tools run sandboxed (#22).** `load_dynamic_tools` never imports
+a generated module in the daemon. `tools/tool_sandbox.py` imports it in a
+`sandbox-exec` child (`describe`) and registers a `SandboxedTool` proxy with
+the same name, description, inputs and output type; each `forward` runs the
+real tool in a fresh child (JSON args in, JSON result out, timeout
+`AGENT_TOOL_SANDBOX_TIMEOUT`, default 60 s; background threads may keep the
+child alive up to `AGENT_TOOL_SANDBOX_LINGER`, default 1 h). Profile: writes
+under `$HOME` except `~/Library`, `~/.ssh`, `~/.bot-inator`, shell start-up
+files and the repo (incl. `tools/generated`); reads everywhere except
+`~/.ssh`, `~/.bot-inator`, `agent-daemon/.env`; network only when the AST
+shows a network-module import (`network_allowed`, `sandbox_note` on the
+proxy); exec only Python, `osascript`, `open`, `shortcuts`, `mdfind`. The
+child has a minimal env and `dotenv` disabled. The approval gate and
+`tool_result` thoughts wrap the proxy unchanged. A built-in the generated
+tool calls runs in the child with no second approval: the user approved the
+source and approves each call of the generated tool. A sandbox that is
+missing or fails its self-test means no generated tool loads (a
+`tool_result` thought per tool, files left in place); `AGENT_TOOL_SANDBOX=0`
+restores the in-process import. Residual risk: `open` and `osascript` can
+ask other apps (Terminal, Script Editor) to run code outside the sandbox.
+
 ## 7. UI (`MenuBarUI/`)
 
 SwiftUI MenuBar app with an AppKit shell:
