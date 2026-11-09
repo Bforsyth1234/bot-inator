@@ -27,18 +27,62 @@ logger = logging.getLogger(__name__)
 
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
-_DETECTION_PROMPT = (
-    "You are watching a rolling window of recent macOS events from the "
-    "user's machine. If — and only if — you see the user repeating a "
-    "concrete, automatable workflow at least three times, propose a new "
-    "tool that would automate it. Otherwise reply with the literal "
-    "string NO_PATTERN.\n\n"
-    "When you do propose a tool, reply with one line of JSON and nothing "
-    "else, of the form:\n"
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+# Token budget for a detection reply. A full JSON proposal with a
+# paragraph of ``expected_logic`` needs ~150-300 tokens; the old 128-token
+# cap inherited from ``evaluate_event`` truncated it mid-object.
+DETECTION_MAX_TOKENS = 512
+
+# System prompt for pattern detection. Must be sent as the *system* role:
+# routing detection through ``evaluate_event`` wrapped it in the
+# event-summary system prompt ("one or two sentences, do not propose
+# actions"), which directly contradicted these instructions.
+DETECTION_SYSTEM_PROMPT = (
+    "You watch a rolling window of recent macOS events from the user's "
+    "machine and decide whether a new automation tool is warranted.\n\n"
+    "Propose a tool if — and only if — the user repeats the same "
+    "concrete, automatable workflow at least three times in the window "
+    "(same apps, same kind of file, same sequence). Otherwise reply with "
+    "the literal string NO_PATTERN and nothing else.\n\n"
+    "When you propose a tool, reply with exactly one JSON object and "
+    "nothing else (no markdown, no commentary):\n"
     '{"tool_name": "<snake_case>", "description": "<one sentence>", '
-    '"expected_logic": "<short paragraph>"}\n\n'
-    "Recent events:\n"
+    '"expected_logic": "<paragraph>"}\n\n'
+    "expected_logic must be specific enough for a programmer to implement "
+    "without seeing the events: name the inputs and their types, the "
+    "exact steps (which app, file path pattern, or macOS command), the "
+    "output, and what to do when an input is missing."
 )
+
+_DETECTION_USER_PREFIX = "Recent events (oldest first):\n"
+
+
+def make_detection_evaluator(
+    engine: Any,
+    max_tokens: int = DETECTION_MAX_TOKENS,
+    system_prompt: str = DETECTION_SYSTEM_PROMPT,
+) -> Callable[[str], Awaitable[str]]:
+    """Build the ``evaluate`` callable :class:`PatternRecognizer` expects.
+
+    ``engine`` is any object exposing ``generate_chat_sync(system, user,
+    max_tokens)`` (both :class:`~ai.mlx_engine.MLXEngine` and
+    :class:`~ai.groq_engine.GroqEngine` do). The call runs in a worker
+    thread so blocking inference never stalls the event loop.
+    """
+
+    async def evaluate(user_text: str) -> str:
+        if not getattr(engine, "loaded", True):
+            await engine.load()
+        raw = await asyncio.to_thread(
+            engine.generate_chat_sync,
+            system_prompt,
+            user_text,
+            max_tokens,
+        )
+        return _THINK_BLOCK_RE.sub("", raw or "").strip()
+
+    return evaluate
 
 
 class PatternRecognizer:
@@ -66,11 +110,16 @@ class PatternRecognizer:
         trigger_every: int = 10,
         trigger_interval: float = 60.0,
         cooldown_seconds: float = 300.0,
+        min_repeats: int = 3,
         publish: Optional[Callable[[ContextEvent], Awaitable[None]]] = None,
     ) -> None:
         self.event_bus = event_bus
         self._evaluate = evaluate
         self._window: Deque[str] = deque(maxlen=window_size)
+        # Coarse per-event signatures, parallel to ``_window``, for the
+        # repeat gate in :meth:`_has_repetition`.
+        self._signatures: Deque[str] = deque(maxlen=window_size)
+        self.min_repeats = min_repeats
         self.trigger_every = trigger_every
         self.trigger_interval = trigger_interval
         self.cooldown_seconds = cooldown_seconds
@@ -97,6 +146,7 @@ class PatternRecognizer:
         if event.event_type == "pattern_detected":
             return None
         self._window.append(self._describe(event))
+        self._signatures.append(self._signature(event))
         self._since_last_eval += 1
         now = time.time()
         if now < self._cooldown_until:
@@ -108,6 +158,15 @@ class PatternRecognizer:
         )
         if not (enough_events or enough_time):
             return None
+        if not self._has_repetition():
+            # Nothing repeats often enough to be a workflow. Skip the LLM
+            # call entirely: models given a window of unrelated events
+            # still invent a "pattern" (e.g. a daily_rituals tool for ten
+            # random app switches). Reset the trigger so we re-check after
+            # the next batch rather than on every event.
+            self._since_last_eval = 0
+            self._last_eval_at = now
+            return None
         return asyncio.create_task(self._run_detection(), name="pattern-detect")
 
     # ---- internals ---------------------------------------------------
@@ -116,7 +175,7 @@ class PatternRecognizer:
         async with self._eval_lock:
             self._since_last_eval = 0
             self._last_eval_at = time.time()
-            prompt = _DETECTION_PROMPT + "\n".join(
+            prompt = _DETECTION_USER_PREFIX + "\n".join(
                 f"- {line}" for line in list(self._window)
             )
             try:
@@ -187,7 +246,10 @@ class PatternRecognizer:
         if not match:
             return None
         try:
-            data = json.loads(match.group(0))
+            # strict=False: models often put raw newlines inside the
+            # expected_logic string (numbered steps), which strict JSON
+            # rejects as control characters.
+            data = json.loads(match.group(0), strict=False)
         except json.JSONDecodeError:
             return None
         tool_name = str(data.get("tool_name") or "").strip()
@@ -202,6 +264,28 @@ class PatternRecognizer:
             "description": description,
             "expected_logic": expected_logic,
         }
+
+    def _has_repetition(self) -> bool:
+        """True when some event signature occurs ``min_repeats``+ times."""
+        counts: dict[str, int] = {}
+        for sig in self._signatures:
+            counts[sig] = counts.get(sig, 0) + 1
+            if counts[sig] >= self.min_repeats:
+                return True
+        return False
+
+    @staticmethod
+    def _signature(event: ContextEvent) -> str:
+        """Coarse key for "the same kind of step": type, app, file action.
+
+        Window titles and paths are left out on purpose so the three
+        rounds of a workflow (``inv1041.pdf``, ``inv1042.pdf``, …) map to
+        the same signature.
+        """
+        action = ""
+        if event.metadata:
+            action = str(event.metadata.get("action") or "")
+        return f"{event.event_type}|{event.app_name or ''}|{action}"
 
     @staticmethod
     def _describe(event: ContextEvent) -> str:

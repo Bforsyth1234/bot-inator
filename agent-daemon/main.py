@@ -22,7 +22,13 @@ from pydantic import TypeAdapter, ValidationError
 from ai.memory import Memory, set_default_memory
 from ai.mlx_engine import MLXEngine
 from ai.orchestrator import Orchestrator
-from ai.pattern_recognizer import PatternRecognizer
+from ai.pattern_recognizer import PatternRecognizer, make_detection_evaluator
+from ai.idea_sources import (
+    CHAT_GAP_SYSTEM_PROMPT,
+    NEXT_STEP_SYSTEM_PROMPT,
+    ChatGapDetector,
+    NextStepSuggester,
+)
 # GroqEngine is imported lazily inside ``lifespan`` so the daemon still
 # boots cleanly when ``settings.provider == "local"`` and the optional
 # Groq dependency tree is missing.
@@ -99,6 +105,29 @@ def _build_engines() -> tuple[Any, Any, Any]:
     )
 
 
+def _select_detection_engine(
+    choice: str, engine: Any, analysis_engine: Any, drafting_engine: Any
+) -> Any:
+    """Pick the engine that runs pattern detection.
+
+    ``choice`` comes from :data:`settings.pattern_detection_engine`.
+    Unknown values fall back to the main engine with a warning so a typo
+    in ``AGENT_PATTERN_ENGINE`` cannot brick startup.
+    """
+    engines = {
+        "main": engine,
+        "analysis": analysis_engine,
+        "drafting": drafting_engine,
+    }
+    key = (choice or "main").lower()
+    if key not in engines:
+        logger.warning(
+            "Unknown AGENT_PATTERN_ENGINE=%r; using main engine", choice
+        )
+        key = "main"
+    return engines[key]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.seq = 0
@@ -167,10 +196,28 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to start IMessageWatcher")
 
+    detection_engine = _select_detection_engine(
+        settings.pattern_detection_engine,
+        engine, analysis_engine, drafting_engine,
+    )
     pattern_recognizer = PatternRecognizer(
         event_bus=bus,
-        evaluate=analysis_engine.evaluate_event,
+        evaluate=make_detection_evaluator(detection_engine),
     )
+    idea_sources = [
+        NextStepSuggester(
+            event_bus=bus,
+            evaluate=make_detection_evaluator(
+                detection_engine, system_prompt=NEXT_STEP_SYSTEM_PROMPT,
+            ),
+        ),
+        ChatGapDetector(
+            event_bus=bus,
+            evaluate=make_detection_evaluator(
+                detection_engine, system_prompt=CHAT_GAP_SYSTEM_PROMPT,
+            ),
+        ),
+    ]
     orchestrator = Orchestrator(
         engine=engine,
         event_bus=bus,
@@ -179,6 +226,7 @@ async def lifespan(app: FastAPI):
         analysis_engine=analysis_engine,
         generated_tools_dir=settings.generated_tools_dir,
         pattern_recognizer=pattern_recognizer,
+        idea_sources=idea_sources,
     )
     set_meta_tool_context(
         orchestrator=orchestrator,

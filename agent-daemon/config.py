@@ -66,6 +66,14 @@ class Settings:
             "GROQ_DRAFTING_MODEL", "qwen/qwen3-32b"
         )
     )
+    # Which engine the pattern recognizer uses to spot repeated workflows
+    # and write the tool spec: ``"main"`` (default), ``"analysis"`` or
+    # ``"drafting"``. The 1.5B analysis model is too small to infer a
+    # workflow from raw events, so detection defaults to the main model.
+    # Selected via ``AGENT_PATTERN_ENGINE``.
+    pattern_detection_engine: str = field(
+        default_factory=lambda: _env("AGENT_PATTERN_ENGINE", "main").lower()
+    )
     watch_dirs: list[Path] = field(
         default_factory=lambda: [Path.home() / "Downloads"]
     )

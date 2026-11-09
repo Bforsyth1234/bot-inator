@@ -69,6 +69,23 @@ def _now_iso() -> str:
     )
 
 
+# How ``_build_pattern_prompt`` explains each idea source to the agent.
+_PATTERN_SOURCE_INTROS: dict[str, str] = {
+    "repetition": (
+        "The pattern recognizer has observed the user performing a "
+        "repeatable workflow and suggested a new tool that would automate it."
+    ),
+    "next_step": (
+        "An event just happened that has an obvious follow-up, and a "
+        "new tool was suggested so the user can do it in one click next time."
+    ),
+    "chat_gap": (
+        "In chat, the user asked for something no existing tool could do, "
+        "and a new tool was suggested so it works next time."
+    ),
+}
+
+
 class Orchestrator:
     """Drives the agent loop on top of an :class:`MLXEngine`."""
 
@@ -83,6 +100,7 @@ class Orchestrator:
         generated_tools_dir: Optional[Path] = None,
         code_approval_timeout: float = 300.0,
         pattern_recognizer: Any = None,
+        idea_sources: Optional[list[Any]] = None,
     ) -> None:
         self.engine = engine
         self.analysis_engine = analysis_engine or engine
@@ -123,6 +141,13 @@ class Orchestrator:
         # auto-rerun single-shot per user turn.
         self._pending_rerun_tool: Optional[str] = None
         self.pattern_recognizer = pattern_recognizer
+        # Phase 5.2 idea sources (``ai.idea_sources``). Each may expose
+        # ``observe(event)`` and/or ``observe_chat(user_text, reply,
+        # tools_called)``.
+        self.idea_sources: list[Any] = list(idea_sources or [])
+        # Tool names invoked during the current chat turn, so a chat-gap
+        # source can skip turns that already tried ``generate_custom_tool``.
+        self._turn_tool_calls: set[str] = set()
         self._agent: Any = None
 
     def mark_tool_ready_for_rerun(self, tool_name: str) -> None:
@@ -385,6 +410,14 @@ class Orchestrator:
                 self.pattern_recognizer.observe(event)
             except Exception:
                 logger.exception("pattern_recognizer.observe failed")
+        for source in self.idea_sources:
+            observe = getattr(source, "observe", None)
+            if observe is None:
+                continue
+            try:
+                observe(event)
+            except Exception:
+                logger.exception("idea source %r observe failed", source)
 
         if event.event_type == "pattern_detected":
             prompt = self._build_pattern_prompt(event)
@@ -458,6 +491,7 @@ class Orchestrator:
         # ``generate_custom_tool`` adds a user-approval round-trip, so
         # allow a moderate budget without leaving the loop unbounded.
         self._pending_rerun_tool = None
+        self._turn_tool_calls = set()
         result = await self._run_agent(event_id, prompt, max_steps=6)
         reply = str(result) if result is not None else ""
 
@@ -483,6 +517,15 @@ class Orchestrator:
             reply = str(result) if result is not None else reply
 
         await self._emit_thought(event_id, "complete", reply[:500])
+
+        for source in self.idea_sources:
+            observe_chat = getattr(source, "observe_chat", None)
+            if observe_chat is None:
+                continue
+            try:
+                observe_chat(text, reply, frozenset(self._turn_tool_calls))
+            except Exception:
+                logger.exception("idea source %r observe_chat failed", source)
 
         if self.memory is not None and reply:
             try:
@@ -651,6 +694,7 @@ class Orchestrator:
             event_id = getattr(orchestrator, "_current_event_id", "evt_unknown")
             call_args: list[Any] = list(args)
             call_kwargs: dict[str, Any] = dict(kwargs)
+            orchestrator._turn_tool_calls.add(tool_name)
             if not is_read_only:
                 coro = orchestrator._request_approval(
                     event_id=event_id,
@@ -743,11 +787,33 @@ class Orchestrator:
 
         try:
             resp = await asyncio.wait_for(fut, timeout=self.approval_timeout)
-            return bool(resp.approved), resp.edited_args
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
             logger.info("Approval %s timed out", request_id)
             return False, None
+        if tool_name == "generate_custom_tool":
+            self._record_idea_feedback(tool_args, bool(resp.approved))
+        return bool(resp.approved), resp.edited_args
+
+    def _record_idea_feedback(self, tool_args: dict[str, Any], approved: bool) -> None:
+        """Tell idea sources the user approved or rejected a tool idea.
+
+        Timeouts are not recorded: no answer is not a rejection.
+        """
+        kwargs = tool_args.get("kwargs") or {}
+        args = tool_args.get("args") or []
+        name = kwargs.get("tool_name") or (args[0] if args else "")
+        desc = kwargs.get("description") or (args[1] if len(args) > 1 else "")
+        if not name:
+            return
+        for source in self.idea_sources:
+            record = getattr(source, "record_feedback", None)
+            if record is None:
+                continue
+            try:
+                record(str(name), str(desc), approved)
+            except Exception:
+                logger.exception("idea source %r record_feedback failed", source)
 
     async def _emit_thought(self, event_id: str, stage: str, content: str) -> None:
         msg = Thought(
@@ -820,10 +886,11 @@ class Orchestrator:
         tool_name = meta.get("tool_name", "new_helper")
         description = meta.get("description", "")
         logic = meta.get("expected_logic", "")
+        intro = _PATTERN_SOURCE_INTROS.get(
+            meta.get("source", "repetition"), _PATTERN_SOURCE_INTROS["repetition"]
+        )
         return (
-            "You are an on-device macOS assistant. The pattern recognizer "
-            "has observed the user performing a repeatable workflow and "
-            "suggested a new tool that would automate it.\n\n"
+            f"You are an on-device macOS assistant. {intro}\n\n"
             f"Proposed tool name: {tool_name}\n"
             f"Description: {description}\n"
             f"Expected logic: {logic}\n\n"

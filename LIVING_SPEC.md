@@ -825,9 +825,61 @@ Built ad-hoc via `swiftc` against macOS 14.0+ (arm64); artefact at
     `inv*.pdf` + `*invoice*.pdf` as specified, about 60 s in total.
     **Still missed:** that draft is case-sensitive, and a file matching
     both patterns (`invoice1.pdf`) is moved twice, so the second
-    `shutil.move` raises. Human review is still the real gate. Next
-    candidate: a sandboxed dry run against a fake home directory with
-    fixture files, which would catch the double move.
+    `shutil.move` raises. Human review is still the real gate.
+
+    **Sandboxed dry run** (`tools/draft_dry_run.py`, on by default,
+    `AGENT_DRAFT_DRY_RUN=0` to disable). Runs between the structural
+    checks and the critic, so the tool is actually executed before the
+    user sees it.
+    - **Plan** (`plan_dry_run`, once per tool, reused across attempts so
+      every attempt faces the same test): the drafting model writes up
+      to 8 fixture files for a fake home (optionally with `age_days` to
+      set mtime), 1-3 calls (kwargs), and expectations
+      (`expect_status`, `expect_exists`, `expect_missing`).
+      `expect_exists` is kept only for fixture files: names of files the
+      tool creates were guessed wrong (`inv1041_copy_1.pdf` with no name
+      clash).
+    - **Isolation**, because the code is not approved yet:
+      `sandbox-exec` profile (no network, no writes outside the per-call
+      temp dir, no exec except Python itself; child processes inherit
+      it); `HOME` = fake home; minimal environment (no API keys);
+      `subprocess` replaced by a recorder that reports success, and
+      `urlopen` refused. A self-test (write inside allowed, write to
+      `/tmp` blocked) runs once; if `sandbox-exec` is missing or the
+      self-test fails, the dry run is skipped. Unapproved code never
+      runs unsandboxed. Tested: writes to the real home, `/tmp`, running
+      `osascript`/`sh`, network, and reading `GROQ_API_KEY` are all
+      blocked.
+    - **Hard vs soft** (`DryRunResult`). Hard = observed facts:
+      exception (with the draft line), background-thread error, timeout,
+      or a return value that is not a status dict. Hard problems drive
+      repairs. Soft = mismatch with the planner's expectations; the
+      planner was wrong in about half the `file_invoices` runs (expected
+      `inv1041_copy.pdf` to stay although `inv*.pdf` matches it), so
+      soft problems only become `# REVIEW NOTES` for the human.
+    - Long timers do not block: the probe reports, flushes, and
+      `os._exit`s after joining threads for up to 3 s.
+    Real-model results (Qwen2.5-Coder-14B):
+    - Caught the double move: `FileNotFoundError` from the second
+      `shutil.move` of a file matching both `inv*.pdf` and
+      `*invoice*.pdf`.
+    - **Found a bug in the drafting prompt itself.** The prompt's
+      examples called `show_notification(title=..., message=...)`, but
+      the real argument is `body`. Every generated tool that notified
+      raised `TypeError` inside a background thread, so the
+      notification silently never appeared. That is likely a large part
+      of why generated tools seemed broken. Fixed in the prompt, and
+      the AVAILABLE TOOLS list now shows each tool's exact arguments
+      (`call: show_notification(title: string, body: string)`).
+    - Planner degenerated into a numbered series (`inv1041.dmg` …
+      `inv1070.dmg`) until the token cap; fixed by "at most 8 files,
+      never a numbered series".
+    - Final run: `file_invoices`, `remind_me_in`, `tidy_dmg_downloads`
+      each passed on attempt 1 (20-40 s); `file_invoices` carried one
+      soft note from a wrong planner expectation.
+    Also fixed on the way: `_validate_source` banned plain substrings,
+    so `re.compile(` and `ast.literal_eval(` were rejected as
+    `compile(` / `eval(`. Banned calls are now matched on the AST.
 
   - **5.2 Idea sources.** Repetition only finds what the user already
     does by hand, after three rounds. Other sources, ranked by value
