@@ -121,7 +121,7 @@ Background work rules:
 Composition rules (IMPORTANT — read carefully):
 * Your tool SHOULD call other tools whenever they do part of what you need. Tools that compose other tools are strongly preferred over tools that re-implement primitives.
 * The AVAILABLE TOOLS list below shows every tool currently registered. Each entry gives the `import path` you use to bring the tool into your module and call it.
-* Built-in tools live under `tools.<name>` (e.g. `from tools.show_notification import show_notification`).
+* Built-in tools live under `tools.<module>` (e.g. `from tools.show_notification import show_notification`); the module name can differ from the tool name, so copy the exact import line from the AVAILABLE TOOLS list.
 * Previously-generated tools live under `tools.generated.<name>` (e.g. `from tools.generated.fetch_weather import fetch_weather`).
 * Imported tools are invoked as normal Python callables: `show_notification(title="Done", body="...")`. Check each tool's description for its arguments before calling it.
 * MANDATORY: If you call a tool anywhere in your module (including inside nested functions, closures, or threads), you MUST write its exact `from tools.X import X` line at the top of the file with the other imports. Calling a tool that is not imported will raise `NameError` at runtime — the error will be swallowed inside background threads and your tool will appear to succeed while doing nothing.
@@ -337,6 +337,26 @@ def _call_signature(tool_obj: Any) -> str:
     return ", ".join(parts)
 
 
+def _builtin_import_path(name: str, tool_obj: Any) -> str:
+    """Module path that really defines built-in ``tool_obj``.
+
+    Several tools can share one module (``tools.windows`` holds
+    ``list_windows`` and ``open_app``), so ``tools.<name>`` is only a
+    fallback: a generated tool that copied a wrong import line would fail
+    to load.
+    """
+    import sys
+
+    for mod_name, module in list(sys.modules.items()):
+        if (
+            mod_name.startswith("tools.")
+            and not mod_name.startswith("tools.generated")
+            and getattr(module, name, None) is tool_obj
+        ):
+            return mod_name
+    return f"tools.{name}"
+
+
 def _format_available_tools_context() -> str:
     """Render the ``AVAILABLE TOOLS`` section for the drafter's system prompt.
 
@@ -378,7 +398,7 @@ def _format_available_tools_context() -> str:
         # ``body``), which raised TypeError inside a background thread.
         call = f"{name}({_call_signature(tool_obj)})"
         if name in builtin_names:
-            path = f"tools.{name}"
+            path = _builtin_import_path(name, tool_obj)
             builtin_lines.append(
                 f"- {name}  (import: from {path} import {name})\n"
                 f"    call: {call}\n"

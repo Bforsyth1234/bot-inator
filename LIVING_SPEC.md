@@ -290,6 +290,18 @@ bypass the approval gate and run inline; all other tools still emit an
 |                    |           | to a buddy on the iMessage service.               |
 | `remember_preference`| ✅       | Persists a user preference string into the shared |
 |                    |           | `Memory` at `~/.bot-inator/memory.db`.            |
+| `find_files`       | ✅         | Spotlight (`mdfind`) by name or content, optional |
+|                    |           | folder and kind; newest first, ≤50 results.       |
+| `list_shortcuts`   | ✅         | `shortcuts list` → the user's Shortcut names.     |
+| `run_shortcut`     |           | `shortcuts run <exact name>`, optional text input |
+|                    |           | (temp file via `--input-path`); returns stdout.   |
+| `create_note`      |           | AppleScript → Notes.app: new note (text via argv, |
+|                    |           | HTML-escaped).                                    |
+| `append_note`      |           | Appends to the one note with that exact title.    |
+| `list_windows`     | ✅         | Quartz window list (app + title; titles need      |
+|                    |           | Screen Recording).                                |
+| `open_app`         |           | `open -a` on an `.app` found in the Applications  |
+|                    |           | folders.                                          |
 | `generate_custom_tool`|         | Meta-tool: drafts a new `@tool` module on the     |
 |                    |           | main engine, runs static safety checks, emits a   |
 |                    |           | `code_approval_request` for human review, and —   |

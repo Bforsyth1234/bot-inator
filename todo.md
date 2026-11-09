@@ -47,7 +47,7 @@ checks list under the wave plan. An item whose code and tests are done but
 whose live check hasn't run is `[~] live`, not `[x]`.
 ============================================================ -->
 
-Next ID: #48
+Next ID: #50
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -66,7 +66,7 @@ API auth → sandbox for installed tools → live checks.
 
 | Wave | Slot: items | Owned files (disjoint within the wave) | Status |
 | :--- | :--- | :--- | :--- |
-| 1 | A: #39 #40 · B: #43 · C: #44 · D: #46 · E: #47 · F: #30 | A `tests/test_groq_engine.py`, `tests/test_dry_run.py`, `tools/draft_dry_run.py` · B `tools/shortcuts.py` · C `tools/find_files.py` · D `tools/notes.py` · E `tools/windows.py` · F `tests/test_git_commit.py` (+ each slot's own new test file) | [ ] |
+| 1 | A: #39 #40 · B: #43 · C: #44 · D: #46 · E: #47 · F: #30 | A `tests/test_groq_engine.py`, `tests/test_dry_run.py`, `tools/draft_dry_run.py` · B `tools/shortcuts.py` · C `tools/find_files.py` · D `tools/notes.py` · E `tools/windows.py` · F `tests/test_git_commit.py` (+ each slot's own new test file) | [x] closed 2026-11-09 (#43 #44 #46 #47 `[~] live`) |
 | 2 | A: #20 #21 · B: #24 · C: #25 · D: #14 · E: #16 #17 · F: #36 | A `ai/memory.py` · B `tools/meta_tool_generator.py` · C `ai/pattern_recognizer.py` · D `events/file_watcher.py` · E `events/mac_listeners.py`, `events/_mac_app_helper.py` · F `ai/open_help.py` | [ ] |
 | 3 | A: #23 #28 #38 · B: #41 · C: #42 · D: #33 #35 · E: #34 | A `ai/orchestrator.py`, tool routes in `main.py`, `ToolManagerView.swift` · B `events/mail_watcher.py`, `tools/read_email.py` · C `tools/calendar_access.py`, `tools/list_events.py`, `tools/create_event.py`, `events/calendar_watcher.py`, `requirements.txt` · D `ai/setup_scan.py`, `ai/starter_catalog.json` · E `events/clipboard_watcher.py`, `ai/friction.py` | [ ] |
 | 4 | A: #32 · B: #45 · C: #15 #18 · D: #26 | A `ai/idea_sources.py`, `ai/open_help.py` · B `tools/reminders.py` (+ additive `tools/calendar_access.py`) · C `ApprovalAlert.swift`, `ApprovalPresenter.swift`, `CodeReviewAlert.swift` · D `config.py`, engine setup + settings routes in `main.py`, `SettingsView.swift` | [ ] |
@@ -110,6 +110,11 @@ pass-rate measurement is a live check · #38 a second
 Filled in as items reach `[~] live`. Each line: item, what to do, what
 to see.
 
+- #43 Shortcuts: ask "list my shortcuts" → names, no approval card. "Run my <name> shortcut" → approval card → it runs. Run one Shortcut that returns text and confirm the text comes back.
+- #44 Spotlight: ask "find my latest invoice PDF" → a real path, no approval card.
+- #46 Notes: "save a note called Test with hello" → approval card → Automation prompt for Notes → a "Test" note. "Append 'world' to my note Test" → approval → new line. Appending to a missing title → error, no new note.
+- #47 Windows: "what windows do I have open?" → real windows (titles if Screen Recording is granted, otherwise the note). "Open Numbers" → approval card → Numbers opens.
+
 ---
 
 ## Completed items (archived to DONE.md)
@@ -127,6 +132,11 @@ to see.
 - #11 — Draft → check → repair loop, critic pass, sandboxed dry run · 2026-11-09 · [DONE.md](DONE.md)
 - #12 — Idea sources: next step and chat capability gaps · 2026-11-09 · [DONE.md](DONE.md)
 - #13 — Open-help idea source: ask, filter, learn · 2026-11-09 · [DONE.md](DONE.md)
+- #30 — Nested-repo first-use regression test · 2026-11-09 · [DONE.md](DONE.md)
+- #39 — Groq engine tests fail on Python 3.14 · 2026-11-09 · [DONE.md](DONE.md)
+- #40 — test_dry_run order flake (not reproducible, closed) · 2026-11-09 · [DONE.md](DONE.md)
+- #48 — Approval wrapping stacked on every agent rebuild · 2026-11-09 · [DONE.md](DONE.md)
+- #49 — Drafting prompt printed wrong import paths for built-ins · 2026-11-09 · [DONE.md](DONE.md)
 
 ---
 
@@ -311,6 +321,12 @@ What about two generated tools across daemon restarts (e.g. the agent
 picks `summarize_pdf` twice with different logic)? Current plan: reject
 the second with a surfaced error; alternative is to version the file
 (`summarize_pdf.v2.py`) and let both coexist.
+FROM WAVE 1 #30 (2026-11-09), fix in the same file: `_git_commit`
+(`tools/meta_tool_generator.py`, `git init`/`git add` with `check=True`) falls
+into the catch-all and drops git's stderr; `.splitlines()[0]` raises
+`IndexError` on empty stdout; the identity args don't override
+`commit.gpgsign` / `core.hooksPath`, so a signing setup can hang to the 10 s
+timeout. `tests/test_git_commit.py` covers the happy paths.
 Verify:
 Deviations:
 
@@ -327,15 +343,6 @@ Deviations:
 
 ---
 
-#30 — Nested-repo first-use regression test [ ] [Q17]
-Wave: 1 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q17)
-Ask: Add a slower integration case that drives `_git_commit` against a
-real on-disk `tmp_path`, covering the `git init` transition and identity
-derivation (host global → `bot-inator` fallback). Mark it
-`@pytest.mark.slow` or skip when `git` is not on PATH, so the fast suite
-stays under a second.
-Verify:
-Deviations:
 
 ### New built-in tools
 
@@ -360,7 +367,7 @@ Shared DECISIONS for #43–#47 (user + assistant, 2026-11-09):
 
 ---
 
-#43 — Shortcuts runner: list and run the user's Shortcuts [ ]
+#43 — Shortcuts runner: list and run the user's Shortcuts [~] live
 Wave: 1 · Agent: _ · Added: 2026-11-09 · Source: user (ranked #1)
 Ask: Let the agent use every Shortcut the user already has, and the app
 actions Shortcuts can reach, without writing code per action.
@@ -380,11 +387,20 @@ Verify:
   approval-gate check (shared decision 5).
 ⚬ Live: "run my <shortcut name> shortcut" → approval card → it runs.
 Time: about 1.5 hours.
-Deviations:
+Results (wave 1, 2026-11-09):
+⚬ `tools/shortcuts.py`: `list_shortcuts()` (read-only, 15 s timeout) and
+  `run_shortcut(name, input_text="")` (gated, exact name from `shortcuts list`,
+  arg list, 60 s timeout; non-zero exit → `status: error` + stderr).
+⚬ `tests/test_shortcuts.py` 12 passed (gate test runs since registration).
+  Non-vacuity: loosening the exact-name match failed 2 cases; moving
+  `run_shortcut` to read-only failed the gate test.
+Deviations: `shortcuts run` has no stdin input, so `input_text` goes to a temp file
+passed as `--input-path` (deleted after). Output is read from stdout; the live
+check confirms that.
 
 ---
 
-#44 — Spotlight file search [ ]
+#44 — Spotlight file search [~] live
 Wave: 1 · Agent: _ · Added: 2026-11-09 · Source: user (ranked #2)
 Ask: Let the agent answer "where's that invoice PDF?" and pass the path
 on to `move_file` or `summarize_file`.
@@ -401,7 +417,17 @@ Verify:
   filtering, an empty result; the read-only check (shared decision 5).
 ⚬ Live: "find my latest invoice PDF" returns a real path with no approval card.
 Time: about 1 hour.
-Deviations:
+Results (wave 1, 2026-11-09):
+⚬ `tools/find_files.py`: `find_files(query, folder, kind, limit)` via `mdfind`
+  (name or content match, quotes escaped, 10 s timeout), newest first,
+  limit clamped 1–50, `~/Library` dropped unless asked, vanished files skipped.
+⚬ `tests/test_find_files.py` 12 passed. Non-vacuity: forcing the Library
+  filter off and removing the cap each failed a test. A direct run on this Mac
+  returned real invoice PDFs.
+Deviations: Kind filters use `kMDItemContentTypeTree` (matches subtypes). Only the first
+1,000 matches are stat'ed, so "newest first" is within those. The runner
+changed the test to import the module via `importlib` (the package attribute
+`tools.find_files` is the tool once registered).
 
 ---
 
@@ -432,7 +458,7 @@ Deviations:
 
 ---
 
-#46 — Notes: create and append [ ]
+#46 — Notes: create and append [~] live
 Wave: 1 · Agent: _ · Added: 2026-11-09 · Source: user (ranked #4)
 Ask: Let the agent save things for later: meeting notes, a summary of a
 long email (#41), a list it put together.
@@ -453,11 +479,19 @@ Verify:
   containing `"` and `end tell` stays inert, missing-note error, gate check.
 ⚬ Live: "save a note called Test with hello" → approval card → note in Notes.app.
 Time: about 1.5 hours.
-Deviations:
+Results (wave 1, 2026-11-09):
+⚬ `tools/notes.py`: `create_note(title, body, folder)` and `append_note(title,
+  text)`, both gated. Fixed AppleScripts, text passed via `on run argv`, HTML
+  escaped per line; both scripts compile with `osacompile`. Nothing sent to
+  Notes.app.
+⚬ `tests/test_notes.py` 10 passed. Non-vacuity: splicing argv into the script
+  failed 3 tests; marking `append_note` read-only failed the gate test.
+Deviations: `append_note` also errors when more than one note has the exact title,
+rather than guessing.
 
 ---
 
-#47 — App and window control [ ]
+#47 — App and window control [~] live
 Wave: 1 · Agent: _ · Added: 2026-11-09 · Source: user (ranked #5)
 Ask: Let the agent open the right app for a task, and let idea sources
 see which windows are open, not just which app is in front.
@@ -481,7 +515,16 @@ Verify:
 ⚬ Live: "what windows do I have open?" lists real windows; "open
   Numbers" → approval card → Numbers opens.
 Time: about 1 hour.
-Deviations:
+Results (wave 1, 2026-11-09):
+⚬ `tools/windows.py`: `list_windows()` (read-only; on-screen layer-0 windows,
+  max 100; `CGPreflightScreenCaptureAccess` decides whether titles are
+  available, with a note when not) and `open_app(name)` (gated; must match an
+  `.app` in /Applications, ~/Applications, /System/Applications(/Utilities)).
+⚬ `tests/test_windows.py` 10 passed. Non-vacuity: marking `open_app`
+  read-only and dropping the unknown-name check each failed a test.
+Deviations: `open_app` passes the resolved bundle path to `open -a`, not the raw name.
+Found: the drafting prompt printed `from tools.<tool name> import …`, wrong for
+tools in shared modules; fixed by the runner at wave close (see #48).
 
 ---
 
@@ -716,6 +759,10 @@ typically lacks it, so most installs run the recency fallback. Document
 with the extension enabled?
 DECISIONS (assistant, 2026-11-09): seen live: every recall in the
 2026-11-09 runs logged "vec0 search unavailable (no such module: vec0)".
+FROM WAVE 1 #40 (2026-11-09): an intermittent segfault in `ai/memory.py`
+`search` (sqlite) during `test_integration.py`'s client fixture teardown, 2 of
+4 paired runs, never alone. Not seen in 3 full runs after #48. Check whether
+a connection is used from another thread after close.
 Verify:
 Deviations:
 
@@ -761,26 +808,3 @@ and send only tool drafts to Groq.
 Verify:
 Deviations:
 
-### Test hygiene
-
-#39 — Groq engine tests fail on Python 3.14 [ ]
-Wave: 1 · Agent: _ · Added: 2026-11-09 · Source: assistant (test run)
-Ask: 6 tests in `tests/test_groq_engine.py` fail with "There is no
-current event loop in thread 'MainThread'": they call
-`asyncio.get_event_loop().run_until_complete(...)`, which Python 3.14 no
-longer supports without a running loop. Fails on the untouched baseline
-too.
-Approach: use `asyncio.run(...)` in the tests.
-Verify: `pytest tests/test_groq_engine.py` 8/8.
-Deviations:
-
----
-
-#40 — test_dry_run fails depending on test order [ ]
-Wave: 1 · Agent: _ · Added: 2026-11-09 · Source: assistant (test run)
-Ask: `tests/test_dry_run.py::test_parse_plan_keeps_exists_checks_only_for_fixtures`
-failed in one full-suite run and passed alone and in later full runs.
-Approach: find the shared state (module globals or env) another test
-leaves behind; run the suite with `-p randomly` or in reverse order.
-Verify: 5 full runs in random order, no failure.
-Deviations:

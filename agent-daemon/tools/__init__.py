@@ -5,15 +5,19 @@ Exports the list of available tools the orchestrator registers with smolagents.
 
 from __future__ import annotations
 
+from .find_files import find_files
 from .meta_tool_generator import generate_custom_tool
 from .move_file import move_file
+from .notes import append_note, create_note
 from .open_url import open_url
 from .read_active_tab import read_active_tab
 from .read_clipboard import read_clipboard
 from .remember_preference import remember_preference
 from .send_imessage import send_imessage
+from .shortcuts import list_shortcuts, run_shortcut
 from .show_notification import show_notification
 from .summarize_file import summarize_file
+from .windows import list_windows, open_app
 from .write_clipboard import write_clipboard
 
 AVAILABLE_TOOLS = [
@@ -25,6 +29,13 @@ AVAILABLE_TOOLS = [
     summarize_file,
     move_file,
     remember_preference,
+    find_files,
+    list_shortcuts,
+    run_shortcut,
+    create_note,
+    append_note,
+    list_windows,
+    open_app,
     generate_custom_tool,
 ]
 
@@ -38,6 +49,9 @@ READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset({
     "read_clipboard",
     "summarize_file",
     "remember_preference",
+    "find_files",
+    "list_shortcuts",
+    "list_windows",
 })
 
 __all__ = [
@@ -50,6 +64,13 @@ __all__ = [
     "move_file",
     "send_imessage",
     "remember_preference",
+    "find_files",
+    "list_shortcuts",
+    "run_shortcut",
+    "create_note",
+    "append_note",
+    "list_windows",
+    "open_app",
     "generate_custom_tool",
     "AVAILABLE_TOOLS",
     "READ_ONLY_TOOL_NAMES",

@@ -662,3 +662,110 @@ Live run (2026-11-09): with the interval at 60 s, 3 test files in
 ~/Downloads produced judged ideas (`csv_merge`, `csv_diff`,
 `recent_apps`); `csv_diff` went idea → approval → draft → review →
 installed and committed in the nested repo.
+
+## Wave 1 — closed 2026-11-09
+
+Wave-close run: full suite 228 passed, 3 runs in a row. No Swift changes.
+Registered by the runner: `find_files`, `list_shortcuts`, `run_shortcut`,
+`create_note`, `append_note`, `list_windows`, `open_app` (read-only:
+`find_files`, `list_shortcuts`, `list_windows`). #43, #44, #46 and #47 are
+built and wait in todo.md as `[~] live`.
+
+#39 — Groq engine tests fail on Python 3.14 [x]
+Wave: 1 · Agent: _ · Added: 2026-11-09 · Source: assistant (test run)
+Ask: 6 tests in `tests/test_groq_engine.py` fail with "There is no
+current event loop in thread 'MainThread'": they call
+`asyncio.get_event_loop().run_until_complete(...)`, which Python 3.14 no
+longer supports without a running loop. Fails on the untouched baseline
+too.
+Approach: use `asyncio.run(...)` in the tests.
+Verify: `pytest tests/test_groq_engine.py` 8/8.
+Results (wave 1, 2026-11-09):
+⚬ The 6 `asyncio.get_event_loop().run_until_complete(...)` calls in
+  `tests/test_groq_engine.py` are now `asyncio.run(...)`. 8/8 pass; the old
+  file gives 6 failed.
+Deviations: none.
+
+---
+
+#40 — test_dry_run fails depending on test order [x]
+Wave: 1 · Agent: _ · Added: 2026-11-09 · Source: assistant (test run)
+Ask: `tests/test_dry_run.py::test_parse_plan_keeps_exists_checks_only_for_fixtures`
+failed in one full-suite run and passed alone and in later full runs.
+Approach: find the shared state (module globals or env) another test
+leaves behind; run the suite with `-p randomly` or in reverse order.
+Verify: 5 full runs in random order, no failure.
+Results (wave 1, 2026-11-09):
+⚬ Not reproducible: 5 fully shuffled runs (seeds 1–5), reverse file order,
+  and `test_dry_run.py` after every other file all passed. `parse_plan` is
+  pure, nothing patches or reloads `tools.draft_dry_run`, and the autouse
+  fixture only resets `_SANDBOX_OK`. No code changed.
+⚬ After #48 the full suite passed 3 runs in a row (228 passed).
+Deviations: closed without a code change: no shared state was found. The likeliest cause
+of the single failure is a run against a half-edited `draft_dry_run.py`
+(unproven). Reopen as a new item if it recurs.
+
+---
+
+#30 — Nested-repo first-use regression test [x] [Q17]
+Wave: 1 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q17)
+Ask: Add a slower integration case that drives `_git_commit` against a
+real on-disk `tmp_path`, covering the `git init` transition and identity
+derivation (host global → `bot-inator` fallback). Mark it
+`@pytest.mark.slow` or skip when `git` is not on PATH, so the fast suite
+stays under a second.
+Verify:
+Results (wave 1, 2026-11-09):
+⚬ `tests/test_git_commit.py`, 7 tests (~1 s): first commit runs `git init`
+  with the fallback identity; identity from the global config; partial
+  global identity falls back per key; second commit; nothing-to-commit and
+  missing-git are non-fatal; missing directory is non-fatal. Isolated HOME,
+  `GIT_CONFIG_GLOBAL` to a tmp file, `GIT_CONFIG_NOSYSTEM=1`, repos only
+  under `tmp_path`; skipped when `git` is missing.
+⚬ Non-vacuity: 4 mutations of `_git_commit` (fallback email, ignoring the
+  global name, skipping `git init`, dropping the `FileNotFoundError` handler)
+  each failed 1–4 tests.
+Deviations: no `@pytest.mark.slow`: the marker isn't registered, so only the skip-if-no-git
+is used. Three `_git_commit` bugs found and handed to #24.
+
+---
+
+#48 — Approval wrapping stacked on every agent rebuild [x]
+Wave: 1 (runner, found at wave close) · Added: 2026-11-09 · Source: assistant (#40's test runs)
+Ask: The full suite failed 17 tests with "Event loop is closed", with
+`gated_forward` nested 13 deep in one traceback.
+Cause: `Orchestrator._wrap_tool_for_approval` replaced `forward` on the
+shared tool objects in `AVAILABLE_TOOLS`, and `_build_agent` runs again
+after every dynamic-tool load. Each rebuild wrapped the previous wrapper,
+so one tool call raised one approval request per layer, and stale layers
+stayed bound to old orchestrators and closed loops. In the daemon this
+means repeated approval prompts for a single call after tool installs
+(likely related to #38's 4× prompts).
+Fix (`ai/orchestrator.py`): wrap a shallow copy of the tool; the original
+`forward` is kept as `_ungated_forward`, so re-wrapping a wrapper still
+gates once. The shared tool objects are never changed.
+Results (wave 1, 2026-11-09):
+⚬ `tests/test_tool_wrapping.py`: 3 rebuilds (including wrapping a wrapper)
+  → exactly 1 approval request per call; the shared tool stays ungated;
+  a wrapper from a closed-loop orchestrator never leaks. Non-vacuity: with
+  the old code, 3 approval requests for 1 call (2 failed).
+⚬ Full suite 228 passed, 3 runs in a row (was 17 failed).
+Deviations: none.
+
+---
+
+#49 — Drafting prompt printed wrong import paths for built-ins [x]
+Wave: 1 (runner, found by #47 and #46) · Added: 2026-11-09 · Source: assistant
+Ask: `_format_available_tools_context` built each built-in's import as
+`from tools.<tool name> import <tool name>`. Wrong for tools in a shared
+module (`tools.windows` holds `list_windows` and `open_app`;
+`tools.notes`, `tools.shortcuts` likewise), so a generated tool copying
+the line would fail to load.
+Fix (`tools/meta_tool_generator.py`): `_builtin_import_path` finds the
+`tools.*` module that really defines the tool object; the drafting prompt
+now says the module name can differ and to copy the listed line.
+Results (wave 1, 2026-11-09):
+⚬ `tests/test_tools_context.py`: every listed import line imports that exact
+  tool object; shared-module paths are right. Non-vacuity: with the old
+  code both tests fail.
+Deviations: none.

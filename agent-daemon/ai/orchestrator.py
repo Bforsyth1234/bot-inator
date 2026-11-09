@@ -13,6 +13,7 @@ Phase 1 design:
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib.util
 import logging
 import sys
@@ -710,7 +711,14 @@ class Orchestrator:
         """
         orchestrator = self
 
-        original_forward = getattr(tool, "forward", None) or getattr(tool, "__call__", None)
+        # Wrap a shallow copy: the tool objects in ``AVAILABLE_TOOLS`` are
+        # shared, and ``_build_agent`` runs again after every dynamic-tool
+        # load. Replacing ``forward`` on the shared object nested one more
+        # approval gate per rebuild (one prompt per layer) and left stale
+        # wrappers bound to old orchestrators and closed loops (#48).
+        original_forward = getattr(tool, "_ungated_forward", None) or (
+            getattr(tool, "forward", None) or getattr(tool, "__call__", None)
+        )
         tool_name = getattr(tool, "name", getattr(tool, "__name__", "tool"))
         is_read_only = tool_name in READ_ONLY_TOOL_NAMES
 
@@ -748,8 +756,10 @@ class Orchestrator:
             return result
 
         if hasattr(tool, "forward"):
-            tool.forward = gated_forward  # type: ignore[attr-defined]
-            return tool
+            wrapped = copy.copy(tool)
+            wrapped._ungated_forward = original_forward  # type: ignore[attr-defined]
+            wrapped.forward = gated_forward  # type: ignore[attr-defined]
+            return wrapped
         return gated_forward
 
     @staticmethod
