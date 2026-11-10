@@ -561,6 +561,9 @@ Results (wave 8, 2026-11-09):
   pattern turn. `ToolDetailView.swift` sheet from Tool Manager; "Open in
   editor" = `open -t`. 13 tests; non-vacuity 3 / 1 / 1.
 Deviations: added state `not_loaded`.
+Live (2026-11-10): find_files → "Runs without asking", open_url → "Needs
+your approval", Open in editor opened the file as text, a generated tool
+showed sandbox info and its when-it-runs. ✔
 
 ---
 
@@ -845,6 +848,10 @@ Results (wave 8, 2026-11-09):
   menu path. 47 tests; non-vacuity 5 / 16 / 3. Registered read-only by the
   runner.
 Deviations: `file://` blocked with all non-web schemes; URL re-check between steps.
+Live (2026-11-10): Chrome's "Allow JavaScript from Apple Events" turned on
+(Permissions row went green) → "summarize the page I'm on" →
+`read_active_tab_text` read the Chrome tab → summary, no card. ✔ Still to
+do: setting-off error, Safari order, a bank page.
 
 ---
 
@@ -906,6 +913,8 @@ Results (wave 8, 2026-11-09):
   Groq, off by default). 5 tests; non-vacuity 3 + 1.
 Deviations: `.env` ranks below the saved toggle (otherwise the toggle could never turn
 the user's `.env` opt-in off). The Debug tab updates on next connect.
+Live (2026-11-10): Settings shows the toggle on (from `.env`). ✔ (Flip
+off → placeholder in the log not exercised yet.)
 
 ---
 
@@ -968,6 +977,8 @@ Results (wave 8, 2026-11-09):
   non-vacuity 2 + 2.
 Deviations: removing from IdeaFeedback already stops matching (match() re-reads
 entries); the cache clear just drops vectors for removed ideas.
+Live (2026-11-10): Tool Manager → Declined ideas lists send_imessage with
+its count. ✔ (Remove / Clear all not exercised yet.)
 
 ---
 
@@ -1425,6 +1436,13 @@ Results (wave 8, 2026-11-09):
   Recording, Reminders, Notes, Chrome, Safari granted; Calendar not asked.
 Deviations: Automation → Messages left out (send_imessage not registered); Reminders
 checked as Automation (AppleScript backend).
+Live (2026-11-10): Settings → Permissions shows the rows; after the user
+allowed Calendar and Chrome JS, a restart/refresh showed 9 granted
+(FDA, Screen Recording, Calendars, Automation → Reminders/Calendar/Notes/
+Chrome/Safari, Chrome JS), System Events and Safari JS unknown. "Grant to"
+named claude.app (this daemon was started from the Claude session). ✔
+Follow-up: the System Events row offers Request although the sandbox (#53)
+blocks System Events for generated tools; the user kept it as is.
 
 ### Approvals and UI
 
