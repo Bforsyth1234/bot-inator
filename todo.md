@@ -623,6 +623,10 @@ passed as `--input-path` (deleted after). Output is read from stdout; the live
 check confirms that.
 Live (2026-11-09): "list my shortcuts" → the 5 Shortcuts, no card (after
 #55). Still to do: run one, and one that returns text.
+Live (2026-11-10): "run my Take a Break shortcut" → card → `run_shortcut`
+timed out after 60 s (that Shortcut waits for user interaction); the
+duplicate guard stopped a second run. Run a Shortcut that finishes on its
+own to close this.
 
 ---
 
@@ -700,6 +704,8 @@ reminder. Pinned `AGENT_REMINDERS_BACKEND=applescript` in
 `agent-daemon/.env`. Still to do: create and list from chat.
 Live (2026-11-09): "remind me to call the vet tomorrow at 9" → card →
 `create_reminder` {due: 2026-11-10T09:00} → ok (AppleScript backend). ✔
+Live (2026-11-10): "what's on my reminders?" → "Call the vet – due Nov 10
+09:00", no card. ✔
 
 ---
 
@@ -736,6 +742,8 @@ rather than guessing.
 Live (2026-11-09): "save a note called Test with hello" → approval card →
 Notes Automation prompt → `create_note` {title: Test, body: hello} → ok;
 the model sent `folder: null`, dropped by #55. ✔ Still to do: append.
+Live (2026-11-10): "append world to my note Test" → card → `append_note`
+ok. ✔
 
 ---
 
@@ -775,6 +783,8 @@ Found: the drafting prompt printed `from tools.<tool name> import …`, wrong fo
 tools in shared modules; fixed by the runner at wave close (see #48).
 Live (2026-11-09): "what windows do I have open?" → windows with titles
 (Screen Recording already granted), no card. Still to do: "open Numbers".
+Live (2026-11-10): "open Numbers" → approval card → Numbers opened. ✔
+(The first try waited behind failing email turns; fixed by #62's alias.)
 
 ---
 
@@ -1083,6 +1093,8 @@ tool-free completion to phrase the answer (it had replied just "Done."), and
 each event carries a readable `when` (the model had called Monday Nov 9
 "Wednesday"). Still to do: add an event; `event_starting_soon`; quit the app
 → "open the app" error.
+Live (2026-11-10): "add lunch with Sam tomorrow at noon" → card →
+event created in "Brooks Forsyth" for Nov 11 12:00–1:00 PM. ✔
 
 ---
 

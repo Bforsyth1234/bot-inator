@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 import importlib.util
 import logging
 import os
@@ -1485,7 +1486,11 @@ class Orchestrator:
             "3. Otherwise, reply in plain text.\n\n"
             "Be concise. Do not fabricate results. Do not call "
             "`generate_custom_tool` for questions that only need a direct "
-            "answer (definitions, explanations, chit-chat)."
+            "answer (definitions, explanations, chit-chat).\n"
+            "Your final answer must tell the user the actual result in a "
+            "sentence: what you found, what you did, or why it failed "
+            "(e.g. 'Numbers isn't installed on this Mac'). Never answer "
+            "with just 'Done.'"
             f"{memory_suffix}"
         )
 
@@ -1647,26 +1652,87 @@ def _has_tool_result(messages: Any) -> bool:
 
 
 _ANSWER_NUDGE = (
-    "Reply to the user now in plain text, using the tool results above. "
-    "Do not call any tools."
+    "Reply to the user now in plain text, using the tool results above: "
+    "say what you found, what you did, or why it failed. Do not reply "
+    "with just 'Done.' Do not call any tools."
 )
 
 
+def _is_bare_done(value: Any) -> bool:
+    """True for a final answer that is only "Done" / "Done." (any case).
+
+    Tool-call arguments arrive from the API as a JSON string
+    ('{"answer": "Done."}'), not a dict, before smolagents parses them.
+    """
+    if isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            pass
+    if isinstance(value, dict):
+        value = value.get("answer")
+    if isinstance(value, str):
+        text = value
+    else:
+        return False
+    return text.strip().strip(".!").strip().lower() in {"done", "ok", "okay"}
+
+
 def _text_answer(generate: Any, messages: Any, stop_sequences: Any, kwargs: dict) -> str:
-    """One tool-free completion so the model can phrase its final answer."""
+    """Tool-free completions so the model can phrase its final answer.
+
+    Live check: GPT-OSS returned ``finish_reason=stop`` with empty content
+    (its words only in ``reasoning``) when the agent's stop sequences were
+    sent, so a second try drops them.
+    """
     extra = {k: v for k, v in kwargs.items() if k != "tool_choice"}
-    try:
-        # smolagents wants list-of-parts content (a plain string fails its
-        # message cleaning when flatten_messages_as_text is off).
-        nudge = {"role": "user", "content": [{"type": "text", "text": _ANSWER_NUDGE}]}
-        nudged = list(messages or []) + [nudge]
-        reply = generate(nudged, stop_sequences=stop_sequences,
-                         tools_to_call_from=None, **extra)
-    except Exception:
-        logger.exception("tool-free answer attempt failed")
-        return ""
-    content = getattr(reply, "content", "")
-    return content.strip() if isinstance(content, str) else ""
+    # smolagents wants list-of-parts content (a plain string fails its
+    # message cleaning when flatten_messages_as_text is off).
+    nudge = {"role": "user", "content": [{"type": "text", "text": _ANSWER_NUDGE}]}
+    nudged = list(messages or []) + [nudge]
+    for stops in ((stop_sequences, None) if stop_sequences else (None,)):
+        try:
+            reply = generate(nudged, stop_sequences=stops, tools_to_call_from=None, **extra)
+        except Exception:
+            logger.exception("tool-free answer attempt failed")
+            continue
+        content = getattr(reply, "content", "")
+        text = content.strip() if isinstance(content, str) else ""
+        if text:
+            return text
+        raw = getattr(reply, "raw", None)
+        try:
+            choice = raw.choices[0]
+            logger.info(
+                "tool-free answer empty (stops=%s): finish_reason=%s",
+                bool(stops), getattr(choice, "finish_reason", None),
+            )
+        except Exception:
+            logger.info("tool-free answer empty (stops=%s)", bool(stops))
+    return ""
+
+
+_ERROR_IN_RESULT_RE = re.compile(r"""['"]error['"]\s*:\s*['"]([^'"]{1,300})['"]""")
+
+
+def _fallback_from_tool_result(messages: Any) -> str:
+    """Last resort when the model writes nothing: report the last tool error,
+    if any, so a failure never reads as "Done."."""
+    for msg in reversed(list(messages or [])):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        role = getattr(role, "value", role)
+        if role not in ("tool-response", "tool"):
+            continue
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text", "")) for part in content if isinstance(part, dict)
+            )
+        match = _ERROR_IN_RESULT_RE.search(str(content or ""))
+        if match:
+            return f"That didn't work: {match.group(1)}"
+        return "Done."
+    return "Done."
 
 
 # GPT-OSS on Groq keeps calling a tool named "answer" for its final reply.
@@ -1743,6 +1809,21 @@ def _make_groq_model_class(base: type) -> type:
                 function = getattr(call, "function", None)
                 if getattr(function, "name", None) == ANSWER_ALIAS:
                     function.name = "final_answer"
+                if (
+                    getattr(function, "name", None) == "final_answer"
+                    and _is_bare_done(getattr(function, "arguments", None))
+                    and _has_tool_result(messages)
+                ):
+                    # The model said only "Done." after a tool ran (live
+                    # check: "open Numbers" failed with "no app with that
+                    # name" and the reply was "Done."). Ask once for the
+                    # real result; keep "Done." if that comes back empty.
+                    better = _text_answer(super().generate, messages, stop_sequences, kwargs)
+                    logger.info("Bare 'Done.' after a tool result; re-ask gave %r", (better or "")[:120])
+                    if not better or _is_bare_done(better):
+                        better = _fallback_from_tool_result(messages)
+                    if not _is_bare_done(better):
+                        function.arguments = {"answer": better}
             content = (message.content or "").strip() if isinstance(message.content, str) else ""
             if (
                 tools_to_call_from and not message.tool_calls and not content
@@ -1755,7 +1836,9 @@ def _make_groq_model_class(base: type) -> type:
                 # first give the model one chance to write the answer with
                 # no tools offered (it said only "Done." to "what's on my
                 # calendar today?").
-                content = _text_answer(super().generate, messages, stop_sequences, kwargs) or "Done."
+                content = _text_answer(super().generate, messages, stop_sequences, kwargs)
+                logger.info("Empty reply after a tool result; re-ask gave %r", (content or "")[:120])
+                content = content or _fallback_from_tool_result(messages)
             if tools_to_call_from and not message.tool_calls and content:
                 from smolagents.models import (  # type: ignore
                     ChatMessageToolCall,
