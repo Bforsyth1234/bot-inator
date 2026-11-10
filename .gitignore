@@ -119,3 +119,6 @@ node_modules/
 # so the glob form is required.
 agent-daemon/tools/generated/*
 !agent-daemon/tools/generated/.gitkeep
+
+# Eval results (model output on recorded cases; may hold personal text)
+agent-daemon/evals/results/
