@@ -56,10 +56,18 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 # Optional columns: selected when present, NULL otherwise.
 OPTIONAL_SENDER_NAME = ("addresses", "comment")  # display name
+# Optional ``messages`` columns (present on the live index, 2026-11-10):
+# the same mail sits in several Gmail mailboxes (INBOX, [Gmail]/All Mail,
+# labels) with one ``global_message_id``; ``list_id_hash`` /
+# ``unsubscribe_type`` are set for mailing-list and newsletter mail.
+OPTIONAL_MESSAGE_COLUMNS = ("global_message_id", "list_id_hash", "unsubscribe_type")
+# How many global ids to remember for de-duplication.
+SEEN_GLOBAL_IDS = 5000
 
 SQL_MAX_ROWID = "SELECT IFNULL(MAX(ROWID), 0) FROM messages"
 SQL_NEW_MESSAGES = """
-    SELECT m.ROWID, s.subject, a.address, {sender_name}, m.date_received, mb.url
+    SELECT m.ROWID, s.subject, a.address, {sender_name}, m.date_received, mb.url,
+           {global_id}, {list_id}, {unsubscribe}
     FROM messages m
     LEFT JOIN subjects s ON m.subject = s.ROWID
     LEFT JOIN addresses a ON m.sender = a.ROWID
@@ -138,10 +146,25 @@ def schema_problems(columns: dict[str, list[str]]) -> list[str]:
 def build_new_messages_sql(columns: dict[str, list[str]]) -> str:
     table, col = OPTIONAL_SENDER_NAME
     has_name = col in {c.lower() for c in columns.get(table, [])}
+    message_cols = {c.lower() for c in columns.get("messages", [])}
+    optional = {
+        name: (f"m.{name}" if name in message_cols else "NULL")
+        for name in OPTIONAL_MESSAGE_COLUMNS
+    }
     return SQL_NEW_MESSAGES.format(
         sender_name=f"a.{col}" if has_name else "NULL",
+        global_id=optional["global_message_id"],
+        list_id=optional["list_id_hash"],
+        unsubscribe=optional["unsubscribe_type"],
         limit=MAX_ROWS_PER_POLL,
     )
+
+
+def is_bulk(list_id_hash: object, unsubscribe_type: object) -> bool:
+    """True for mailing-list / newsletter mail (List-Id or List-Unsubscribe)."""
+    def _set(value: object) -> bool:
+        return value not in (None, 0, "0", "")
+    return _set(list_id_hash) or _set(unsubscribe_type)
 
 
 def mailbox_name(url: Optional[str]) -> str:
@@ -196,6 +219,8 @@ class MailWatcher:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._last_rowid: int = 0
+        # Global ids already reported (dedupe across Gmail mailboxes).
+        self._seen_global: dict[int, None] = {}
         self._sql: str = ""
         self._poll_error_logged = False
         self._access_reported = False
@@ -309,10 +334,17 @@ class MailWatcher:
 
     def _poll_once(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute(self._sql, (self._last_rowid,)).fetchall()
-        for rowid, subject, address, name, date_received, url in rows:
+        for (rowid, subject, address, name, date_received, url,
+             global_id, list_id, unsubscribe) in rows:
             self._last_rowid = max(self._last_rowid, int(rowid))
             if is_own_mailbox(url):
                 continue
+            if global_id not in (None, 0):
+                if global_id in self._seen_global:
+                    continue  # same message in another mailbox (Gmail labels)
+                self._seen_global[global_id] = None
+                if len(self._seen_global) > SEEN_GLOBAL_IDS:
+                    self._seen_global.pop(next(iter(self._seen_global)))
             event = ContextEvent(
                 event_type="mail_received",
                 metadata={
@@ -321,6 +353,7 @@ class MailWatcher:
                     "date": _iso_date(date_received),
                     "mailbox": mailbox_name(url),
                     "message_id": int(rowid),
+                    "bulk": is_bulk(list_id, unsubscribe),
                 },
             )
             try:
