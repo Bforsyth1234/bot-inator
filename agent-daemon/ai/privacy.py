@@ -173,7 +173,14 @@ def clear_recent_personal() -> None:
 
 
 def _words(text: str) -> list[tuple[str, int, int]]:
-    return [(m.group(0).lower(), m.start(), m.end()) for m in _WORD_RE.finditer(text)]
+    """Lower-cased words with their spans. A trailing apostrophe is not
+    part of the word: otherwise the last word of a single-quoted quote
+    (``'… with Sam'`` → ``sam'``) never matches the personal text (#68)."""
+    out: list[tuple[str, int, int]] = []
+    for m in _WORD_RE.finditer(text):
+        word = m.group(0).rstrip("'’")
+        out.append((word.lower(), m.start(), m.start() + len(word)))
+    return out
 
 
 def _personal_ngrams(personal: list[str], n: int) -> set[tuple[str, ...]]:

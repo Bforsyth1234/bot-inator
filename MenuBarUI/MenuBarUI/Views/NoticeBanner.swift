@@ -20,7 +20,7 @@ struct NoticeBanner: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
             }
-            .frame(maxHeight: 170)
+            .frame(maxHeight: 200)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -35,11 +35,11 @@ private struct NoticeRow: View {
             Image(systemName: icon)
                 .foregroundStyle(tint)
             VStack(alignment: .leading, spacing: 4) {
-                Text(notice.title).font(.callout.weight(.semibold))
+                Text(notice.title).appFont(.callout, weight: .semibold)
                 Text(notice.body)
-                    .font(.caption)
+                    .appFont(.secondary)
                     .foregroundStyle(.secondary)
-                    .lineLimit(3)
+                    .lineLimit(4)
                 if let url = settingsURL {
                     Button("Open Settings") { NSWorkspace.shared.open(url) }
                         .controlSize(.small)

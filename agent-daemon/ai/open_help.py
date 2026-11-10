@@ -12,6 +12,13 @@ reaches the user directly. Three stages:
 2. **Filter**: deterministic checks, then a separate judge call
    (:data:`IDEA_JUDGE_SYSTEM_PROMPT`) scores the idea 0-10. Only ideas at
    or above ``min_score`` are published.
+
+   App focus alone is not evidence (todo #66). No model call is made until
+   the window holds a new *content* event (:data:`CONTENT_EVENT_TYPES`: a
+   file, mail, iMessage or calendar event); an idea must share a word with
+   a content event, not just name an app the user switched to
+   (:func:`grounded_in_events`); and an idea whose whole job is switching,
+   toggling, listing or counting apps is dropped (:func:`is_app_switcher`).
 3. **Learn**: :class:`IdeaFeedback` records which ideas the user approved
    or rejected. Ideas close to a rejected one are dropped, and recent
    verdicts are shown to the judge so the bar fits this user.
@@ -61,6 +68,11 @@ OPEN_HELP_SYSTEM_PROMPT = (
     "The tool must work for any future case of the same kind (take the "
     "path, text or number as an input), and must never delete or send "
     "anything without a dry_run option that defaults to True.\n\n"
+    "Switching between apps is not a task. Do not propose app switchers: "
+    "no tool that switches, toggles, focuses, lists or counts apps or "
+    "windows (macOS already does that with Cmd-Tab, the Dock and Screen "
+    "Time). Build the idea on the files, mail, messages or calendar "
+    "events in the list, not on which apps were in front.\n\n"
     "Most activity needs no tool. If nothing would clearly help, say so.\n\n"
     + _PROPOSAL_FORMAT
 )
@@ -89,7 +101,11 @@ IDEA_JUDGE_SYSTEM_PROMPT = (
     "- 4-6: plausible, but the events show only files or apps, not the "
     "step;\n"
     "- 0-3: generic, unrelated to the events, already one click in macOS, "
-    "or not doable with the Python standard library and macOS commands.\n"
+    "or not doable with the Python standard library and macOS commands. "
+    "A tool that switches, toggles, focuses, lists or counts apps or "
+    "windows always scores 0-3: macOS already does that (Cmd-Tab, the "
+    "Dock, Screen Time). So does an idea whose only link to the events is "
+    "the name of an app the user switched to.\n"
     "Ideas similar to ones the user rejected score low. Ideas similar to "
     "ones they approved may score higher. When in doubt, score lower.\n\n"
     "Reply with exactly one JSON object and nothing else:\n"
@@ -261,12 +277,105 @@ def parse_score(raw: str) -> Optional[int]:
     return parse_judge(raw)[0]
 
 
-def passes_checks(idea: dict[str, Any]) -> bool:
-    """Deterministic filter: well-formed name and a usable spec."""
+# ---- app switchers (todo #66) -----------------------------------------
+#
+# Most events are ``app_activated``, so a model asked "how could I help?"
+# keeps proposing tools that switch, toggle, list or count apps. macOS
+# already does all of that (Cmd-Tab, the Dock, Screen Time) and the user
+# deletes those tools. :func:`is_app_switcher` drops them before the judge.
+
+_SWITCH_WORD_RE = re.compile(r"^(switch|toggl|cycl|alternat|activat|focus|foreground|frontmost)")
+_TALLY_WORD_RE = re.compile(
+    r"^(count|tally|tallies|list|recent|used$|usage$|summar|track|logs?$|logger$|logging$|"
+    r"histor|stats?$|statistics$|report|frequen|monitor|show|top$|most$|rank)"
+)
+_APP_NOUNS = frozenset("app apps application applications window windows".split())
+_NAME_FILLER = frozenset(
+    "between and to of the my quick quickly fast two back forth hotkey "
+    "shortcut open running active current time times".split()
+)
+# "without switching", "no need to switch": the idea removes switching.
+_NEGATED_SWITCH_RE = re.compile(
+    r"\b(?:without|instead of|rather than|need to|have to|having to|stop|avoid\w*|"
+    r"no more|never|not)\s+(?:\w+\s+){0,2}?(?:switch\w*|toggl\w*)"
+)
+_DESC_SWITCH_RE = re.compile(r"\b(?:switch\w*|toggl\w*|cycl\w+|alternat\w+)\b")
+_DESC_FOCUS_VERB_RE = re.compile(r"\b(?:activat\w*|focus\w*|bring\w*)\b")
+_DESC_FRONT_RE = re.compile(r"\b(?:frontmost|foreground|to the front)\b")
+_DESC_TALLY_RE = re.compile(
+    r"\b(?:count\w*|tally|tallies|lists?|summari[sz]\w*|track\w*|logs?|show\w*|"
+    r"report\w*|rank\w*|frequen\w*)\b"
+)
+_DESC_APPS_OBJECT_RE = re.compile(
+    r"\b(?:apps|applications|app(?:lication)? switch\w*|each app|per app|"
+    r"switched to|app usage|app activations?)\b"
+)
+
+
+def _app_name_words(apps: Any) -> set[str]:
+    words: set[str] = set()
+    for app in apps or ():
+        words.update(w for w in _WORD_RE.findall(str(app or "").lower()) if len(w) >= 3)
+    return words
+
+
+def is_app_switcher(idea: dict[str, Any], apps: Any = ()) -> bool:
+    """True when the idea's whole job is switching, toggling, listing or counting apps.
+
+    ``apps`` are app names known from context (the apps in the event
+    window); they let ``toggle_chrome_claude`` be recognised. Only the name
+    and description are read: ``expected_logic`` of a real tool may well
+    say "activate Numbers". Two rules, either one drops the idea:
+
+    * **name**: every word of ``tool_name`` is a switch word, a tally word,
+      an app noun, a known app name or filler (``count_app_switches``,
+      ``recently_used_apps``, ``chrome_teams_switcher``). A name with any
+      other word (``toggle_dark_mode``, ``list_downloads``) is kept.
+    * **description**: it switches/toggles and its object is apps, focus or
+      a known app; or it activates something to the front; or it
+      lists/counts apps or app switches. "without switching" is not a hit.
+
+    When in doubt this drops (invariant 7d): a real data-moving tool that
+    describes itself as "switch between Mail and Numbers" is lost too.
+    """
+    app_words = _app_name_words(apps)
+    name_words = _WORD_RE.findall(str(idea.get("tool_name") or "").lower().replace("_", " "))
+    if name_words:
+        has_object = has_verb = False
+        for word in name_words:
+            if _SWITCH_WORD_RE.match(word):
+                has_verb = True
+                has_object = has_object or word in ("switcher", "switchers")
+            elif _TALLY_WORD_RE.match(word):
+                has_verb = True
+            elif word in _APP_NOUNS or word in app_words:
+                has_object = True
+            elif word not in _NAME_FILLER:
+                break
+        else:
+            if has_object and has_verb:
+                return True
+
+    desc = str(idea.get("description") or "").lower().replace("_", " ")
+    desc = _NEGATED_SWITCH_RE.sub(" ", desc)
+    desc_words = set(_WORD_RE.findall(desc))
+    if _DESC_SWITCH_RE.search(desc) and (
+        desc_words & (_APP_NOUNS | app_words | {"focus", "frontmost", "foreground"})
+    ):
+        return True
+    if _DESC_FOCUS_VERB_RE.search(desc) and _DESC_FRONT_RE.search(desc):
+        return True
+    return bool(_DESC_TALLY_RE.search(desc) and _DESC_APPS_OBJECT_RE.search(desc))
+
+
+def passes_checks(idea: dict[str, Any], apps: Any = ()) -> bool:
+    """Deterministic filter: well-formed name, a usable spec, not an app switcher."""
     name = str(idea.get("tool_name") or "")
     logic = str(idea.get("expected_logic") or "")
     desc = str(idea.get("description") or "")
-    return bool(_SNAKE_RE.match(name)) and len(logic) >= _MIN_LOGIC_CHARS and bool(desc)
+    if not (_SNAKE_RE.match(name) and len(logic) >= _MIN_LOGIC_CHARS and desc):
+        return False
+    return not is_app_switcher(idea, apps)
 
 
 # Words in the events text that say nothing about what the user is doing:
@@ -274,8 +383,30 @@ def passes_checks(idea: dict[str, Any]) -> bool:
 _EVENT_STOPWORDS = frozenset(
     "recent events oldest first created modified deleted renamed moved "
     "switched imessage received users volumes private var tmp true false "
-    "none null bundle pid com apple sender text rowid action path".split()
+    "none null bundle pid com apple sender text rowid action path "
+    # event-type words and metadata keys of mail and calendar events
+    "event starting soon subject date mailbox message bulk title start "
+    "location url video".split()
 ) | {Path.home().name.lower()}
+
+# Events that show what the user is working on. ``app_activated`` (which
+# app is in front) and ``clipboard_changed`` (an app name and a kind, never
+# the content) only show focus: they neither trigger a model call nor
+# ground an idea (todo #66). A new event type must be added here before
+# open-help reacts to it (invariant 7d: when in doubt, stay quiet).
+CONTENT_EVENT_TYPES = frozenset(
+    {"file", "mail_received", "imessage_received", "event_starting_soon"}
+)
+# How :func:`_describe` starts the line of an event that is not content.
+_FOCUS_LINE_PREFIXES = ("switched to ", "app_activated", "clipboard_changed")
+
+
+def _content_lines(events_text: str) -> str:
+    """``events_text`` without the app-focus and clipboard lines."""
+    return "\n".join(
+        line for line in (events_text or "").splitlines()
+        if not line.lstrip("- ").startswith(_FOCUS_LINE_PREFIXES)
+    )
 
 
 def _ground_tokens(text: str, stop: frozenset[str] = frozenset()) -> set[str]:
@@ -289,15 +420,19 @@ def _ground_tokens(text: str, stop: frozenset[str] = frozenset()) -> set[str]:
 
 
 def grounded_in_events(idea: dict[str, Any], events_text: str) -> bool:
-    """Deterministic pre-judge check: the idea names something in the window.
+    """Deterministic pre-judge check: the idea names content in the window.
 
     True when the idea's name, description or logic shares at least one
-    content word with the events: an app, a file-name word, an extension
-    or a folder. An idea that shares none is unrelated to what the user
-    is doing, which the judge rubric already scores 0-3, so dropping it
-    here only saves a model call.
+    content word with a content event (:data:`CONTENT_EVENT_TYPES`): a
+    file-name word, an extension, a folder, a word of a message, a mail
+    subject or a calendar title. The "switched to <app>" lines do not
+    count: most events are app switches, so an idea that shares only an
+    app name with the window is grounded in nothing (todo #66). An idea
+    that shares no content word is unrelated to what the user is doing,
+    which the judge rubric already scores 0-3, so dropping it here only
+    saves a model call.
     """
-    seen = _ground_tokens(events_text, _EVENT_STOPWORDS)
+    seen = _ground_tokens(_content_lines(events_text), _EVENT_STOPWORDS)
     idea_words = _ground_tokens(
         " ".join(str(idea.get(k) or "") for k in ("tool_name", "description", "expected_logic"))
     )
@@ -351,6 +486,8 @@ class OpenHelpSuggester:
         self._publish = publish or self.event_bus.push
         self._window: deque[ContextEvent] = deque(maxlen=window_size)
         self._new_since_ask = 0
+        # Content events since the last ask: no model call without one.
+        self._content_since_ask = 0
         self._next_ask_at = 0.0
         # Per-idea cooldown, persisted across restarts (todo #32).
         self.state = state if state is not None else IdeaState()
@@ -368,20 +505,35 @@ class OpenHelpSuggester:
         # The window goes to the detection engine and its judge (#31).
         self._window.append(redact_event(event, "detection"))
         self._new_since_ask += 1
+        if event.event_type in CONTENT_EVENT_TYPES:
+            self._content_since_ask += 1
         now = time.time()
         if self._new_since_ask < self.min_events or now < self._next_ask_at:
+            return None
+        if self._content_since_ask == 0:
+            # Only app switches (or copies) since the last ask: nothing an
+            # idea could be grounded in, so no model call (todo #66). The
+            # counters are kept, so the next content event asks at once.
+            self.last_verdict = {
+                "tool_name": None, "stage": "no_content", "score": None, "reason": "",
+            }
             return None
         if self._task is not None and not self._task.done():
             return None
         self._next_ask_at = now + self.interval_seconds
         self._new_since_ask = 0
+        self._content_since_ask = 0
         prompt = "Recent events (oldest first):\n" + "\n".join(
             f"- {_describe(e)}" for e in self._window
         )
-        self._task = asyncio.create_task(self._run(prompt), name="open-help")
+        apps = tuple(sorted({
+            str(e.app_name) for e in self._window
+            if e.event_type == "app_activated" and e.app_name
+        }))
+        self._task = asyncio.create_task(self._run(prompt, apps), name="open-help")
         return self._task
 
-    async def _run(self, events_text: str) -> None:
+    async def _run(self, events_text: str, apps: tuple[str, ...] = ()) -> None:
         try:
             raw = await self._evaluate(events_text)
         except Exception:
@@ -390,7 +542,7 @@ class OpenHelpSuggester:
         idea = parse_suggestion(raw)
         if idea is None:
             return
-        if not await self._accept(idea, events_text):
+        if not await self._accept(idea, events_text, apps):
             return
         idea["source"] = self.source_name
         idea["trigger"] = "open_help"
@@ -402,16 +554,22 @@ class OpenHelpSuggester:
 
     # ---- filter --------------------------------------------------------
 
-    async def _accept(self, idea: dict[str, Any], events_text: str) -> bool:
+    async def _accept(
+        self, idea: dict[str, Any], events_text: str, apps: tuple[str, ...] = (),
+    ) -> bool:
         name = str(idea.get("tool_name") or "")
         desc = str(idea.get("description") or "")
         self.last_verdict = {"tool_name": name, "stage": "checks", "score": None, "reason": ""}
-        if not passes_checks(idea):
+        if is_app_switcher(idea, apps):
+            self.last_verdict["stage"] = "app_switcher"
+            logger.info("open_help dropped %r: it only switches, lists or counts apps", name)
+            return False
+        if not passes_checks(idea, apps):
             logger.info("open_help dropped malformed idea %r", name)
             return False
         if not grounded_in_events(idea, events_text):
             self.last_verdict["stage"] = "grounding"
-            logger.info("open_help dropped %r: names nothing in the event window", name)
+            logger.info("open_help dropped %r: shares no word with a content event", name)
             return False
         if self.state.active(self.source_name, name):
             self.last_verdict["stage"] = "cooldown"
@@ -492,7 +650,7 @@ async def evaluate_windows(
     """Run each case's window through the open-help filter.
 
     By default the case's recorded ``idea`` stands in for the generator,
-    so only the filter (checks, grounding, judge) is measured. Pass
+    so only the filter (content gate, checks, grounding, judge) is measured. Pass
     ``evaluate`` to generate ideas with a real model as well. Feedback is
     in memory only: the user's ``idea_feedback.json`` and
     ``idea_state.json`` are never read.
@@ -578,6 +736,7 @@ def _main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - live c
 
 
 __all__ = [
+    "CONTENT_EVENT_TYPES",
     "GUIDING_QUESTION",
     "IDEA_JUDGE_SYSTEM_PROMPT",
     "NO_SUGGESTION",
@@ -586,6 +745,7 @@ __all__ = [
     "OpenHelpSuggester",
     "evaluate_windows",
     "grounded_in_events",
+    "is_app_switcher",
     "load_windows",
     "parse_judge",
     "parse_score",

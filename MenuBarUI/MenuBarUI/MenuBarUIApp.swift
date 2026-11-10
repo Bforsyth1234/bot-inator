@@ -9,6 +9,7 @@ struct MenuBarUIApp: App {
         MenuBarExtra {
             RootPopoverView()
                 .environmentObject(delegate.ws)
+                .appTextSize()
         } label: {
             // Brain/robot SF Symbol for the menu bar icon.
             Image(systemName: "brain.head.profile")
@@ -17,21 +18,24 @@ struct MenuBarUIApp: App {
 
         Window("Manage Tools", id: "tool-manager") {
             ToolManagerView()
+                .appTextSize()
         }
-        .defaultSize(width: 480, height: 480)
+        .defaultSize(width: 540, height: 540)
         .keyboardShortcut("t", modifiers: [.command, .shift])
 
         Window("Chat", id: "chat") {
             ChatView()
                 .environmentObject(delegate.ws)
+                .appTextSize()
         }
-        .defaultSize(width: 520, height: 620)
+        .defaultSize(width: 560, height: 660)
         .keyboardShortcut("c", modifiers: [.command, .shift])
 
         Window("Settings", id: "settings") {
             SettingsView()
+                .appTextSize()
         }
-        .defaultSize(width: 480, height: 420)
+        .defaultSize(width: 540, height: 560)
         .keyboardShortcut(",", modifiers: [.command])
 
         // The menu bar panel closes whenever it loses focus (macOS behaviour
@@ -40,8 +44,9 @@ struct MenuBarUIApp: App {
         Window("bot-inator", id: "activity") {
             ActivityWindowView()
                 .environmentObject(delegate.ws)
+                .appTextSize()
         }
-        .defaultSize(width: 460, height: 640)
+        .defaultSize(width: 500, height: 680)
         .keyboardShortcut("b", modifiers: [.command, .shift])
     }
 }
@@ -182,7 +187,7 @@ struct RootPopoverView: View {
             .fixedSize(horizontal: false, vertical: true)
             .layoutPriority(1)
         }
-        .frame(width: 420, height: 600)
+        .frame(width: 460, height: 640)
     }
 
     // On ``LSUIElement`` apps SwiftUI's ``openWindow`` silently no-ops when

@@ -18,8 +18,9 @@ A copy is attributed to the app of the most recent ``app_activated`` the
 detector saw (the watcher's own ``app`` field is used only before any
 activation arrived), so the copy -> switch order comes from one stream.
 
-A detected pair is filtered like open-help: :func:`passes_checks`, a
-grounding check (the idea must name one of the two apps), the
+A detected pair is filtered like open-help: :func:`passes_checks` (which
+drops a tool that only switches or toggles between the two apps, todo
+#66), a grounding check (the idea must name one of the two apps), the
 :class:`IdeaFeedback` rejected-idea check, then a judge score. Ideas that
 pass publish ``pattern_detected`` with ``source="friction"``. Each app
 pair (unordered) has its own cooldown, started when the pair is detected
@@ -36,7 +37,7 @@ from collections import deque
 from typing import Any, Callable, Optional
 
 from ai.idea_sources import _PROPOSAL_FORMAT, Evaluate, Publish, parse_suggestion
-from ai.open_help import IdeaFeedback, parse_judge, passes_checks
+from ai.open_help import IdeaFeedback, is_app_switcher, parse_judge, passes_checks
 from events.event_bus import ContextEvent, EventBus
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,9 @@ FRICTION_SYSTEM_PROMPT = (
     "where that works. The tool must take its inputs as parameters, and "
     "must never delete or send anything without a dry_run option that "
     "defaults to True. Name both apps in the description.\n\n"
+    "The tool must move data. Do not propose a tool that only switches, "
+    "toggles or focuses the two apps, or that lists or counts app "
+    "switches: macOS already does that (Cmd-Tab, the Dock, Screen Time).\n\n"
     "If you cannot think of a tool that moves data between these two "
     "specific apps, do not propose one.\n\n"
     + _PROPOSAL_FORMAT
@@ -73,7 +77,9 @@ FRICTION_JUDGE_SYSTEM_PROMPT = (
     "- 4-6: generic (a clipboard manager, a notification), or only one of "
     "the apps is involved;\n"
     "- 0-3: unrelated to the two apps, already one click in macOS, or not "
-    "doable with the Python standard library and macOS commands.\n"
+    "doable with the Python standard library and macOS commands. A tool "
+    "that only switches, toggles or focuses the two apps, or lists or "
+    "counts app switches, always scores 0-3 (Cmd-Tab already does it).\n"
     "Switching back and forth without copying is weak evidence: score "
     "such ideas lower. Ideas similar to ones the user rejected score low. "
     "When in doubt, score lower.\n\n"
@@ -270,7 +276,11 @@ class FrictionDetector:
         name = str(idea.get("tool_name") or "")
         desc = str(idea.get("description") or "")
         self.last_verdict = {"tool_name": name, "stage": "checks", "score": None, "reason": ""}
-        if not passes_checks(idea):
+        if is_app_switcher(idea, apps):
+            self.last_verdict["stage"] = "app_switcher"
+            logger.info("friction dropped %r: it only switches between %s and %s", name, *apps)
+            return False
+        if not passes_checks(idea, apps):
             logger.info("friction dropped malformed idea %r", name)
             return False
         if not names_an_app(idea, apps):

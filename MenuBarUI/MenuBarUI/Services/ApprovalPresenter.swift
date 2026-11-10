@@ -67,7 +67,7 @@ final class ApprovalPresenter {
             self.closeWindow()
         }
 
-        let hosting = NSHostingController(rootView: content)
+        let hosting = NSHostingController(rootView: content.appTextSize())
         let window = NSWindow(contentViewController: hosting)
         window.title = "Approval Required"
         window.styleMask = [.titled, .closable]
@@ -102,7 +102,7 @@ final class ApprovalPresenter {
             self.closeCodeWindow()
         }
 
-        let hosting = NSHostingController(rootView: content)
+        let hosting = NSHostingController(rootView: content.appTextSize())
         let window = NSWindow(contentViewController: hosting)
         window.title = "Review Generated Tool"
         window.styleMask = [.titled, .closable, .resizable]

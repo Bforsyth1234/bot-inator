@@ -49,7 +49,7 @@ CRITIC_SYSTEM_PROMPT = (
     'Reply {"problems": []} when the code does what the spec says.'
 )
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+from ai.mlx_engine import THINK_BLOCK_RE as _THINK_BLOCK_RE
 
 
 def critic_enabled() -> bool:

@@ -44,7 +44,7 @@ from schemas.ws_messages import (
 )
 from tools import READ_ONLY_TOOL_NAMES
 
-from . import privacy
+from . import privacy, tool_summary
 
 from .mlx_engine import MLXEngine
 from .memory import Memory
@@ -236,6 +236,9 @@ class Orchestrator:
         # Active notices by id (#19): each id is published once per run and
         # replayed to clients that connect later (:meth:`notice_frames`).
         self._notices: dict[str, NoticePayload] = {}
+        # Plain-language summaries of approved tool ideas by tool name
+        # (#64, ``ai.tool_summary``), reused by the code-review card.
+        self._idea_summaries: dict[str, Any] = {}
         self._agent: Any = None
 
     def mark_tool_ready_for_rerun(self, tool_name: str) -> None:
@@ -370,6 +373,7 @@ class Orchestrator:
         description: str,
         code: str,
         event_id: Optional[str] = None,
+        summary: Optional[str] = None,
     ) -> CodeApprovalResponsePayload:
         """Prompt the user to review AI-generated Python source.
 
@@ -395,6 +399,7 @@ class Orchestrator:
                 tool_name=tool_name,
                 description=description,
                 code=code,
+                summary=summary or None,
                 timeout_seconds=int(self.code_approval_timeout),
             ),
         )
@@ -805,6 +810,10 @@ class Orchestrator:
             await self._handle_user_message(event, event_id)
             return
 
+        if event.event_type == "daily_brief":
+            await self._handle_daily_brief(event, event_id)
+            return
+
         # Signal-only events (e.g. ``app_activated``) feed pattern detection
         # and the activity stream but never trigger the tool-calling agent;
         # see ``_AGENT_TRIGGER_EXCLUDED_EVENT_TYPES`` for the rationale.
@@ -998,6 +1007,38 @@ class Orchestrator:
             )
         return None
 
+    async def _handle_daily_brief(self, event: ContextEvent, event_id: str) -> None:
+        """#65: turn the gathered brief data into a short brief.
+
+        The data was gathered read-only by ``events.daily_brief``; the
+        model only words it. If the model returns nothing, the
+        deterministic text is shown instead.
+        """
+        from events import daily_brief
+
+        prompt = daily_brief.build_prompt(event)
+        await self._emit_thought(event_id, "reasoning", f"Prompt: {prompt[:200]}")
+        fallback = str((event.metadata or {}).get("text") or "")
+        try:
+            result = await self._run_agent(event_id, prompt, max_steps=2)
+        except Exception:
+            logger.exception("daily brief turn failed; using the gathered text")
+            result = ""
+        brief = str(result or "").strip() or fallback
+        await self._emit_thought(event_id, "complete", brief[:1500])
+        try:
+            await asyncio.to_thread(self._notify_brief, brief)
+        except Exception:
+            logger.exception("daily brief notification failed")
+
+    @staticmethod
+    def _notify_brief(brief: str) -> None:
+        """Post the brief as a notification. The user turned the brief on
+        in Settings (``AGENT_DAILY_BRIEF``), so it needs no approval card."""
+        from tools.show_notification import show_notification
+
+        show_notification("Morning brief", brief[:240])
+
     async def _run_agent(
         self,
         event_id: str,
@@ -1148,11 +1189,22 @@ class Orchestrator:
                 return refusal
             orchestrator._turn_tool_calls.add(tool_name)
             if not is_read_only:
+                extra: dict[str, Any] = {}
+                idea_summary = None
+                if tool_name == "generate_custom_tool":
+                    # #64: the idea card leads with a plain-language summary
+                    # (one bounded engine call, deterministic fallback).
+                    idea_summary = tool_summary.for_idea_card(
+                        orchestrator, call_args, call_kwargs
+                    )
+                    if idea_summary is not None:
+                        extra["summary"] = idea_summary.text()
                 coro = orchestrator._request_approval(
                     event_id=event_id,
                     tool_name=tool_name,
                     tool_args={"args": list(args), "kwargs": kwargs},
                     reasoning=f"Agent wants to call {tool_name}",
+                    **extra,
                 )
                 approved, edited = asyncio.run_coroutine_threadsafe(
                     coro, loop
@@ -1161,6 +1213,10 @@ class Orchestrator:
                     return {"skipped": True, "reason": "user_denied"}
                 call_args, call_kwargs = orchestrator._apply_edits(
                     edited, call_args, call_kwargs
+                )
+                # The code-review card and the provenance reuse it (#64).
+                tool_summary.remember(
+                    orchestrator, idea_summary, call_args, call_kwargs
                 )
             result = (
                 original_forward(*call_args, **call_kwargs)
@@ -1241,6 +1297,7 @@ class Orchestrator:
         tool_name: str,
         tool_args: dict[str, Any],
         reasoning: str,
+        summary: Optional[str] = None,
     ) -> tuple[bool, dict[str, Any] | None]:
         """Return ``(approved, edited_args)`` from the user.
 
@@ -1263,6 +1320,7 @@ class Orchestrator:
                 tool_name=tool_name,
                 tool_args=tool_args,
                 reasoning=reasoning,
+                summary=summary or None,
                 timeout_seconds=int(self.approval_timeout),
             ),
         )
@@ -1478,7 +1536,12 @@ class Orchestrator:
             "Decide how to respond, in this order:\n"
             "1. Look at your available tools first. If one of them can "
             "accomplish the request, call it — do not generate a "
-            "duplicate.\n"
+            "duplicate. If the user states a lasting preference or fact "
+            "about themselves, or asks you to remember something, call "
+            "`remember_preference` with one short sentence, then answer. "
+            "`draft_email` only opens an unsent draft in Mail (this app "
+            "cannot send mail): say a draft is ready, never that it was "
+            "sent.\n"
             "2. If no existing tool fits but a small Python tool could "
             "(e.g. a timer, a calculator, a file utility, a local API "
             "call), call `generate_custom_tool` with a concrete "
@@ -1585,6 +1648,10 @@ class Orchestrator:
             desc = event.metadata.get("description", "")
             return f"Pattern detected → suggested tool: {tool_name} — {desc}"
         meta = event.metadata or {}
+        if event.event_type == "daily_brief":
+            from events import daily_brief
+
+            return daily_brief.describe(event)
         if event.event_type == "mail_received":
             return (
                 f"Email from {meta.get('sender', 'unknown')}: "
@@ -1862,6 +1929,34 @@ def _make_groq_model_class(base: type) -> type:
     return _GroqServerModel
 
 
+_XML_FUNCTION_RE = re.compile(
+    r"<function=([^>\s]+)\s*>(.*?)(?:</function>|$)", re.DOTALL
+)
+_XML_PARAMETER_RE = re.compile(
+    r"<parameter=([^>\s]+)\s*>\n?(.*?)\n?</parameter>", re.DOTALL
+)
+
+
+def _parse_xml_tool_call(body: str) -> Optional[dict[str, Any]]:
+    """Parse a Qwen3.5+-style XML tool call body.
+
+    ``<function=name><parameter=k>v</parameter></function>`` becomes
+    ``{"name": "name", "arguments": {"k": v}}``. A value that parses as
+    JSON (numbers, booleans, lists, objects) is decoded; anything else
+    stays a string. Returns ``None`` when ``body`` has no ``<function=``.
+    """
+    match = _XML_FUNCTION_RE.search(body)
+    if match is None:
+        return None
+    arguments: dict[str, Any] = {}
+    for key, raw in _XML_PARAMETER_RE.findall(match.group(2)):
+        try:
+            arguments[key] = json.loads(raw)
+        except ValueError:
+            arguments[key] = raw
+    return {"name": match.group(1), "arguments": arguments}
+
+
 def _make_mlx_model_class() -> type:
     """Build the adapter class lazily so it inherits from smolagents.Model.
 
@@ -1894,6 +1989,8 @@ def _make_mlx_model_class() -> type:
             self.engine = engine
             self.apply_chat_template_kwargs: dict[str, Any] = {
                 "add_generation_prompt": True,
+                # Qwen3.5+ templates think by default; older ones ignore it.
+                "enable_thinking": False,
             }
             if _BaseModel is not object:
                 # flatten_messages_as_text=True matches smolagents.MLXModel
@@ -1919,8 +2016,8 @@ def _make_mlx_model_class() -> type:
         @staticmethod
         def _strip_thinking(text: str) -> str:
             """Remove ``<think>…</think>`` blocks from generated text."""
-            import re
-            return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            from ai.mlx_engine import THINK_BLOCK_RE
+            return THINK_BLOCK_RE.sub("", text).strip()
 
         @staticmethod
         def _extract_tool_calls(text: str) -> tuple[str, list[Any]]:
@@ -1950,6 +2047,11 @@ def _make_mlx_model_class() -> type:
                 try:
                     data = _json.loads(raw_json)
                 except _json.JSONDecodeError:
+                    # Qwen3.5+ templates emit XML instead of JSON.
+                    data = _parse_xml_tool_call(raw_json)
+                    if data is None:
+                        continue
+                if not isinstance(data, dict):
                     continue
                 name = data.get("name") or data.get("function", "")
                 arguments = data.get("arguments") or data.get("parameters") or {}

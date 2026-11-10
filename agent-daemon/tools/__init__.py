@@ -5,7 +5,9 @@ Exports the list of available tools the orchestrator registers with smolagents.
 
 from __future__ import annotations
 
+from .brief import brief_me
 from .create_event import create_event
+from .email_draft import draft_email
 from .find_files import find_files
 from .list_events import list_events
 from .meta_tool_generator import generate_custom_tool
@@ -42,6 +44,8 @@ AVAILABLE_TOOLS = [
     list_windows,
     open_app,
     read_email,
+    draft_email,
+    brief_me,
     list_events,
     create_event,
     list_reminders,
@@ -66,6 +70,7 @@ READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset({
     "read_email",
     "list_events",
     "list_reminders",
+    "brief_me",
 })
 
 __all__ = [
@@ -86,6 +91,8 @@ __all__ = [
     "list_windows",
     "open_app",
     "read_email",
+    "draft_email",
+    "brief_me",
     "list_events",
     "create_event",
     "list_reminders",

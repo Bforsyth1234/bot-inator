@@ -30,14 +30,16 @@ import time
 from collections import deque
 from typing import Any, Awaitable, Callable, Deque, Optional
 
+from ai.mlx_engine import THINK_BLOCK_RE as _THINK_BLOCK_RE
 from ai.privacy import redact_event
 from events.event_bus import ContextEvent, EventBus
 
 logger = logging.getLogger(__name__)
 
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+# The ``app=<name>`` field :meth:`PatternRecognizer._describe` writes.
+_APP_FIELD_RE = re.compile(r"\bapp=([^|,]+)")
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 # Token budget for a detection reply. A full JSON proposal with a
 # paragraph of ``expected_logic`` needs ~150-300 tokens; the old 128-token
@@ -53,7 +55,9 @@ DETECTION_SYSTEM_PROMPT = (
     "machine and decide whether a new automation tool is warranted.\n\n"
     "Propose a tool if — and only if — the user repeats the same "
     "concrete, automatable workflow at least three times in the window "
-    "(same apps, same kind of file, same sequence). Otherwise reply with "
+    "(same apps, same kind of file, same sequence). Switching between "
+    "apps is not a workflow: never propose a tool that switches, toggles, "
+    "lists or counts apps. Otherwise reply with "
     "the literal string NO_PATTERN and nothing else.\n\n"
     "When you propose a tool, reply with exactly one JSON object and "
     "nothing else (no markdown, no commentary):\n"
@@ -226,6 +230,21 @@ class PatternRecognizer:
                 self._set_interval(
                     min(self.current_interval * 2, self.max_trigger_interval),
                     "no pattern",
+                )
+                return
+            # An app switcher is not a pattern (todo #66). Imported here:
+            # ai.open_help imports ai.idea_sources, which imports this module.
+            from ai.open_help import is_app_switcher
+
+            apps = {m.strip() for line in self._window for m in _APP_FIELD_RE.findall(line)}
+            if is_app_switcher(suggestion, apps):
+                logger.info(
+                    "pattern detection dropped %r: it only switches, lists or counts apps",
+                    suggestion["tool_name"],
+                )
+                self._set_interval(
+                    min(self.current_interval * 2, self.max_trigger_interval),
+                    "app switcher",
                 )
                 return
             self._set_interval(self.trigger_interval, "pattern found")

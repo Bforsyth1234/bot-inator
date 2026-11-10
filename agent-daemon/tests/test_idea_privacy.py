@@ -137,3 +137,14 @@ def test_non_vacuous_without_the_scrub(providers, monkeypatch) -> None:
     monkeypatch.setattr(privacy, "scrub_idea_text", lambda text, role="main": text)
     orch = Orchestrator(engine=MLXEngine(), event_bus=EventBus(), tools=[])
     assert QUOTE in _run_events(orch, [_imessage(), _idea()])[-1]
+
+
+def test_single_quoted_quote_does_not_leak_its_last_word(providers) -> None:
+    """#68: ``'dinner at 7 with Sam'`` used to become ``'[placeholder] Sam'``."""
+    for q in ("'", "’"):
+        out = privacy.scrub_personal_text(f"Remind about {q}{QUOTE}{q} tonight", [MESSAGE])
+        assert "Sam" not in out and "dinner" not in out, out
+        assert PH in out
+    # A possessive inside personal text still matches.
+    out = privacy.scrub_personal_text("note: Sam's dinner at 7 is on", ["Sam's dinner at 7"])
+    assert "dinner" not in out and "Sam" not in out, out

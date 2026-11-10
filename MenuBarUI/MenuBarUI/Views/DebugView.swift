@@ -19,7 +19,7 @@ struct DebugView: View {
             }
             .padding(12)
         }
-        .frame(width: 420, height: 520)
+        .frame(minWidth: 380, maxWidth: .infinity, minHeight: 300, maxHeight: .infinity)
     }
 
     // MARK: - Sections
@@ -61,7 +61,7 @@ struct DebugView: View {
                 }
             } else {
                 Text("Not reported by the daemon.")
-                    .font(.caption)
+                    .appFont(.secondary)
                     .foregroundStyle(.secondary)
             }
         }
@@ -83,7 +83,7 @@ struct DebugView: View {
                 }
             } else {
                 Text("No supervised listeners running.")
-                    .font(.caption)
+                    .appFont(.secondary)
                     .foregroundStyle(.secondary)
             }
         }
@@ -104,7 +104,7 @@ struct DebugView: View {
         section(title: "Thought stages") {
             if ws.debug.thoughtsByStage.isEmpty {
                 Text("No thoughts received yet.")
-                    .font(.caption)
+                    .appFont(.secondary)
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(sortedStages(), id: \.0) { stage, count in
@@ -118,20 +118,20 @@ struct DebugView: View {
         section(title: "Recent decode errors") {
             if ws.debug.recentDecodeErrors.isEmpty {
                 Text("None.")
-                    .font(.caption)
+                    .appFont(.secondary)
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(ws.debug.recentDecodeErrors.reversed()) { entry in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(Self.timeFormatter.string(from: entry.timestamp))
-                            .font(.caption2.monospaced())
+                            .appFont(.fine, design: .monospaced)
                             .foregroundStyle(.secondary)
                         Text(entry.message)
-                            .font(.caption.monospaced())
+                            .appFont(.secondary, design: .monospaced)
                             .textSelection(.enabled)
                         if let raw = entry.rawPreview {
                             Text(raw)
-                                .font(.caption2.monospaced())
+                                .appFont(.fine, design: .monospaced)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(3)
                                 .textSelection(.enabled)
@@ -143,9 +143,9 @@ struct DebugView: View {
             if let raw = ws.debug.lastRawFrame {
                 Divider()
                 Text("Last raw frame:")
-                    .font(.caption.weight(.semibold))
+                    .appFont(.secondary, weight: .semibold)
                 Text(raw)
-                    .font(.caption2.monospaced())
+                    .appFont(.fine, design: .monospaced)
                     .foregroundStyle(.secondary)
                     .lineLimit(4)
                     .textSelection(.enabled)
@@ -154,7 +154,7 @@ struct DebugView: View {
                 Spacer()
                 Button("Reset stats") { ws.resetDebugStats() }
                     .buttonStyle(.borderless)
-                    .font(.caption)
+                    .appFont(.secondary)
             }
         }
     }
@@ -162,7 +162,7 @@ struct DebugView: View {
     private var placeholderSection: some View {
         section(title: "More diagnostics") {
             Text("Reserved for upcoming tools (daemon log tail, manual event injection).")
-                .font(.caption)
+                .appFont(.secondary)
                 .foregroundStyle(.secondary)
         }
     }
@@ -186,7 +186,7 @@ struct DebugView: View {
     private func section<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.caption.weight(.semibold))
+                .appFont(.secondary, weight: .semibold)
                 .foregroundStyle(.secondary)
             content()
             Divider()
@@ -195,10 +195,10 @@ struct DebugView: View {
 
     private func row(_ label: String, _ value: String, mono: Bool = false) -> some View {
         HStack(alignment: .top) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(label).appFont(.secondary).foregroundStyle(.secondary)
             Spacer()
             Text(value)
-                .font(mono ? .caption.monospaced() : .caption)
+                .appFont(.secondary, design: mono ? .monospaced : .default)
                 .textSelection(.enabled)
                 .multilineTextAlignment(.trailing)
         }

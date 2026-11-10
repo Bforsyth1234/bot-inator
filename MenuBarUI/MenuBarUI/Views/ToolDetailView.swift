@@ -69,6 +69,9 @@ struct ToolDetail: Decodable, Equatable {
     let kind: String
     let state: String
     let summary: String
+    /// Plain-language summary saved at install time (#64); nil for
+    /// built-ins, older installs and older daemons.
+    let plainSummary: String?
     let whenItRuns: WhenItRuns
     let gate: String
     let inputs: [Input]
@@ -82,6 +85,7 @@ struct ToolDetail: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case name, kind, state, summary, gate, inputs, sandbox
         case whenItRuns = "when_it_runs"
+        case plainSummary = "plain_summary"
         case sourcePath = "source_path"
         case errorText = "error_text"
     }
@@ -158,11 +162,11 @@ struct ToolDetailView: View {
         HStack(spacing: 10) {
             Image(systemName: viewModel.detail?.isGenerated == true ? "sparkles" : "hammer")
                 .foregroundStyle(viewModel.detail?.isGenerated == true ? .purple : .secondary)
-                .font(.title2)
+                .appFont(.title2)
             VStack(alignment: .leading, spacing: 2) {
-                Text(toolName).font(.system(.headline, design: .monospaced))
+                Text(toolName).appFont(.headline, design: .monospaced)
                 if let detail = viewModel.detail {
-                    Text(subtitle(detail)).font(.caption).foregroundStyle(.secondary)
+                    Text(subtitle(detail)).appFont(.secondary).foregroundStyle(.secondary)
                 }
             }
             Spacer()
@@ -189,7 +193,15 @@ struct ToolDetailView: View {
     @ViewBuilder
     private func sections(_ detail: ToolDetail) -> some View {
         section("What it does") {
-            Text(detail.summary.isEmpty ? "No description." : detail.summary)
+            if let plain = detail.plainSummary, !plain.isEmpty {
+                // The same sentences the idea and code-review cards showed.
+                Text(plain).textSelection(.enabled)
+                if !detail.summary.isEmpty {
+                    Text(detail.summary).appFont(.secondary).foregroundStyle(.secondary)
+                }
+            } else {
+                Text(detail.summary.isEmpty ? "No description." : detail.summary)
+            }
         }
         section("When it runs") {
             whenItRuns(detail)
@@ -198,16 +210,16 @@ struct ToolDetailView: View {
                   : "Needs your approval each time",
                   systemImage: detail.runsFreely ? "bolt.fill" : "hand.raised.fill")
                 .foregroundStyle(detail.runsFreely ? Color.secondary : Color.accentColor)
-                .font(.callout)
+                .appFont(.callout)
         }
         if !detail.inputs.isEmpty {
             section("Inputs") {
                 ForEach(detail.inputs, id: \.self) { input in
                     VStack(alignment: .leading, spacing: 1) {
                         Text("\(input.name): \(input.type)\(input.optional ? " (optional)" : "")")
-                            .font(.system(.callout, design: .monospaced))
+                            .appFont(.callout, design: .monospaced)
                         if !input.description.isEmpty {
-                            Text(input.description).font(.caption).foregroundStyle(.secondary)
+                            Text(input.description).appFont(.secondary).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -217,13 +229,13 @@ struct ToolDetailView: View {
             section("Sandbox") {
                 Label(sandbox.networkAllowed ? "Network allowed" : "No network",
                       systemImage: sandbox.networkAllowed ? "network" : "network.slash")
-                Text(sandbox.note).font(.caption).foregroundStyle(.secondary)
+                Text(sandbox.note).appFont(.secondary).foregroundStyle(.secondary)
             }
         }
         if detail.state == "quarantined" {
             section("Load error") {
                 Text(detail.errorText?.isEmpty == false ? detail.errorText! : "No error text saved.")
-                    .font(.system(.caption, design: .monospaced))
+                    .appFont(.secondary, design: .monospaced)
                     .textSelection(.enabled)
                     .foregroundStyle(.orange)
             }
@@ -231,7 +243,7 @@ struct ToolDetailView: View {
         if let path = detail.sourcePath {
             section("Source") {
                 Text(path)
-                    .font(.system(.caption, design: .monospaced))
+                    .appFont(.secondary, design: .monospaced)
                     .textSelection(.enabled)
                     .foregroundStyle(.secondary)
             }
@@ -248,19 +260,19 @@ struct ToolDetailView: View {
             Text(when.text)
         }
         ForEach(when.hints, id: \.self) { hint in
-            Text("• \(hint)").font(.callout).foregroundStyle(.secondary)
+            Text("• \(hint)").appFont(.callout).foregroundStyle(.secondary)
         }
         if let prov = when.provenance {
             VStack(alignment: .leading, spacing: 2) {
                 if let logic = prov.idea?.expectedLogic ?? prov.requested?.expectedLogic, !logic.isEmpty {
-                    Text("Expected logic: \(logic)").font(.caption)
+                    Text("Expected logic: \(logic)").appFont(.secondary)
                 }
                 if let evidence = prov.idea?.evidence, !evidence.isEmpty {
-                    Text("Evidence: \(evidence)").font(.caption).lineLimit(4)
+                    Text("Evidence: \(evidence)").appFont(.secondary).lineLimit(4)
                 }
                 if let installed = prov.installedAt {
                     Text("Installed \(installed)\(prov.userEdited == true ? " · edited by you before install" : "")")
-                        .font(.caption)
+                        .appFont(.secondary)
                 }
             }
             .foregroundStyle(.secondary)
@@ -271,7 +283,7 @@ struct ToolDetailView: View {
         _ title: String, @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.subheadline.weight(.semibold))
+            Text(title).appFont(.label, weight: .semibold)
             content()
         }
     }

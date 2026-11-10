@@ -14,11 +14,13 @@ struct CodeReviewAlert: View {
 
     @State private var draft: String = ""
     @State private var userNote: String = ""
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
             Divider()
+            if let summary { summarySection(summary) }
             descriptionSection
             codeEditorSection
             noteSection
@@ -26,7 +28,8 @@ struct CodeReviewAlert: View {
             buttonRow
         }
         .padding(18)
-        .frame(width: 620, height: 560)
+        .frame(width: 680,
+               height: min(740, ((summary != nil ? 700 : 600) * textSize.layoutScale).rounded()))
         .onAppear { if draft.isEmpty { draft = payload.code } }
     }
 
@@ -34,30 +37,50 @@ struct CodeReviewAlert: View {
         HStack(spacing: 10) {
             Image(systemName: "wand.and.stars")
                 .foregroundStyle(.purple)
-                .font(.title2)
+                .appFont(.title2)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Code Review")
-                    .font(.headline)
+                    .appFont(.headline)
                 Text(payload.toolName)
-                    .font(.subheadline.monospaced())
+                    .appFont(.label, design: .monospaced)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             if let timeout = payload.timeoutSeconds {
                 Text("\(timeout)s")
-                    .font(.caption.monospaced())
+                    .appFont(.secondary, design: .monospaced)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// Plain-language summary from the daemon (#64); nil from an older
+    /// daemon, which keeps the previous layout.
+    private var summary: String? {
+        guard let text = payload.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        return text
+    }
+
+    private func summarySection(_ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("What this tool does")
+                .appFont(.secondary, weight: .semibold)
+                .foregroundStyle(.secondary)
+            Text(text)
+                .appFont(.body)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var descriptionSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Description")
-                .font(.caption.weight(.semibold))
+                .appFont(.secondary, weight: .semibold)
                 .foregroundStyle(.secondary)
             Text(payload.description)
-                .font(.body)
+                .appFont(.body)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -66,11 +89,11 @@ struct CodeReviewAlert: View {
     private var codeEditorSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Generated source")
-                .font(.caption.weight(.semibold))
+                .appFont(.secondary, weight: .semibold)
                 .foregroundStyle(.secondary)
             TextEditor(text: $draft)
-                .font(.system(.caption, design: .monospaced))
-                .frame(minHeight: 300)
+                .appFont(.secondary, design: .monospaced)
+                .frame(minHeight: summary != nil ? 200 : 260)
                 .padding(6)
                 .background(Color(nsColor: .textBackgroundColor),
                             in: RoundedRectangle(cornerRadius: 6))
@@ -84,7 +107,7 @@ struct CodeReviewAlert: View {
     private var noteSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Note (optional)")
-                .font(.caption.weight(.semibold))
+                .appFont(.secondary, weight: .semibold)
                 .foregroundStyle(.secondary)
             TextField("Add a note sent with your decision", text: $userNote)
                 .textFieldStyle(.roundedBorder)

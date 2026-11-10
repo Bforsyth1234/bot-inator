@@ -25,6 +25,8 @@ import re
 import threading
 from typing import Any, Callable, Optional, Sequence
 
+from ai.mlx_engine import THINK_BLOCK_RE
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "minishlab/potion-base-8M"
@@ -206,6 +208,6 @@ def make_sync_judge(engine: Any, max_tokens: int = JUDGE_MAX_TOKENS) -> Judge:
 
     def judge(prompt: str) -> str:
         raw = engine.generate_chat_sync(SAME_IDEA_SYSTEM_PROMPT, prompt, max_tokens)
-        return re.sub(r"<think>.*?</think>", "", raw or "", flags=re.DOTALL).strip()
+        return THINK_BLOCK_RE.sub("", raw or "").strip()
 
     return judge

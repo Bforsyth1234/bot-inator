@@ -132,6 +132,7 @@ struct ToolManagerView: View {
         .frame(minWidth: 440, minHeight: 420)
         .sheet(item: $selectedTool) { tool in
             ToolDetailView(toolName: tool.name)
+                .appTextSize()
         }
         .task { await viewModel.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: .toolsChanged)) { _ in
@@ -143,11 +144,11 @@ struct ToolManagerView: View {
         HStack(spacing: 10) {
             Image(systemName: "hammer.circle.fill")
                 .foregroundStyle(Color.accentColor)
-                .font(.title2)
+                .appFont(.title2)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Manage Tools").font(.headline)
+                Text("Manage Tools").appFont(.headline)
                 Text("\(viewModel.tools.count) registered")
-                    .font(.caption)
+                    .appFont(.secondary)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -209,22 +210,22 @@ struct ToolManagerView: View {
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text(tool.name)
-                    .font(.system(.body, design: .monospaced))
+                    .appFont(.body, design: .monospaced)
                     .foregroundStyle(tool.isEnabled ? .primary : .secondary)
                 if !tool.description.isEmpty {
                     Text(tool.description)
-                        .font(.caption)
+                        .appFont(.secondary)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
                 if tool.isQuarantined {
                     Text("Failed to load: \(tool.error ?? "unknown error")")
-                        .font(.caption)
+                        .appFont(.secondary)
                         .foregroundStyle(.orange)
                         .lineLimit(2)
                 } else if tool.isDisabled {
                     Text("Disabled")
-                        .font(.caption)
+                        .appFont(.secondary)
                         .foregroundStyle(.secondary)
                 }
             }

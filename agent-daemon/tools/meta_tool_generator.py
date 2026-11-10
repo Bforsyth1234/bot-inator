@@ -228,8 +228,20 @@ def _current_idea_for_turn(event_id: Optional[str]) -> Optional[dict[str, Any]]:
     return dict(idea) if idea_event == event_id else None
 
 
+def _plain_summary(tool_name: str, description: str, source: str) -> str:
+    """The #64 plain-language summary for ``source`` ("" on any failure)."""
+    try:
+        from ai import tool_summary
+
+        return tool_summary.for_code_review(_ORCHESTRATOR, tool_name, description, source)
+    except Exception:
+        logger.exception("plain summary failed for %s", tool_name)
+        return ""
+
+
 def _build_provenance(
     tool_name: str, description: str, expected_logic: str, user_edited: bool,
+    summary: str = "",
 ) -> dict[str, Any]:
     from datetime import datetime, timezone
 
@@ -250,11 +262,15 @@ def _build_provenance(
         "idea": idea,
         "requested": {"description": description, "expected_logic": expected_logic},
         "user_edited": bool(user_edited),
+        # #64: the plain-language summary the review card showed (rebuilt
+        # from the installed source when the user edited the draft).
+        "summary": summary or None,
     }
 
 
 def _save_provenance(
     tool_name: str, description: str, expected_logic: str, user_edited: bool,
+    summary: str = "",
 ) -> Optional[Path]:
     """Best-effort: a provenance failure never fails the install."""
     if _GENERATED_DIR is None:
@@ -262,7 +278,9 @@ def _save_provenance(
     import json
 
     try:
-        record = _build_provenance(tool_name, description, expected_logic, user_edited)
+        record = _build_provenance(
+            tool_name, description, expected_logic, user_edited, summary,
+        )
         path = provenance_path(_GENERATED_DIR, tool_name)
         _atomic_write(path, json.dumps(record, indent=2, default=str))
         return path
@@ -1023,6 +1041,7 @@ def generate_custom_tool(
         return {"status": "error", "tool_name": tool_name, "error": str(exc)}
     _save_provenance(
         tool_name, description, expected_logic, bool(response.edited_code),
+        _plain_summary(tool_name, description, final_source),
     )
 
     git_ok, git_summary = _git_commit(
@@ -1086,8 +1105,12 @@ def _request_code_approval(
     loop = _ORCHESTRATOR.event_bus.loop
     if loop is None:
         raise ToolGenerationError("event-loop not bound to orchestrator")
+    extra: dict[str, Any] = {}
+    summary = _plain_summary(tool_name, description, source)
+    if summary:
+        extra["summary"] = summary
     coro = _ORCHESTRATOR.request_code_approval(
-        tool_name=tool_name, description=description, code=source,
+        tool_name=tool_name, description=description, code=source, **extra,
     )
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=_ORCHESTRATOR.code_approval_timeout + 5)

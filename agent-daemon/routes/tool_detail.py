@@ -6,6 +6,8 @@ quarantined)::
     {name, kind: "builtin"|"generated",
      state: "loaded"|"not_loaded"|"disabled"|"quarantined",
      summary,                 # first docstring paragraph
+     plain_summary,           # #64 plain-language summary (generated tools
+                              # installed since #64), else null
      when_it_runs: {text, hints, provenance},
      gate: "needs approval"|"runs without asking",   # READ_ONLY_TOOL_NAMES
      inputs: [{name, type, description, optional}],
@@ -297,6 +299,7 @@ async def tool_detail(name: str, request: Request) -> dict[str, Any]:
     body: dict[str, Any] = {
         "name": name, "kind": kind, "state": state, "summary": summary,
         "gate": gate, "inputs": inputs, "sandbox": None, "error_text": None,
+        "plain_summary": None,
     }
     if kind == "builtin":
         body["when_it_runs"] = _builtin_when(doc, summary, inputs, free)
@@ -305,6 +308,10 @@ async def tool_detail(name: str, request: Request) -> dict[str, Any]:
 
     assert path is not None
     prov = _load_provenance(gen, name)
+    plain = (prov or {}).get("summary")
+    if isinstance(plain, str) and plain.strip():
+        # The sentences the idea and code-review cards showed (#64).
+        body["plain_summary"] = plain.strip()
     body["when_it_runs"] = {
         "text": _provenance_text(prov) if prov else "unknown",
         "hints": [],

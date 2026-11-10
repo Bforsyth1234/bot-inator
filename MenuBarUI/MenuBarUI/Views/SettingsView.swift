@@ -244,6 +244,10 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("Appearance") {
+                TextSizePicker()
+            }
+
             Section("Inference provider") {
                 Picker("Provider", selection: $viewModel.provider) {
                     Text("Local (MLX on this Mac)").tag("local")
@@ -253,7 +257,7 @@ struct SettingsView: View {
                 .disabled(viewModel.isLocked("provider"))
                 if let running = viewModel.runningSummary {
                     Text("Running now: \(running)")
-                        .font(.caption)
+                        .appFont(.secondary)
                         .foregroundStyle(.secondary)
                 }
                 lockedNote("provider", env: "AGENT_PROVIDER")
@@ -279,7 +283,7 @@ struct SettingsView: View {
                         .disabled(viewModel.isLocked("groq_api_key"))
                     Link("Get a key at console.groq.com/keys",
                          destination: URL(string: "https://console.groq.com/keys")!)
-                        .font(.caption)
+                        .appFont(.secondary)
                     lockedNote("groq_api_key", env: "GROQ_API_KEY")
                     DisclosureGroup("Models") {
                         TextField("Main", text: $viewModel.mainModel)
@@ -292,6 +296,7 @@ struct SettingsView: View {
                 }
             }
 
+            DailyBriefSettingsView()
             PermissionsView()
 
             Section {
@@ -334,7 +339,7 @@ struct SettingsView: View {
         Text(viewModel.cloudPersonalText
              ? "Groq receives iMessage text and email subjects and bodies. Applies to the next prompt."
              : "iMessage text and email subjects and bodies are replaced by a placeholder before a prompt goes to Groq.")
-            .font(.caption)
+            .appFont(.secondary)
             .foregroundStyle(.secondary)
         lockedNote("cloud_personal_text", env: "AGENT_CLOUD_PERSONAL_TEXT")
     }
@@ -360,7 +365,7 @@ struct SettingsView: View {
     private func lockedNote(_ field: String, env: String) -> some View {
         if viewModel.isLocked(field) {
             Text("Set by \(env) in the daemon's shell; unset it there to change it here.")
-                .font(.caption)
+                .appFont(.secondary)
                 .foregroundStyle(.secondary)
         }
     }

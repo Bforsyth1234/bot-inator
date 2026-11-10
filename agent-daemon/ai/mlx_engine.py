@@ -27,7 +27,22 @@ EVENT_ANALYSIS_SYSTEM_PROMPT = (
     "markdown, and do not include reasoning tags."
 )
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+# Matches a full ``<think>…</think>`` block, or a leading ``…</think>`` whose
+# opening tag the chat template put in the prompt (Qwen3.5+ thinking mode).
+# Chat templates also get ``enable_thinking=False``: Qwen3.5+ templates
+# think by default, which would eat these prompts' small token budgets.
+# Older templates ignore the extra variable.
+THINK_BLOCK_RE = re.compile(
+    r"^(?:(?!<think>).)*?</think>|<think>.*?</think>", re.DOTALL
+)
+
+
+def _clear_cache_fn(mx: Any) -> Any:
+    """``mx.clear_cache`` (MLX 0.30+), else the deprecated ``mx.metal`` one."""
+    clear = getattr(mx, "clear_cache", None)
+    if not callable(clear):
+        clear = getattr(getattr(mx, "metal", None), "clear_cache", None)
+    return clear if callable(clear) else None
 
 
 class MLXEngine:
@@ -145,7 +160,10 @@ class MLXEngine:
         if callable(apply):
             try:
                 prompt = apply(
-                    messages, add_generation_prompt=True, tokenize=False
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    enable_thinking=False,
                 )
             except Exception:
                 logger.debug("apply_chat_template failed; using plain prompt")
@@ -214,8 +232,9 @@ class MLXEngine:
             import gc
             gc.collect()
             import mlx.core as mx  # type: ignore
-            if hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
-                mx.metal.clear_cache()
+            clear = _clear_cache_fn(mx)
+            if clear is not None:
+                clear()
         except Exception:  # pragma: no cover - best-effort cleanup
             pass
 
@@ -263,10 +282,8 @@ class MLXEngine:
             return
         try:
             import mlx.core as mx  # type: ignore
-            clear = getattr(getattr(mx, "metal", None), "clear_cache", None)
-            if clear is None:
-                clear = getattr(mx, "clear_cache", None)
-            if callable(clear):
+            clear = _clear_cache_fn(mx)
+            if clear is not None:
                 clear()
                 logger.debug(
                     "Cleared MLX metal cache after %d generations",
@@ -292,6 +309,7 @@ class MLXEngine:
                     messages,
                     add_generation_prompt=True,
                     tokenize=False,
+                    enable_thinking=False,
                 )
             except Exception:  # pragma: no cover - tokenizer quirks
                 logger.debug("apply_chat_template failed; using plain prompt")
@@ -303,5 +321,5 @@ class MLXEngine:
 
     @staticmethod
     def _postprocess_event_output(text: str) -> str:
-        cleaned = _THINK_BLOCK_RE.sub("", text or "").strip()
+        cleaned = THINK_BLOCK_RE.sub("", text or "").strip()
         return cleaned
