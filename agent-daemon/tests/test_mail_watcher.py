@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import ai  # noqa: F401  - import order: ai -> tools avoids a circular import
-from events.event_bus import EventBus
+from events.event_bus import ContextEvent, EventBus
 from events import mail_watcher as mw
 from events.mail_watcher import MailWatcher, is_own_mailbox, mailbox_name
 import importlib
@@ -98,7 +98,7 @@ def test_mail_watcher_emits_new_received_mail_only(tmp_path) -> None:
     assert ev.metadata["mailbox"] == "INBOX"
     assert ev.metadata["message_id"] == 2
     assert ev.metadata["date"].startswith("2025-11-09T")
-    assert set(ev.metadata) == {"sender", "subject", "date", "mailbox", "message_id"}
+    assert set(ev.metadata) == {"sender", "subject", "date", "mailbox", "message_id", "bulk"}
 
 
 def test_mail_watcher_missing_index_idles(tmp_path) -> None:
@@ -207,3 +207,84 @@ def test_outbox_and_sendlater_are_own_mail() -> None:
         assert mw.is_own_mailbox(url), url
     for url in ("imap://x/INBOX", "imap://x/%5BMailbox%5D/To%20Reply", "imap://x/Job%20Hunt"):
         assert not mw.is_own_mailbox(url), url
+
+
+SCHEMA_SQL_FULL = """
+CREATE TABLE subjects (ROWID INTEGER PRIMARY KEY, subject TEXT);
+CREATE TABLE addresses (ROWID INTEGER PRIMARY KEY, address TEXT, comment TEXT);
+CREATE TABLE mailboxes (ROWID INTEGER PRIMARY KEY, url TEXT);
+CREATE TABLE messages (
+    ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject INTEGER, sender INTEGER, date_received INTEGER, mailbox INTEGER,
+    global_message_id INTEGER, list_id_hash INTEGER, unsubscribe_type INTEGER
+);
+INSERT INTO mailboxes VALUES (1, 'imap://UUID-1/INBOX');
+INSERT INTO mailboxes VALUES (3, 'imap://UUID-1/%5BGmail%5D/All%20Mail');
+INSERT INTO addresses VALUES (1, 'alice@example.com', 'Alice Example');
+INSERT INTO addresses VALUES (3, 'news@canva.com', 'Canva');
+"""
+
+
+def _add_full(conn, subject, sender, mailbox, gid, list_id=None, unsub=None) -> None:
+    cur = conn.execute("INSERT INTO subjects (subject) VALUES (?)", (subject,))
+    conn.execute(
+        "INSERT INTO messages (subject, sender, date_received, mailbox, "
+        "global_message_id, list_id_hash, unsubscribe_type) "
+        "VALUES (?, ?, 1762711200, ?, ?, ?, ?)",
+        (cur.lastrowid, sender, mailbox, gid, list_id, unsub),
+    )
+    conn.commit()
+
+
+def test_same_message_in_two_gmail_mailboxes_is_reported_once(tmp_path) -> None:
+    """Live check (2026-11-10): one email showed up from several mailboxes."""
+    conn = _make_index(tmp_path, SCHEMA_SQL_FULL)
+
+    def during():
+        _add_full(conn, "Lunch on Friday?", 1, 1, gid=42)
+        _add_full(conn, "Lunch on Friday?", 1, 3, gid=42)   # same mail, All Mail
+        _add_full(conn, "Another one", 1, 3, gid=43)
+
+    events = _run_watcher(tmp_path, during)
+    assert [e.metadata["subject"] for e in events] == ["Lunch on Friday?", "Another one"]
+    assert events[0].metadata["mailbox"] == "INBOX"
+
+
+def test_newsletters_are_flagged_bulk(tmp_path) -> None:
+    """Live check: 10 newsletters each started a full agent turn."""
+    conn = _make_index(tmp_path, SCHEMA_SQL_FULL)
+
+    def during():
+        _add_full(conn, "Ready to create something new?", 3, 3, gid=50, unsub=1)
+        _add_full(conn, "Weekly digest", 3, 3, gid=51, list_id=987654)
+        _add_full(conn, "Lunch on Friday?", 1, 1, gid=52, list_id=0, unsub=0)
+
+    events = _run_watcher(tmp_path, during)
+    assert [(e.metadata["subject"], e.metadata["bulk"]) for e in events] == [
+        ("Ready to create something new?", True),
+        ("Weekly digest", True),
+        ("Lunch on Friday?", False),
+    ]
+
+
+def test_old_schema_without_optional_columns_still_works(tmp_path) -> None:
+    conn = _make_index(tmp_path)  # SCHEMA_SQL has none of the optional columns
+
+    def during():
+        _add(conn, "plain", sender=1, mailbox=1)
+
+    events = _run_watcher(tmp_path, during)
+    assert events[0].metadata["bulk"] is False
+
+
+def test_bulk_mail_does_not_start_the_agent() -> None:
+    from ai.orchestrator import _mail_skips_agent
+
+    bulk = ContextEvent(event_type="mail_received", metadata={
+        "sender": "Canva <news@canva.com>", "subject": "Ready to create?",
+        "mailbox": "[Gmail]/All Mail", "message_id": 1, "bulk": True})
+    personal = ContextEvent(event_type="mail_received", metadata={
+        "sender": "Sam <sam@example.com>", "subject": "Can you send the deck?",
+        "mailbox": "INBOX", "message_id": 2, "bulk": False})
+    assert _mail_skips_agent(bulk)
+    assert not _mail_skips_agent(personal)

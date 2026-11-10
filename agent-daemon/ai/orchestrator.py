@@ -94,14 +94,19 @@ _MAIL_KINDS_HANDLED_BY_IDEAS: frozenset[str] = frozenset({
 def _mail_skips_agent(event: ContextEvent) -> bool:
     """True for mail the tool-calling agent should not act on.
 
-    Junk, sent and draft mailboxes never reach it, and neither does mail
-    a built-in follow-up already covers (see
-    ``_MAIL_KINDS_HANDLED_BY_IDEAS``).
+    Junk, sent and draft mailboxes never reach it, nor does mailing-list /
+    newsletter mail (``bulk``, from List-Id / List-Unsubscribe: in the live
+    check every newsletter started a full agent turn), nor mail a built-in
+    follow-up already covers (see ``_MAIL_KINDS_HANDLED_BY_IDEAS``). Idea
+    sources still see all of it.
     """
     # Imported lazily: ``ai.idea_sources`` pulls in the pattern recognizer.
     from ai.idea_sources import _SKIP_MAILBOXES, NextStepSuggester
 
-    if _SKIP_MAILBOXES.search(str((event.metadata or {}).get("mailbox") or "")):
+    meta = event.metadata or {}
+    if _SKIP_MAILBOXES.search(str(meta.get("mailbox") or "")):
+        return True
+    if meta.get("bulk"):
         return True
     return NextStepSuggester.classify(event) in _MAIL_KINDS_HANDLED_BY_IDEAS
 
