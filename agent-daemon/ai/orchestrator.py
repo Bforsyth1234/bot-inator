@@ -1646,6 +1646,29 @@ def _has_tool_result(messages: Any) -> bool:
     return False
 
 
+_ANSWER_NUDGE = (
+    "Reply to the user now in plain text, using the tool results above. "
+    "Do not call any tools."
+)
+
+
+def _text_answer(generate: Any, messages: Any, stop_sequences: Any, kwargs: dict) -> str:
+    """One tool-free completion so the model can phrase its final answer."""
+    extra = {k: v for k, v in kwargs.items() if k != "tool_choice"}
+    try:
+        # smolagents wants list-of-parts content (a plain string fails its
+        # message cleaning when flatten_messages_as_text is off).
+        nudge = {"role": "user", "content": [{"type": "text", "text": _ANSWER_NUDGE}]}
+        nudged = list(messages or []) + [nudge]
+        reply = generate(nudged, stop_sequences=stop_sequences,
+                         tools_to_call_from=None, **extra)
+    except Exception:
+        logger.exception("tool-free answer attempt failed")
+        return ""
+    content = getattr(reply, "content", "")
+    return content.strip() if isinstance(content, str) else ""
+
+
 def _make_groq_model_class(base: type) -> type:
     """``OpenAIServerModel`` that tolerates a plain-text reply on Groq.
 
@@ -1695,8 +1718,11 @@ def _make_groq_model_class(base: type) -> type:
                 # Reasoning models sometimes answer a tool result with no
                 # visible text. smolagents then retried and the model
                 # called the same tool again (live check: one 'open
-                # goole.com' opened it 3 times). End the turn instead.
-                content = "Done."
+                # goole.com' opened it 3 times). End the turn instead, but
+                # first give the model one chance to write the answer with
+                # no tools offered (it said only "Done." to "what's on my
+                # calendar today?").
+                content = _text_answer(super().generate, messages, stop_sequences, kwargs) or "Done."
             if tools_to_call_from and not message.tool_calls and content:
                 from smolagents.models import (  # type: ignore
                     ChatMessageToolCall,
