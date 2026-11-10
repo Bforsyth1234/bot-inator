@@ -1064,6 +1064,14 @@ Results (wave 9, 2026-11-09):
 Deviations: added the `request_access` op and the `calendar_status` frame;
 `auto` no longer uses in-daemon EventKit or AppleScript (explicit pins still
 work); `test_calendar.py::test_backend_selection` updated.
+Live (2026-11-10): the app showed the macOS Calendar prompt on the first
+question → allowed → Permissions `calendars` = granted. "what's on my
+calendar this week?" → 5 events through the app in ~2 s. ✔ Two answer fixes
+from this check: an empty model reply after a tool result now gets one
+tool-free completion to phrase the answer (it had replied just "Done."), and
+each event carries a readable `when` (the model had called Monday Nov 9
+"Wednesday"). Still to do: add an event; `event_starting_soon`; quit the app
+→ "open the app" error.
 
 ---
 

@@ -111,6 +111,32 @@ def test_empty_reply_after_tool_result_ends_the_turn() -> None:
     assert out.tool_calls[0].function.arguments == {"answer": "Done."}
 
 
+class _TwoReplies(_FakeBase):
+    """Empty reply with tools offered; a real answer when asked without tools."""
+
+    def __init__(self, reply: ChatMessage) -> None:
+        super().__init__(reply)
+        self.tool_free_calls = 0
+
+    def generate(self, messages, stop_sequences=None, response_format=None,
+                 tools_to_call_from=None, **kwargs):
+        if tools_to_call_from is None:
+            self.tool_free_calls += 1
+            assert "tool_choice" not in kwargs
+            return ChatMessage(role="assistant", content="You have no events today.")
+        return super().generate(messages, stop_sequences, response_format,
+                                tools_to_call_from, **kwargs)
+
+
+def test_empty_reply_gets_one_tool_free_answer_attempt() -> None:
+    """Live check: "what's on my calendar today?" was answered "Done."."""
+    m = _make_groq_model_class(_TwoReplies)(ChatMessage(role="assistant", content=""))
+    history = [{"role": "user", "content": "calendar?"}, {"role": "tool-response", "content": "[]"}]
+    out = m.generate(history, tools_to_call_from=[object()])
+    assert out.tool_calls[0].function.arguments == {"answer": "You have no events today."}
+    assert m.tool_free_calls == 1
+
+
 def test_empty_reply_before_any_tool_is_left_alone() -> None:
     m = _model(ChatMessage(role="assistant", content=""))
     out = m.generate([{"role": "user", "content": "hi"}], tools_to_call_from=[object()])

@@ -345,3 +345,14 @@ def test_eventkit_names_exist() -> None:
                 "saveEvent_span_commit_error_", "defaultCalendarForNewEvents", "calendarsForEntityType_"):
         assert hasattr(store, sel), sel
     assert ca.EventKitBackend().status() in set(ca._STATUS_NAMES.values())
+
+
+def test_events_carry_a_readable_weekday() -> None:
+    """Live check: the model said "Wednesday Nov 9" for Monday 2026-11-09."""
+    import importlib
+
+    le = importlib.import_module("tools.list_events")
+    timed = le._with_when({"start": "2026-11-09T13:00:00-05:00", "end": "2026-11-09T14:00:00-05:00"})
+    assert timed["when"].startswith("Monday November 9, 1:00 PM")
+    allday = le._with_when({"start": "2026-11-11T00:00:00-05:00", "all_day": True})
+    assert allday["when"] == "Wednesday November 11 (all day)"

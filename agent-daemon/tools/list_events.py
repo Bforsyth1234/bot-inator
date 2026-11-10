@@ -43,6 +43,29 @@ def resolve_range(start: str, end: str) -> tuple[datetime, datetime]:
     return begin, finish
 
 
+def _with_when(event: dict[str, Any]) -> dict[str, Any]:
+    """Add a readable ``when`` (weekday, date, time) to an event.
+
+    Models guessed weekdays from ISO dates and got them wrong (live check:
+    "Wednesday Nov 9" for Monday 2026-11-09), so state the day outright.
+    """
+    out = dict(event)
+    try:
+        start = calendar_access.parse_local(str(event.get("start") or ""))
+        if event.get("all_day"):
+            out["when"] = start.strftime("%A %B %-d (all day)")
+        else:
+            end_raw = str(event.get("end") or "")
+            end = calendar_access.parse_local(end_raw) if end_raw else None
+            span = start.strftime("%A %B %-d, %-I:%M %p")
+            if end is not None:
+                span += end.strftime(" – %-I:%M %p")
+            out["when"] = span
+    except Exception:
+        pass
+    return out
+
+
 @tool
 def list_events(start: str = "", end: str = "") -> dict[str, Any]:
     """List events on the Mac's calendars (iCloud, Google, Exchange, ...).
@@ -74,6 +97,7 @@ def list_events(start: str = "", end: str = "") -> dict[str, Any]:
         events = backend.list(begin, finish)
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
+    events = [_with_when(e) for e in events]
     return {
         "status": "ok",
         "start": calendar_access.iso(begin),
