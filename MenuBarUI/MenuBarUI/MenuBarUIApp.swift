@@ -33,6 +33,33 @@ struct MenuBarUIApp: App {
         }
         .defaultSize(width: 480, height: 420)
         .keyboardShortcut(",", modifiers: [.command])
+
+        // The menu bar panel closes whenever it loses focus (macOS behaviour
+        // for MenuBarExtra panels); this is the same content in a normal
+        // window that stays open beside other apps.
+        Window("bot-inator", id: "activity") {
+            ActivityWindowView()
+                .environmentObject(delegate.ws)
+        }
+        .defaultSize(width: 460, height: 640)
+        .keyboardShortcut("b", modifiers: [.command, .shift])
+    }
+}
+
+/// Thoughts + Debug in a regular, resizable window ("Open in window").
+struct ActivityWindowView: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            NoticeBanner()
+            TabView {
+                ThoughtStreamView()
+                    .tabItem { Label("Thoughts", systemImage: "brain") }
+                DebugView()
+                    .tabItem { Label("Debug", systemImage: "ladybug") }
+            }
+            .frame(maxHeight: .infinity)
+        }
+        .frame(minWidth: 380, minHeight: 420)
     }
 }
 
@@ -47,6 +74,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ws.connect()
         approvalPresenter.attach(to: ws)
+        observeWindowsForActivationPolicy()
+    }
+
+    // MARK: Cmd-Tab / Dock while a window is open
+
+    /// ``LSUIElement`` keeps the app out of Cmd-Tab and the Dock. While one
+    /// of its regular windows (Chat, Settings, Manage Tools, "Open in
+    /// window", approval cards) is open, switch to ``.regular`` so the user
+    /// can Cmd-Tab back to it; go back to ``.accessory`` when the last one
+    /// closes.
+    private func observeWindowsForActivationPolicy() {
+        let center = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification,
+                     NSWindow.didBecomeMainNotification,
+                     NSWindow.didDeminiaturizeNotification] {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateActivationPolicy(closing: nil) }
+            }
+        }
+        center.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { [weak self] note in
+            let closing = note.object as? NSWindow
+            MainActor.assumeIsolated { self?.updateActivationPolicy(closing: closing) }
+        }
+    }
+
+    private func updateActivationPolicy(closing: NSWindow?) {
+        let hasAppWindow = NSApp.windows.contains { window in
+            window !== closing && window.isVisible && Self.isAppWindow(window)
+        }
+        let wanted: NSApplication.ActivationPolicy = hasAppWindow ? .regular : .accessory
+        guard NSApp.activationPolicy() != wanted else { return }
+        NSApp.setActivationPolicy(wanted)
+        if wanted == .regular {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// A normal titled window, not the menu bar panel or status item.
+    private static func isAppWindow(_ window: NSWindow) -> Bool {
+        let name = NSStringFromClass(type(of: window))
+        if name.contains("StatusBar") || name.contains("MenuBarExtra") { return false }
+        if window is NSPanel { return false }
+        return window.styleMask.contains(.titled)
     }
 }
 
@@ -71,6 +141,15 @@ struct RootPopoverView: View {
             .layoutPriority(-1)
             Divider()
             HStack {
+                Button {
+                    presentWindow(id: "activity")
+                } label: {
+                    Label("Open in window", systemImage: "macwindow")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless)
+                .help("Open Thoughts and Debug in a window that stays open (⇧⌘B)")
+                Spacer()
                 Button {
                     presentWindow(id: "chat")
                 } label: {
