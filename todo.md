@@ -561,6 +561,9 @@ Results (wave 8, 2026-11-09):
   pattern turn. `ToolDetailView.swift` sheet from Tool Manager; "Open in
   editor" = `open -t`. 13 tests; non-vacuity 3 / 1 / 1.
 Deviations: added state `not_loaded`.
+Live (2026-11-10): find_files → "Runs without asking", open_url → "Needs
+your approval", Open in editor opened the file as text, a generated tool
+showed sandbox info and its when-it-runs. ✔
 
 ---
 
@@ -910,6 +913,8 @@ Results (wave 8, 2026-11-09):
   Groq, off by default). 5 tests; non-vacuity 3 + 1.
 Deviations: `.env` ranks below the saved toggle (otherwise the toggle could never turn
 the user's `.env` opt-in off). The Debug tab updates on next connect.
+Live (2026-11-10): Settings shows the toggle on (from `.env`). ✔ (Flip
+off → placeholder in the log not exercised yet.)
 
 ---
 
@@ -972,6 +977,8 @@ Results (wave 8, 2026-11-09):
   non-vacuity 2 + 2.
 Deviations: removing from IdeaFeedback already stops matching (match() re-reads
 entries); the cache clear just drops vectors for removed ideas.
+Live (2026-11-10): Tool Manager → Declined ideas lists send_imessage with
+its count. ✔ (Remove / Clear all not exercised yet.)
 
 ---
 
