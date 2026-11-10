@@ -1669,6 +1669,31 @@ def _text_answer(generate: Any, messages: Any, stop_sequences: Any, kwargs: dict
     return content.strip() if isinstance(content, str) else ""
 
 
+# GPT-OSS on Groq keeps calling a tool named "answer" for its final reply.
+# Groq validates tool names server-side and rejected the whole turn with
+# "attempted to call tool 'answer' which was not in request.tools" (live
+# check: every incoming email failed this way and blocked the queue). Offer
+# an "answer" tool with final_answer's schema and map calls back to it.
+ANSWER_ALIAS = "answer"
+
+
+def _answer_alias(tools: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """A copy of the ``final_answer`` tool spec named ``answer``, or None."""
+    names = {(spec.get("function") or {}).get("name") for spec in tools}
+    if ANSWER_ALIAS in names:
+        return None
+    for spec in tools:
+        function = spec.get("function") or {}
+        if function.get("name") == "final_answer":
+            alias = copy.deepcopy(spec)
+            alias["function"]["name"] = ANSWER_ALIAS
+            alias["function"]["description"] = (
+                "Same as final_answer: give the final answer to the user."
+            )
+            return alias
+    return None
+
+
 def _make_groq_model_class(base: type) -> type:
     """``OpenAIServerModel`` that tolerates a plain-text reply on Groq.
 
@@ -1684,8 +1709,12 @@ def _make_groq_model_class(base: type) -> type:
     class _GroqServerModel(base):  # type: ignore[misc, valid-type]
         def _prepare_completion_kwargs(self, *args, **kwargs):
             completion = super()._prepare_completion_kwargs(*args, **kwargs)
-            for spec in completion.get("tools") or []:
+            tools = completion.get("tools") or []
+            for spec in tools:
                 _allow_null_optionals(spec)
+            alias = _answer_alias(tools)
+            if alias is not None:
+                tools.append(alias)
             return completion
 
         def generate(self, messages, stop_sequences=None, response_format=None,
@@ -1710,6 +1739,10 @@ def _make_groq_model_class(base: type) -> type:
                         logger.info("Groq rejected a tool call (%s); retrying once", exc)
                         continue
                     raise
+            for call in message.tool_calls or []:
+                function = getattr(call, "function", None)
+                if getattr(function, "name", None) == ANSWER_ALIAS:
+                    function.name = "final_answer"
             content = (message.content or "").strip() if isinstance(message.content, str) else ""
             if (
                 tools_to_call_from and not message.tool_calls and not content

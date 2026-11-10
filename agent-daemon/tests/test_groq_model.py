@@ -141,3 +141,27 @@ def test_empty_reply_before_any_tool_is_left_alone() -> None:
     m = _model(ChatMessage(role="assistant", content=""))
     out = m.generate([{"role": "user", "content": "hi"}], tools_to_call_from=[object()])
     assert not out.tool_calls
+
+
+def test_answer_alias_is_offered_and_mapped_back() -> None:
+    """Live check: Groq rejected turns where GPT-OSS called a tool 'answer'."""
+    from ai.orchestrator import ANSWER_ALIAS, _answer_alias
+
+    final = {"type": "function", "function": {"name": "final_answer", "description": "d",
+             "parameters": {"properties": {"answer": {"type": "string"}}, "required": ["answer"]}}}
+    other = {"type": "function", "function": {"name": "list_events", "parameters": {}}}
+    alias = _answer_alias([other, final])
+    assert alias["function"]["name"] == ANSWER_ALIAS
+    assert alias["function"]["parameters"] == final["function"]["parameters"]
+    assert final["function"]["name"] == "final_answer"  # original untouched
+    assert _answer_alias([other]) is None            # no final_answer offered
+    assert _answer_alias([final, alias]) is None      # already present
+
+    call = ChatMessageToolCall(
+        id="c1", type="function",
+        function=ChatMessageToolCallFunction(name="answer", arguments={"answer": "hi"}),
+    )
+    m = _model(ChatMessage(role="assistant", content="", tool_calls=[call]))
+    out = m.generate([], tools_to_call_from=[object()])
+    assert out.tool_calls[0].function.name == "final_answer"
+    assert out.tool_calls[0].function.arguments == {"answer": "hi"}
