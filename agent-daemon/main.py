@@ -64,6 +64,7 @@ from ai.setup_scan import (
 )
 from events.calendar_watcher import CalendarWatcher
 from events.clipboard_watcher import ClipboardWatcher
+from events.daily_brief import DailyBriefScheduler
 from events.event_bus import ContextEvent, EventBus
 from events.file_watcher import FileWatcher
 from events.imessage_watcher import IMessageWatcher
@@ -244,6 +245,7 @@ async def lifespan(app: FastAPI):
             ("mail_watcher", MailWatcher),
             ("calendar_watcher", CalendarWatcher),
             ("clipboard_watcher", ClipboardWatcher),
+            ("daily_brief", DailyBriefScheduler),
         ):
             try:
                 listener = factory(bus)
@@ -366,6 +368,10 @@ async def lifespan(app: FastAPI):
     app.state.idea_feedback = idea_feedback
     app.state.pattern_recognizer = pattern_recognizer
     app.state.listeners = listeners
+    # #65: the run-now route uses the scheduler when it is running.
+    app.state.daily_brief = next(
+        (l for l in listeners if isinstance(l, DailyBriefScheduler)), None
+    )
     app.state.listener_names = listener_names
 
     try:
@@ -402,10 +408,12 @@ app = FastAPI(title="agent-daemon", version="0.1.0", lifespan=lifespan)
 app.add_middleware(AuthMiddleware)
 # Wave 8 routers (todo rule 12): declined ideas (#56), permissions (#59),
 # tool detail (#61). The app-wide AuthMiddleware covers them.
+from routes import daily_brief as daily_brief_routes  # noqa: E402
 from routes import ideas as ideas_routes  # noqa: E402
 from routes import permissions as permissions_routes  # noqa: E402
 from routes.tool_detail import router as tool_detail_router  # noqa: E402
 
+app.include_router(daily_brief_routes.router)
 app.include_router(ideas_routes.router)
 app.include_router(permissions_routes.router)
 app.include_router(tool_detail_router)

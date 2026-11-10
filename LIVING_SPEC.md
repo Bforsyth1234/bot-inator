@@ -211,6 +211,11 @@ rebuilds `self._agent`), unlinks the file, best-effort commits the
 removal to the nested git repo (DONE.md #8), and returns 200 with
 `{"status":"ok","tool_name":…,"unloaded":…}`.
 
+`GET` / `PUT /api/daily-brief` (`routes/daily_brief.py`, #65) reads and
+saves `{enabled, time "HH:MM", locked_fields}`; it applies live, no
+restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
+`trigger: "manual"`.
+
 ## 4. Daemon modules (`agent-daemon/`)
 
 | Path                          | Responsibility                                     |
@@ -240,6 +245,14 @@ removal to the nested git repo (DONE.md #8), and returns 200 with
 | `events/calendar_watcher.py`  | Upcoming meetings → event_starting_soon.           |
 | `events/clipboard_watcher.py` | Clipboard changes → clipboard_changed (app + kind, |
 |                               | never content).                                    |
+| `events/daily_brief.py`       | One `daily_brief` event a day at                   |
+|                               | AGENT_DAILY_BRIEF_TIME (08:00) unless              |
+|                               | AGENT_DAILY_BRIEF=0; same-day catch-up; state in   |
+|                               | `~/.bot-inator/daily_brief.json`. Gathers calendar,|
+|                               | last-24 h mail headers (no bodies; subjects        |
+|                               | redacted for cloud engines) and due reminders,     |
+|                               | read-only; names a source it can't read; never     |
+|                               | prompts for a permission (#65).                    |
 | `ai/privacy.py`               | Replaces personal text (iMessage, mail) in cloud   |
 |                               | engines' prompts unless AGENT_CLOUD_PERSONAL_TEXT=1|
 | `ai/permissions.py`           | Permission table + never-prompting checks (#59);   |
@@ -370,6 +383,12 @@ bypass the approval gate and run inline; all other tools still emit an
 | `open_app`         |           | `open -a` on an `.app` found in the Applications  |
 |                    |           | folders.                                          |
 | `read_email`       | ✅         | Body of one Mail.app message by id (`.emlx`).     |
+| `draft_email`      |           | AppleScript → Mail.app: opens an UNSENT draft     |
+|                    |           | (text via argv, recipients validated);            |
+|                    |           | `reply_to_message_id` makes a threaded reply.     |
+|                    |           | Drafts only: no send tool exists (#63).           |
+| `brief_me`         | ✅         | Today's brief on demand: meetings, last-24 h mail |
+|                    |           | headers, reminders due (#65).                     |
 | `list_events`      | ✅         | Calendar events in a range, via the menu bar      |
 |                    |           | app's EventKit (#60; app must be running).        |
 | `create_event`     |           | Adds a Calendar event (app's EventKit; default    |
@@ -452,6 +471,29 @@ SwiftUI MenuBar app with an AppKit shell:
   confirm, sends `DELETE /api/tools/{name}` and reloads the list
   (on 204 or 404). A top-right refresh button re-fetches. Errors
   surface inline via a banner.
+- `Views/DailyBriefSettingsView.swift` — Settings section "Morning brief":
+  on/off toggle, time of day, **Brief me now** (#65). Saves through
+  `/api/daily-brief` as soon as a value changes.
+- `Views/ApprovalAlert.swift` has a `draft_email` card (#63): To, Cc,
+  Subject, Body editable; states that only a draft is created.
+
+Idea sources (wave 10, #66): open-help asks the model only after a new
+content event (`file`, `mail_received`, `imessage_received`,
+`event_starting_soon`); an app name or window title no longer grounds an
+idea; ideas whose whole job is switching, toggling, listing or counting
+apps are dropped deterministically in open-help, friction and the pattern
+recognizer. A new watcher's event type must be added to
+`CONTENT_EVENT_TYPES` in `ai/open_help.py` before open-help reacts to it.
+
+Tool summaries (wave 11, #64): `approval_request` for
+`generate_custom_tool` and `code_approval_request` carry an optional
+`summary` (plain sentences: what it does, when it runs, what it touches,
+that each use asks first), built by `ai/tool_summary.py` (one
+analysis-engine call bounded at 5 s; deterministic fallback). For code
+review the "touches" sentence is derived from the drafted source, not the
+model. Provenance stores `summary`; `GET /api/tools/{name}` returns it as
+`plain_summary` (null for built-ins and older tools). The summary prompt
+is scrubbed with `privacy.scrub_idea_text`.
 
 Built ad-hoc via `swiftc` against macOS 14.0+ (arm64); artefact at
 `MenuBarUI/MenuBarUI/build/MenuBarUI.app`.

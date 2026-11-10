@@ -52,7 +52,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #64
+Next ID: #69
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -80,7 +80,10 @@ API auth → sandbox for installed tools → live checks.
 | 7 | A: #22 #51 (alone) | `ai/orchestrator.py` tool execution, new `tools/tool_sandbox.py` | [x] closed 2026-11-09 (`[~] live`) |
 | 8 | A: #52 · B: #53 · C: #56 · D: #58 · E: #59 · F: #61 | A `ai/privacy.py`, `user_settings.py`, settings routes in `main.py`, `SettingsView.swift` · B `tools/tool_sandbox.py` · C new `routes/ideas.py`, `IdeaFeedback` in `ai/open_help.py`, `ai/idea_match.py`, new `DeclinedIdeasView.swift` · D `tools/read_active_tab.py` · E new `ai/permissions.py`, new `routes/permissions.py`, new `PermissionsView.swift` · F `ToolManagerView.swift`, new `ToolDetailView.swift`, new `routes/tool_detail.py`, provenance in `tools/meta_tool_generator.py` (+ each slot's new test file) | [x] closed 2026-11-09 (all `[~] live`) |
 | 9 | A: #60 (alone) | `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, new `CalendarBridge.swift`, `Info.plist`, `tools/calendar_access.py`, WS routing in `main.py` | [x] closed 2026-11-09 (`[~] live`) |
-| — | #37 + every `[~] live` item | Live checks list (below) — needs the user at the Mac | [ ] |
+| 10 | A: #66 · B: #67 · C: #65 · D: #63 | A `ai/open_help.py`, `ai/friction.py`, `ai/pattern_recognizer.py`, `tests/test_open_help.py`, `tests/fixtures/open_help_windows.json` · B `ai/memory.py`, `tools/remember_preference.py`, `tests/test_memory.py` · C new `events/daily_brief.py`, `user_settings.py`, new `DailyBriefSettingsView.swift` · D new `tools/email_draft.py`, `ai/permissions.py`, `ApprovalAlert.swift` (+ each slot's new test file). Runner at close: `tools/__init__.py`, `main.py`, `ai/orchestrator.py`, `SettingsView.swift`, LIVING_SPEC | [x] closed 2026-11-10 (#63 #65 #66 `[~] live`; #67 no bug, `[~] live`) |
+| 11 | A: #64 (alone) | `ai/orchestrator.py`, `ApprovalAlert.swift`, `CodeReviewAlert.swift`, `tools/meta_tool_generator.py`, `routes/tool_detail.py`, `ToolDetailView.swift`, new `ai/tool_summary.py`, optional `summary` field in `schemas/ws_messages.py` + `WSMessage.swift`. Runner: #68 in `ai/privacy.py` | [x] closed 2026-11-10 (#64 `[~] live`) |
+| 12 | A: #62 (alone, cross-cutting: every Swift view) | `MenuBarUI/MenuBarUI/Views/*.swift`, `MenuBarUIApp.swift`, `ApprovalPresenter.swift`, new `Views/TextSize.swift` | [x] closed 2026-11-10 (#62 `[~] live`) |
+| — | every `[~] live` item (waves 1–12) | Live checks list (below) — needs the user at the Mac. After wave 12 no `[ ]` item is left: this row is all that remains | [ ] |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
 
@@ -153,6 +156,12 @@ to see.
 - #60 Calendar (app): rebuild and restart the menu bar app (README), then "what's on my calendar today?" → the macOS Calendar prompt comes from the app → Allow → events in seconds, no card; Settings → Permissions shows Calendars granted. "Add lunch with Sam tomorrow at noon" → card → event in the default calendar. An event 10 min out → `event_starting_soon` in Debug. Quit the app → calendar tools answer "open the bot-inator menu bar app". (A re-signed rebuild may ask again.)
 - #22 Sandbox: re-enable csv_diff in Manage Tools, run it from chat → one approval → correct result. A generated tool that calls show_notification still shows the notification. Check the daemon log has no "refusing to load generated tools (no sandbox)".
 - #51 Idea scrub: with Groq main and local detection (and `AGENT_CLOUD_PERSONAL_TEXT` not set to 1), an iMessage-derived idea's prompt shows `[personal text kept on this Mac]` instead of the message words.
+- #63 Email drafts: "draft an email to <my address> saying hi" → card → approve (first use: Automation → Mail prompt) → an unsent draft opens in Mail. "Reply to my last email saying thanks" → a threaded reply draft with the original quoted below.
+- #65 Morning brief: restart the daemon, rebuild the app; Settings → Morning brief → set the time 2 minutes ahead → exactly one brief in Thoughts and one notification, no approval card; a source it can't read shows "unavailable: <reason>". "Brief me now" → a second one at once. "Brief me" in Chat → the same content.
+- #66 Idea grounding: `cd agent-daemon && .venv/bin/python -m ai.open_help` → "matches expected 14/14", the three `good_*` windows still pass. After a day of normal use: no app-switch idea card; `grep "open_help dropped\|friction dropped\|pattern detection dropped"` in the daemon log shows the drops.
+- #67 Memory: in Chat, "remember that I prefer short replies" → `sqlite3 -readonly ~/.bot-inator/memory.db "select count(*) from memories"` → 1; a new chat message shows a "Recalled: …" thought in Debug.
+- #64 Tool summary: rebuild the app, restart the daemon, ask in Chat for something no tool does ("make a tool that renames new screenshots on my Desktop to their date") → the idea card leads with "What this tool would do" in plain sentences ending "Each use asks for your approval first."; the code-review card leads with the same plus "Its code …" naming internet, apps and folders; after install, Tool Manager's detail shows it under "What it does".
+- #62 Fonts: rebuild the app (README), then Settings → Appearance → Text size → Small / Medium / Large: text in the panel, "Open in window", Chat, Settings, Manage Tools and the next approval or code-review card resizes at once, nothing clipped, Approve/Deny visible.
 
 ---
 
@@ -181,6 +190,7 @@ to see.
 - #54 — Judge replies came back empty on Groq reasoning models · 2026-11-09 · [DONE.md](DONE.md)
 - #55 — Chat and event turns failed on Groq (tool-call rejections) · 2026-11-09 · [DONE.md](DONE.md)
 - #57 — Repeated approved calls; declined tool ideas asked again · 2026-11-09 · [DONE.md](DONE.md)
+- #68 — Idea scrub leaked the last word of a single-quoted quote · 2026-11-10 · [DONE.md](DONE.md)
 
 ---
 
@@ -212,6 +222,11 @@ marked "Idea" in the Phase 5.2 table. #36–#40 came out of the
 2026-11-09 live run of the open-help source. #41 (read email) and #42
 (use Calendar) are new features. #43–#47 are new built-in tools, ranked
 by help for effort. None is scheduled into a wave yet.
+
+#65–#67 came out of the 2026-11-10 usefulness review ("how can I make this
+app more useful?"). Suggested order: #65 (morning brief), #66 (ideas
+grounded in content), #63 (email drafts), the Live checks list above
+(mail and calendar first: #65 and #63 depend on them), #67 (empty memory).
 
 ### Idea quality (Phase 5)
 
@@ -389,6 +404,67 @@ Results (wave 2, 2026-11-09):
 Deviations: while backed off, the 10-event trigger is held too (otherwise a busy user
 never backs off: next call at +10 s instead of +120 s). Unparseable replies
 back off like NO_PATTERN.
+
+---
+
+#66 — Open-help ideas must be grounded in content, not app focus alone [~] live
+Wave: 10 · Agent: A · Added: 2026-11-10 · Source: assistant (usefulness review, user asked to add)
+Ask: Stop the stream of app-switching tool ideas. In
+`~/.bot-inator/idea_feedback.json` on 2026-11-10, 13 of the 16 distinct
+ideas are about switching or counting apps (`app_switcher`,
+`toggle_chrome_claude`, `chrome_teams_switcher`, `count_app_switches`,
+`summarize_app_switches`, …), and four of the five installed generated tools
+are the same kind. The user approves them, then deletes or disables them.
+Today: `grounded_in_events` (`ai/open_help.py`) passes an idea that shares
+any one content word with the event window, and an app name counts. Most
+events are `app_activated`, so "switch between Chrome and Claude" is always
+grounded.
+Approach (to decide when scheduled):
+1. Grounding needs a content event: the idea must share a word with a
+   mail, calendar, file, iMessage, clipboard-friction or browser-tab event
+   in the window. A window holding only `app_activated` events makes no
+   open-help call at all (also saves model calls).
+2. Deterministic drop in `passes_checks` for ideas whose whole job is
+   switching, toggling, listing or counting apps (macOS already does this:
+   Cmd-Tab, Dock, Screen Time).
+3. Add the same rule to `IDEA_JUDGE_SYSTEM_PROMPT` (score 0-3) and to
+   `OPEN_HELP_SYSTEM_PROMPT` ("do not propose app switchers").
+4. Add app-switch-only windows to `tests/fixtures/open_help_windows.json`
+   with expected "no idea".
+Files: ai/open_help.py, tests/test_open_help.py,
+tests/fixtures/open_help_windows.json. Check `ai/pattern_recognizer.py`
+and `ai/friction.py` for the same leak.
+Verify:
+⚬ Tests: app-only window → no model call; app-switcher idea dropped before
+  the judge; an idea naming a file from a `file` event still passes.
+  Non-vacuity per rule 5.
+⚬ Live: `.venv/bin/python -m ai.open_help` pass rate still meets #36's
+  target; a day of normal use produces no app-switch idea card.
+Results (wave 10, 2026-11-10):
+⚬ `ai/open_help.py`: `CONTENT_EVENT_TYPES` (file, mail_received,
+  imessage_received, event_starting_soon); `observe` makes no model call
+  until a new content event arrives (stage `no_content`);
+  `grounded_in_events` ignores "switched to <app>" and `clipboard_changed`
+  lines; new `is_app_switcher(idea, apps)` inside `passes_checks`; both
+  prompts rule app switchers out.
+⚬ `ai/friction.py` and `ai/pattern_recognizer.py` had the same leak: both
+  now drop `is_app_switcher` ideas (the recogniser backs off as for
+  NO_PATTERN). `ai/setup_scan.py` gets it through `passes_checks`.
+⚬ Fixture: 5 new drop cases with a `stage` key. Tests: 10 in
+  `tests/test_open_help.py`, 5 in new `tests/test_app_switcher_ideas.py`;
+  non-vacuity: gate removed / focus lines ground again / `is_app_switcher`
+  → False each turn the named tests red. Checked against the real
+  `idea_feedback.json` names: every switching or counting idea is flagged.
+Deviations: (1) `clipboard_changed` is NOT a content event (it carries only
+app + kind, so it would let an app name ground an idea again). (2) No
+browser-tab event exists; tab titles arrive as window titles and count as
+focus. (3) The gate needs a NEW content event since the last ask, not just
+one in the window. (4) `CONTENT_EVENT_TYPES` is an allow-list. (5) The
+switcher rule over-drops on purpose ("switch between Mail and Numbers" in
+a description is lost). (6) The pattern recogniser's repeat gate still
+counts `app_activated`, so an app-only window still costs one detection
+call before the idea is dropped (changing it breaks
+`tests/test_integration.py`); left as is.
 
 ### Generated tools
 
@@ -1098,8 +1174,73 @@ event created in "Brooks Forsyth" for Nov 11 12:00–1:00 PM. ✔
 
 ---
 
-#63 — Write email: drafts in Mail.app [ ]
-Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: user
+#65 — Morning brief: one card with today's meetings, mail to answer, reminders due [~] live
+Wave: 10 · Agent: C · Added: 2026-11-10 · Source: assistant (usefulness review, user asked to add)
+Ask: Make the app useful every day without waiting for a tool idea. The
+read-only built-ins exist (`list_events`, `read_email`, `list_reminders`)
+but nothing proactive uses them together.
+Approach (to decide when scheduled):
+1. A small scheduler in the daemon emits a `daily_brief` event once per
+   day at a set time (default 08:00, or at first activity after it if the
+   Mac was asleep). The last-run date is persisted in `~/.bot-inator/` so a
+   restart doesn't repeat it.
+2. The orchestrator handles it with read-only tools only: today's events,
+   mail from the last 24 h that looks like it needs a reply (newsletters
+   already skipped by the mail-noise work), reminders due today or overdue.
+3. Result is one brief shown in the Thoughts tab and as a notification;
+   also on demand from Chat ("brief me"). No side effects, so no approval
+   card (invariant 7a holds: read-only tools only). Follow-up actions
+   (reply draft #63, create reminder) go through normal approval cards.
+4. Privacy: under a cloud engine, mail bodies follow #31/#52 (placeholder
+   unless the user turned personal text on).
+5. Settings: on/off and time of day.
+Depends on: live checks for #41 (mail), #42/#60 (calendar), #45
+(reminders). A source that is unavailable is named in the brief ("Calendar:
+open the menu bar app"), not silently dropped.
+Files: new events/daily_brief.py, `_describe_event` branch in
+ai/orchestrator.py, start-up in main.py, user_settings.py + SettingsView.swift
+for the toggle and time, new tests/test_daily_brief.py.
+Verify:
+⚬ Tests: fires once per day (fake clock), not again after restart, catches
+  up after a missed time; brief built from fake tool results; an
+  unavailable source is named; no approval request is made.
+⚬ Live: set the time 2 minutes ahead → one notification and one Thoughts
+  entry listing real meetings, mail and reminders; "brief me" in Chat gives
+  the same.
+Results (wave 10, 2026-11-10):
+⚬ `events/daily_brief.py`: `DailyBriefScheduler` (fires when `last_run <
+  today's brief time <= now`; state in `~/.bot-inator/daily_brief.json`;
+  45 s start-up delay), `gather_brief` (calendar, last-24 h mail headers,
+  due reminders; each source `ok` or `unavailable` with a reason),
+  `recent_mail` (read-only Envelope Index query, noise skipped, cap 15).
+  Mail items carry sender, subject, date, id: never a body; subjects go
+  through `ai.privacy.redact_text`.
+⚬ `routes/daily_brief.py`: `GET`/`PUT /api/daily-brief`, `POST
+  /api/daily-brief/run`. `user_settings.py`: `AGENT_DAILY_BRIEF`,
+  `AGENT_DAILY_BRIEF_TIME`. `DailyBriefSettingsView.swift` embedded in
+  Settings above Permissions.
+⚬ Runner: scheduler started in `main.py`; `Orchestrator._handle_daily_brief`
+  (model words the gathered data, max 2 steps, falls back to the
+  deterministic text, then posts one notification); `_describe_event`
+  branch; `tools/brief.py` `brief_me` registered read-only.
+⚬ Tests: 24 in `tests/test_daily_brief.py` (15 mutation-checked), 7 in
+  `tests/test_wave10_wiring.py`.
+Deviations: (1) new `routes/daily_brief.py` (rule 12) because `PUT
+/api/settings` takes fixed fields only. (2) State is a timestamp, not a
+date, so moving the time later the same day arms it again (the live check
+needs that). (3) Sources never prompt: Calendar only when the app bridge
+is ready, Reminders only with access already granted; otherwise
+"unavailable: <reason>". (4) "Mail to answer" is the model's call from up
+to 15 headers, not code. (5) The notification is posted by the daemon
+directly, not through the model: `show_notification` is approval-gated
+for the model, and the brief is a setting the user turned on. (6)
+`brief_me` lives in `tools/brief.py` with a lazy import because
+`events.daily_brief` imports lead back into `tools`.
+
+---
+
+#63 — Write email: drafts in Mail.app [~] live
+Wave: 10 · Agent: D · Added: 2026-11-10 · Source: user
 Ask: "Can the app write email now? If not add that to the todo.md." It
 can't: #41 only reads (`read_email`, the mail watcher); no tool composes or
 sends mail.
@@ -1131,7 +1272,28 @@ Verify:
   non-vacuity.
 ⚬ Live: "draft an email to <me> saying hi" → card → a draft opens in Mail,
   unsent; "reply to my last email saying thanks" → a threaded reply draft.
-Deviations:
+Results (wave 10, 2026-11-10):
+⚬ `tools/email_draft.py`: `draft_email(to, subject, body, cc="",
+  reply_to_message_id=0)`; two fixed AppleScripts, all text via `on run
+  argv`; neither contains "send"; `delivered: False` always. Reply looks
+  the message up by Envelope Index ROWID (= Mail's `id of message`), inbox
+  first, then every mailbox; new body goes above Mail's quote.
+⚬ `ai/permissions.py`: row "Automation → Mail". `ApprovalAlert.swift`:
+  `draft_email` card (To, Cc, Subject, Body editable; "Approve & Create
+  Draft"; "Draft only — nothing is sent").
+⚬ Runner: registered in `tools/__init__.py`, NOT read-only; chat prompt
+  says a draft is ready, never "sent".
+⚬ Tests: 35 in `tests/test_email_draft.py`; mutations (interpolated body,
+  added `send`, no validation, ignored reply id, …) each failed the named
+  tests. Gate test fails if `draft_email` is put in `READ_ONLY_TOOL_NAMES`
+  (runner checked).
+Deviations: (1) empty `to` allowed on a reply (Mail fills the author); the
+card still requires To. (2) Empty subject allowed. (3) `as string`, not
+`as text`, inside the Mail tell block. (4) If Mail hasn't loaded the quote
+in ~3 s the draft has only the new body and the result says so; reply
+timeout 90 s. (5) The draft is an open compose window; Mail saves it to
+Drafts itself. Scripts were compiled with `osacompile` only: nothing has
+run against Mail yet.
 
 ---
 
@@ -1495,8 +1657,65 @@ blocks System Events for generated tools; the user kept it as is.
 
 ### Approvals and UI
 
-#62 — Larger fonts in the app [ ]
-Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: user
+#64 — Human-readable summary when a tool is suggested [~] live
+Wave: 11 · Agent: A · Added: 2026-11-10 · Source: user
+Ask: "When a tool is suggested, create a human-readable summary of the tool."
+Today the idea card for `generate_custom_tool` has no special layout, so it
+shows the raw call (`tool_name`, `description`, `expected_logic` as JSON),
+and the later code-review card shows Python. Neither says in plain words
+what the tool will do for the user.
+Approach (to decide when scheduled):
+1. When an idea is published (`pattern_detected`) or `generate_custom_tool`
+   is about to ask, write a short plain-language summary: what it does, when
+   it would run, what it touches (files, apps, network), and whether each
+   use asks first. Generated by the detection engine from the idea text
+   (one call), with a deterministic fallback from `description`.
+2. Show it at the top of the idea card and the code-review card (a
+   dedicated card layout in `ApprovalAlert.swift`, like #18's), with the
+   technical spec and code still available below / expandable.
+3. Save it with the provenance (#61) so Tool Manager's detail view shows the
+   same summary after install.
+4. Privacy: under a cloud engine the summary prompt follows #31/#51 (no
+   personal text quoted from the triggering events).
+Files: ai/orchestrator.py (or the idea sources) for the summary,
+MenuBarUI/MenuBarUI/Views/ApprovalAlert.swift and CodeReviewAlert.swift,
+tools/meta_tool_generator.py provenance, routes/tool_detail.py.
+Verify:
+⚬ Tests: summary generated for an idea (fake engine), fallback when the
+  engine fails, carried in the approval payload and saved in provenance.
+⚬ swiftc typecheck; live: the next suggested tool's card leads with a plain
+  sentence like "Renames new screenshots on your Desktop to their date.
+  Asks before each run. Touches only ~/Desktop."
+Results (wave 11, 2026-11-10):
+⚬ New `ai/tool_summary.py`: `summarize_idea` makes one analysis-engine
+  call (labelled DOES / WHEN / TOUCHES lines, 5 s bound, think blocks and
+  identifiers stripped) with a deterministic fallback from `description`
+  on any failure, timeout, unloaded engine or junk reply. The "asks
+  first" sentence comes from `READ_ONLY_TOOL_NAMES`, never the model. For
+  code review, "touches" is read from the drafted source (network via
+  `tool_sandbox.network_reason`, apps, folders, file writes). The prompt
+  goes through `privacy.scrub_idea_text(..., "analysis")`.
+⚬ `ai/orchestrator.py`: optional `summary` on the `generate_custom_tool`
+  approval and on the code-approval payload. `tools/meta_tool_generator.py`:
+  summary saved in provenance, rebuilt from the installed source.
+  `routes/tool_detail.py`: new `plain_summary`. WS schemas: optional
+  `summary` on both payloads.
+⚬ Swift: "What this tool would do" leads the idea card (raw call under
+  "Technical details"), "What this tool does" leads code review, and Tool
+  Manager's detail shows it. Without `summary` the old layouts render.
+⚬ Tests: 22 in `tests/test_tool_summary.py`, 10 mutation-checked. Wave
+  gate: 813 passed; Swift type-check clean.
+Deviations: (1) the summary rides on the idea card's approval payload, not
+on `pattern_detected` (covers chat-initiated ideas too). (2) It uses the
+orchestrator's analysis engine, not the detection engine (the
+orchestrator doesn't hold that one). (3) An engine that isn't loaded is
+not asked: fallback. (4) The route key is `plain_summary`; `summary`
+already meant the docstring line (#61).
+
+---
+
+#62 — Larger fonts in the app [~] live
+Wave: 12 · Agent: A · Added: 2026-11-10 · Source: user
 Ask: "We need the fonts larger." The menu bar app's text is too small to
 read comfortably.
 Today (2026-11-10): the Swift views use `.caption` 54 times (thought stream,
@@ -1514,7 +1733,33 @@ Verify:
 ⚬ swiftc typecheck; rebuild; the user confirms the text is readable in the
   panel, the "Open in window" view, Chat, Settings and approval cards.
 ⚬ Nothing is clipped at the panel's fixed size.
-Deviations:
+Results (wave 12, 2026-11-10):
+⚬ New `Views/TextSize.swift`: every view names a role (`.appFont(.secondary)`
+  …) that resolves to a system text style for the current setting; 91 call
+  sites, no `.font(` left in the views, no fixed point sizes. Medium (the
+  default) is one step up: `.caption2` 10 → 11 pt, `.caption` 10 → 12,
+  `.subheadline` 11 → 13, `.callout` 12 → 13. Large is one more step;
+  Small is roughly the old sizes.
+⚬ Settings → Appearance → Text size (Small / Medium / Large),
+  `@AppStorage("textSize")`, applied with `.appTextSize()` at the panel,
+  all four windows and both approval windows (`ApprovalPresenter.swift`).
+⚬ `.dynamicTypeSize` was measured to do nothing on macOS (same 216×13 at
+  every size), so fonts are chosen explicitly per setting. Probe: old
+  caption text 216×13 → 253×15 (Medium) → 271×16 (Large).
+⚬ Frames: panel 420×600 → 460×640; thought stream / debug now fill their
+  container; approval card 480 → 520 wide with the body in a scroll view
+  and the buttons pinned; code review 620 → 680 wide; heights scale with
+  the setting and cap at 740 pt.
+⚬ Verify: type-check and an optimized build (to a scratch path) exit 0;
+  offscreen renders of the approval and code-review cards at all three
+  sizes show nothing clipped. Runner gate: 814 passed.
+Deviations: (1) body text does not shrink in Small. (2) Bordered button
+titles, segmented pickers and tab titles are drawn by AppKit at the system
+size and don't follow the setting. (3) The approval card body is now a
+ScrollView (layout only). (4) Existing `.callout` text also went up one
+step. (5) New default window sizes apply only to windows with no saved
+frame. (6) The panel, Chat, Settings, Manage Tools and Tool Detail were
+not rendered offscreen (they need the daemon): live check.
 
 ---
 
@@ -1606,6 +1851,47 @@ Results (wave 2, 2026-11-09):
 ⚬ Runner: tests now use a temp DB (`AGENT_MEMORY_DB`, set in conftest); the
   integration fixture had been opening the real `~/.bot-inator/memory.db`.
 Deviations: `clear_memory` keeps `chat_log`.
+
+---
+
+#67 — memory.db has no memories: find out whether the agent is saving any [~] live
+Wave: 10 · Agent: B · Added: 2026-11-10 · Source: assistant (usefulness review, user asked to add)
+Ask: On 2026-11-10 `sqlite3 ~/.bot-inator/memory.db "select count(*) from
+memories"` returned 0. Either the #20/#21 live check (`clear_memory`)
+emptied it, or nothing is being saved in normal use. If nothing is saved,
+the agent never learns preferences and recall is always empty.
+Approach:
+1. Investigate first (about 10 minutes): list every call site of
+   `save_memory` and `remember_preference`; check the daemon log for save
+   or embedding errors; use the app for a few turns (state a preference in
+   Chat) and count again.
+2. If rows appear: close as "cleared by the live check", no code change.
+3. If not: fix the save path and add a test that a chat turn stating a
+   preference leaves a row and that the next turn recalls it.
+Files: ai/memory.py, tools/remember_preference.py, ai/orchestrator.py
+(only if a fix is needed), tests/test_memory.py.
+Verify:
+⚬ Live: "remember that I prefer short replies" → count goes up by one; a
+  new chat turn shows the memory in the recalled context (Debug tab).
+⚬ If code changed: pytest gate and the new test's non-vacuity check.
+Results (wave 10, 2026-11-10): NO BUG, no code change in the memory files.
+⚬ `sqlite_sequence` shows `memories|2`: only 2 rows were ever inserted, so
+  the live check removed at most 2. `chat_log` has 218 rows, so the DB is
+  live.
+⚬ The only writer is `tools/remember_preference.py:38`, called only when
+  the model picks the `remember_preference` tool. Nothing extracts
+  preferences from chat or events. No user message in `chat_log` ever
+  asked the agent to remember anything.
+⚬ Save and recall work: on a temp DB with the real embedder the tool
+  saved a row and `recall_memory` returned it after reopen.
+  `_recall_memories` feeds chat, iMessage, mail and generic prompts.
+⚬ Runner change: `_build_chat_prompt` now tells the model to call
+  `remember_preference` when the user states a lasting preference or asks
+  it to remember something (`tests/test_wave10_wiring.py`).
+⚬ Open design point (not scheduled): memory only grows when the user says
+  something explicit and the model picks the tool; there is no automatic
+  learning.
+Deviations: none.
 
 ### Security and providers
 

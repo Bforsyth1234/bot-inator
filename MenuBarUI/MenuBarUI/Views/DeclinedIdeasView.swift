@@ -97,12 +97,12 @@ struct DeclinedIdeasView: View {
             header
             if let error = viewModel.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
+                    .appFont(.secondary)
                     .foregroundStyle(.orange)
             }
             if viewModel.ideas.isEmpty {
                 Text("No declined ideas. Ideas you deny are remembered here so they aren't asked again.")
-                    .font(.caption)
+                    .appFont(.secondary)
                     .foregroundStyle(.secondary)
             } else {
                 List {
@@ -135,9 +135,9 @@ struct DeclinedIdeasView: View {
         HStack(spacing: 8) {
             Image(systemName: "hand.raised.circle")
                 .foregroundStyle(.secondary)
-            Text("Declined ideas").font(.headline)
+            Text("Declined ideas").appFont(.headline)
             Text("\(viewModel.ideas.count)")
-                .font(.caption)
+                .appFont(.secondary)
                 .foregroundStyle(.secondary)
             Spacer()
             Button {
@@ -158,15 +158,15 @@ struct DeclinedIdeasView: View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(idea.name)
-                    .font(.system(.body, design: .monospaced))
+                    .appFont(.body, design: .monospaced)
                 if !idea.description.isEmpty {
                     Text(idea.description)
-                        .font(.caption)
+                        .appFont(.secondary)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
                 Text("Declined \(idea.count)× · last \(idea.lastDeclinedDate.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.caption2)
+                    .appFont(.fine)
                     .foregroundStyle(.secondary)
             }
             Spacer()

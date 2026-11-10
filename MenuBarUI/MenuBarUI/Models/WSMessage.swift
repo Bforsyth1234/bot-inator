@@ -31,6 +31,9 @@ struct ApprovalRequestPayload: Codable, Hashable {
     let toolArgs: JSONValue
     let reasoning: String
     let timeoutSeconds: Int?
+    /// Plain-language summary of a suggested tool (#64). Only set on
+    /// `generate_custom_tool` idea cards; nil from older daemons.
+    let summary: String?
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -39,6 +42,7 @@ struct ApprovalRequestPayload: Codable, Hashable {
         case toolArgs = "tool_args"
         case reasoning
         case timeoutSeconds = "timeout_seconds"
+        case summary
     }
 }
 
@@ -185,6 +189,9 @@ struct CodeApprovalRequestPayload: Codable, Hashable {
     let description: String
     let code: String
     let timeoutSeconds: Int?
+    /// Plain-language summary shown above the code (#64); nil from older
+    /// daemons.
+    let summary: String?
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -193,6 +200,7 @@ struct CodeApprovalRequestPayload: Codable, Hashable {
         case description
         case code
         case timeoutSeconds = "timeout_seconds"
+        case summary
     }
 }
 

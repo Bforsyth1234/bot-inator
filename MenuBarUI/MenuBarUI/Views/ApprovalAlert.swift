@@ -11,6 +11,24 @@ struct ApprovalAlert: View {
     @State private var userNote: String = ""
     @State private var values: [String: String] = [:]
     @State private var populated = false
+    @State private var showTechnical = false
+    @Environment(\.textSize) private var textSize
+
+    /// The plain-language summary of a suggested tool (#64), when the
+    /// daemon sent one. Nil (older daemon, other tools) keeps the old layout.
+    private var toolIdeaSummary: String? {
+        guard payload.toolName == "generate_custom_tool",
+              let text = payload.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// Fixed window height: grows with the Text size setting, capped so the
+    /// buttons stay on a 13" screen (the card scrolls past that).
+    private var windowHeight: CGFloat {
+        let base: CGFloat = toolIdeaSummary != nil ? 580 : (spec?.windowHeight ?? 480)
+        return min(ApprovalEditSpec.maxWindowHeight, (base * textSize.layoutScale).rounded())
+    }
 
     /// The editable card for this tool, or nil for the read-only JSON view.
     private var spec: ApprovalEditSpec? {
@@ -21,37 +39,52 @@ struct ApprovalAlert: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             Divider()
-            reasoningSection
-            if let spec {
-                card(spec)
-            } else {
-                argsSection
+            // #62: the card scrolls between the header and the buttons, so
+            // larger text can never push Approve/Deny out of the window.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let summary = toolIdeaSummary {
+                        toolIdeaCard(summary)
+                    } else {
+                        reasoningSection
+                        if let spec {
+                            card(spec)
+                        } else {
+                            argsSection
+                        }
+                    }
+                    noteSection
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // Room for focus rings, which a scroll view would clip.
+                .padding(3)
             }
-            noteSection
-            Spacer(minLength: 0)
+            .padding(-3)
+            .frame(maxHeight: .infinity)
             buttonRow
         }
         .padding(18)
-        .frame(width: 480, height: spec?.windowHeight ?? 460)
+        .frame(width: 520, height: windowHeight)
         .onAppear(perform: populate)
     }
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.shield.fill")
+            Image(systemName: toolIdeaSummary != nil
+                  ? "lightbulb.fill" : "exclamationmark.shield.fill")
                 .foregroundStyle(.orange)
-                .font(.title2)
+                .appFont(.title2)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Approval Required")
-                    .font(.headline)
+                Text(toolIdeaSummary != nil ? "New Tool Idea" : "Approval Required")
+                    .appFont(.headline)
                 Text(payload.toolName)
-                    .font(.subheadline.monospaced())
+                    .appFont(.label, design: .monospaced)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             if let timeout = payload.timeoutSeconds {
                 Text("\(timeout)s")
-                    .font(.caption.monospaced())
+                    .appFont(.secondary, design: .monospaced)
                     .foregroundStyle(.secondary)
             }
         }
@@ -61,7 +94,7 @@ struct ApprovalAlert: View {
         VStack(alignment: .leading, spacing: 4) {
             caption("Reasoning")
             Text(payload.reasoning)
-                .font(.body)
+                .appFont(.body)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -72,7 +105,7 @@ struct ApprovalAlert: View {
             caption("Arguments")
             ScrollView {
                 Text(payload.toolArgs.prettyPrinted())
-                    .font(.system(.caption, design: .monospaced))
+                    .appFont(.secondary, design: .monospaced)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
@@ -82,6 +115,31 @@ struct ApprovalAlert: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25))
             )
+        }
+    }
+
+    // MARK: - Suggested-tool card (#64)
+
+    /// Leads with the plain-language summary; the raw call (name,
+    /// description, expected logic) stays available under a disclosure.
+    private func toolIdeaCard(_ summary: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                caption("What this tool would do")
+                Text(summary)
+                    .appFont(.body)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Approving lets the assistant draft the code. You review that code before it is installed.")
+                .appFont(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            DisclosureGroup(isExpanded: $showTechnical) {
+                argsSection.padding(.top, 4)
+            } label: {
+                caption("Technical details")
+            }
         }
     }
 
@@ -102,7 +160,7 @@ struct ApprovalAlert: View {
                 VStack(alignment: .leading, spacing: 2) {
                     caption(row.label)
                     Text(row.value)
-                        .font(.body)
+                        .appFont(.body)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -112,7 +170,7 @@ struct ApprovalAlert: View {
                     caption(field.required ? field.label : "\(field.label) (optional)")
                     if field.multiline {
                         TextEditor(text: binding(field.key))
-                            .font(.body)
+                            .appFont(.body)
                             .frame(minHeight: 80)
                             .padding(6)
                             .background(Color(nsColor: .textBackgroundColor),
@@ -124,8 +182,7 @@ struct ApprovalAlert: View {
                     } else {
                         TextField(field.placeholder, text: binding(field.key))
                             .textFieldStyle(.roundedBorder)
-                            .font(field.monospaced
-                                  ? .system(.body, design: .monospaced) : .body)
+                            .appFont(.body, design: field.monospaced ? .monospaced : .default)
                     }
                 }
             }
@@ -138,7 +195,7 @@ struct ApprovalAlert: View {
 
     private func caption(_ text: String) -> some View {
         Text(text)
-            .font(.caption.weight(.semibold))
+            .appFont(.secondary, weight: .semibold)
             .foregroundStyle(.secondary)
     }
 
@@ -219,9 +276,12 @@ struct ApprovalEditSpec {
 
     var windowHeight: CGFloat {
         let rows = readOnly([:]).count  // count is independent of values
-        let fieldHeight = fields.reduce(CGFloat(0)) { $0 + ($1.multiline ? 116 : 52) }
-        return min(720, 330 + fieldHeight + CGFloat(rows) * 40)
+        let fieldHeight = fields.reduce(CGFloat(0)) { $0 + ($1.multiline ? 122 : 58) }
+        return min(Self.maxWindowHeight, 350 + fieldHeight + CGFloat(rows) * 46)
     }
+
+    /// Tallest approval card: fits under the menu bar on a 13" display.
+    static let maxWindowHeight: CGFloat = 740
 
     func isComplete(_ values: [String: String]) -> Bool {
         fields.allSatisfy { field in
@@ -361,6 +421,32 @@ struct ApprovalEditSpec {
                     .init(key: "title", label: "Note title (exact)", required: true),
                     .init(key: "text", label: "Text to append", multiline: true, required: true),
                 ]
+            ),
+            // Drafts only (#63): the daemon has no tool that sends mail. The
+            // card says so, and the button never says "Send".
+            ApprovalEditSpec(
+                toolName: "draft_email",
+                params: ["to", "subject", "body", "cc", "reply_to_message_id"],
+                fields: [
+                    .init(key: "to", label: "To", placeholder: "name@example.com, …",
+                          required: true, monospaced: true),
+                    .init(key: "cc", label: "Cc", placeholder: "name@example.com, …",
+                          monospaced: true),
+                    .init(key: "subject", label: "Subject"),
+                    .init(key: "body", label: "Body", multiline: true, required: true),
+                ],
+                approveLabel: "Approve & Create Draft",
+                readOnly: { kw in
+                    let replyId = nonEmpty(kw["reply_to_message_id"]?.displayText)
+                    let isReply = replyId != nil && replyId != "0"
+                    let kind = isReply
+                        ? "Opens a reply draft in Mail, threaded under the original message."
+                        : "Opens a new draft in Mail."
+                    return [
+                        .init(label: "Draft only — nothing is sent",
+                              value: "\(kind) You review it and press Send in Mail yourself."),
+                    ]
+                }
             ),
             ApprovalEditSpec(
                 toolName: "run_shortcut",

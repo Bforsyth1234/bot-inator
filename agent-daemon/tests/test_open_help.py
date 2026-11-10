@@ -11,6 +11,7 @@ import pytest
 
 import ai  # noqa: F401  - must precede ``tools`` (circular import)
 from ai.open_help import (
+    CONTENT_EVENT_TYPES,
     GUIDING_QUESTION,
     IDEA_JUDGE_SYSTEM_PROMPT,
     OPEN_HELP_SYSTEM_PROMPT,
@@ -18,6 +19,7 @@ from ai.open_help import (
     OpenHelpSuggester,
     evaluate_windows,
     grounded_in_events,
+    is_app_switcher,
     load_windows,
     parse_judge,
     parse_score,
@@ -285,7 +287,9 @@ def test_evaluation_windows_fixture() -> None:
     assert {"live_invoice_template", "live_csv_merge", "live_csv_diff"} <= ids
     assert {c["expected"] for c in cases} == {"pass", "drop"}
     for case in cases:
-        assert passes_checks(case["idea"]), case["id"]
+        # Every recorded idea is well formed; the only ones the
+        # deterministic checks may refuse are the app switchers (#66).
+        assert passes_checks(case["idea"]) or is_app_switcher(case["idea"]), case["id"]
 
 
 def test_good_windows_survive_deterministic_checks() -> None:
@@ -304,3 +308,159 @@ def test_evaluation_reports_pass_rate() -> None:
     assert all(r["got"] == "drop" for r in results)
     report = summarize(results)
     assert f"pass rate 0/{len(results)}" in report
+
+
+# ---- #66: content grounding, no app switchers -------------------------
+
+SWITCHER = {
+    "tool_name": "toggle_chrome_claude",
+    "description": "Switches focus between Google Chrome and Claude with a single hotkey.",
+    "expected_logic": (
+        "Input: none. Read the frontmost app with osascript; if it is Google "
+        "Chrome activate Claude, otherwise activate Google Chrome."
+    ),
+}
+
+
+def _app(name: str, title: str | None = None) -> ContextEvent:
+    return ContextEvent(event_type="app_activated", app_name=name, window_title=title)
+
+
+def test_app_only_window_makes_no_model_call() -> None:
+    # Six app switches, far past min_events, with an idea that names both
+    # apps: before #66 this asked the model, judged and published.
+    events = [_app("Google Chrome"), _app("Claude")] * 3
+    published, asks, judged, s = _run(events, reply=json.dumps(SWITCHER), interval_seconds=0)
+    assert asks == [] and judged == [] and published == []
+    assert s.last_verdict["stage"] == "no_content"
+
+
+def test_clipboard_and_window_titles_are_not_content() -> None:
+    assert "app_activated" not in CONTENT_EVENT_TYPES
+    assert "clipboard_changed" not in CONTENT_EVENT_TYPES
+    events = [
+        _app("Numbers", "Q3 budget.numbers"),
+        ContextEvent(event_type="clipboard_changed", app_name="Numbers",
+                     metadata={"app": "Numbers", "kind": "text"}),
+        _app("Mail", "Q3 budget"),
+    ] * 2
+    idea = dict(IDEA, tool_name="budget_to_mail", description="Paste the Q3 budget into Mail.")
+    published, asks, _, _ = _run(events, reply=json.dumps(idea), interval_seconds=0)
+    assert asks == [] and published == []
+
+
+def test_content_event_after_app_switches_asks_at_once() -> None:
+    # The app-only stretch must not swallow the trigger: the first content
+    # event asks, and the idea naming that file passes.
+    events = [_app("Finder"), _app("Preview"), _app("Finder"), _file("Screenshot 1.png")]
+    published, asks, judged, _ = _run(events)
+    assert len(asks) == 1 and len(judged) == 1 and len(published) == 1
+    assert "switched to Finder" in asks[0] and "Screenshot 1.png" in asks[0]
+
+
+def test_no_second_call_until_new_content() -> None:
+    files = [_file(f"Screenshot {i}.png") for i in range(3)]
+    switches = [_app("Google Chrome"), _app("Claude")] * 3
+    _, asks, _, _ = _run(files + switches, interval_seconds=0)
+    assert len(asks) == 1
+    _, asks, _, _ = _run(files + switches + [_file("Screenshot 9.png")], interval_seconds=0)
+    assert len(asks) == 2
+
+
+def test_app_switcher_idea_dropped_before_judge() -> None:
+    # Files are in the window, so the model is asked; its app-switcher
+    # answer never reaches the judge.
+    events = [_file("report 1.csv"), _app("Google Chrome"), _app("Claude")]
+    published, asks, judged, s = _run(events, reply=json.dumps(SWITCHER))
+    assert len(asks) == 1 and judged == [] and published == []
+    assert s.last_verdict["stage"] == "app_switcher"
+
+
+def test_idea_naming_a_file_event_still_passes_among_app_switches() -> None:
+    events = [_app("Finder"), _file("Screenshot 1.png"), _app("Preview"),
+              _file("Screenshot 2.png"), _app("Finder"), _file("Screenshot 3.png")]
+    published, _, judged, s = _run(events)
+    assert len(judged) == 1 and len(published) == 1
+    assert published[0].metadata["tool_name"] == "rename_screenshots_by_date"
+    assert s.last_verdict["stage"] == "passed"
+
+
+def test_app_name_alone_does_not_ground_an_idea() -> None:
+    text = (
+        "Recent events (oldest first):\n"
+        "- switched to Google Chrome — GitHub\n"
+        "- file modified: /Users/me/dev/shop/src/cart.py\n"
+        "- switched to Claude"
+    )
+    bookmarks = {"tool_name": "chrome_bookmark_exporter",
+                 "description": "Export Google Chrome bookmarks to an HTML page."}
+    assert not grounded_in_events(bookmarks, text)
+    assert not grounded_in_events({"tool_name": "github_opener", "description": "x"}, text)
+    assert grounded_in_events({"tool_name": "run_cart_tests", "description": "x"}, text)
+    # Mail and calendar events ground through their subject and title,
+    # not through their metadata keys.
+    mail = '- mail_received: {"sender": "a@b.c", "subject": "Invoice 1042 overdue", "bulk": false}'
+    assert grounded_in_events({"tool_name": "file_invoice", "description": "x"}, mail)
+    assert not grounded_in_events({"tool_name": "subject_sorter", "description": "Sort by date"}, mail)
+
+
+def test_is_app_switcher() -> None:
+    def idea(name: str, desc: str) -> dict:
+        return {"tool_name": name, "description": desc}
+
+    apps = ("Google Chrome", "Claude", "Microsoft Teams", "System Settings")
+    # The real ideas from 2026-11-10 (idea_feedback.json).
+    for name, desc in [
+        ("app_switcher", "Quickly switch between frequently used apps"),
+        ("recently_used_apps", "Show a list of the 5 most recently used apps"),
+        ("toggle_chrome_claude", "Switches focus between Google Chrome and Claude with a single hotkey."),
+        ("chrome_teams_switcher", "Toggle focus between Google Chrome and Microsoft Teams."),
+        ("switch_between_chrome_and_claude",
+         "Automatically activates Claude after Chrome becomes the frontmost app."),
+        ("system_settings_switcher",
+         "Switch between System Settings and Claude by typing the first letters of each name."),
+        ("count_app_switches",
+         'Counts occurrences of each app in recent "switched to" events and returns a sorted frequency list.'),
+        ("summarize_app_switches",
+         "Parse activity logs to count app switches and extract received iMessage texts."),
+    ]:
+        assert is_app_switcher(idea(name, desc), apps), name
+        assert not passes_checks(dict(IDEA, tool_name=name, description=desc), apps), name
+    # The name alone is enough, and so is the description alone.
+    assert is_app_switcher(idea("count_app_switches", "x"))
+    assert is_app_switcher(idea("workflow_helper", "Quickly switch between frequently used apps"))
+    assert is_app_switcher(idea("toggle_chrome_claude", "x"), apps)
+    # Not app switchers.
+    for name, desc in [
+        (IDEA["tool_name"], IDEA["description"]),
+        ("toggle_dark_mode", "Toggle dark mode on a schedule."),
+        ("list_downloads", "List the newest files in Downloads."),
+        ("count_words", "Count the words in a text file."),
+        ("convert_heic_to_jpeg", "Convert HEIC photos to JPEG next to the original, without opening Preview."),
+        ("merge_csv_exports", "Merge CSV exports so you stop switching between Numbers and Mail."),
+        ("mail_totals_to_numbers",
+         "Copy invoice totals from selected Mail messages into the open Numbers sheet."),
+    ]:
+        assert not is_app_switcher(idea(name, desc), ("Mail", "Numbers", "Preview")), name
+
+
+def test_prompts_rule_out_app_switchers() -> None:
+    assert "Do not propose app switchers" in OPEN_HELP_SYSTEM_PROMPT
+    assert "switches, toggles, focuses, lists or counts apps" in IDEA_JUDGE_SYSTEM_PROMPT
+    assert "always scores 0-3" in IDEA_JUDGE_SYSTEM_PROMPT
+
+
+def test_fixture_app_switch_windows_drop_at_the_expected_stage() -> None:
+    # Judge passes everything: only the deterministic stages can drop.
+    cases = {c["id"]: c for c in load_windows()}
+    results = {r["id"]: r for r in _windows_with(10)}
+    staged = {i: c["stage"] for i, c in cases.items() if "stage" in c}
+    assert {"no_content", "app_switcher", "grounding"} <= set(staged.values())
+    assert sum(s == "no_content" for s in staged.values()) >= 3
+    for case_id, stage in staged.items():
+        assert results[case_id]["got"] == "drop", results[case_id]
+        assert results[case_id]["stage"] == stage, results[case_id]
+    # App-only windows hold no content event at all.
+    for case_id, stage in staged.items():
+        types = {e["event_type"] for e in cases[case_id]["events"]}
+        assert (stage == "no_content") == (not types & CONTENT_EVENT_TYPES), case_id

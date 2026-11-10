@@ -951,3 +951,37 @@ Wave-close run: full suite 679 passed (×3 by the agent, ×1 by the runner);
 Swift type-check clean; Info.plist valid. #60 (Calendar through EventKit in
 the menu bar app) built and waits as `[~] live`. Every todo item is now
 built; what remains is the combined live-check list.
+
+## Wave 10 — closed 2026-11-10
+
+Wave-close run: full suite 791 passed; Swift type-check clean. Built and
+waiting as `[~] live`: #63 (email drafts in Mail, never sends), #65
+(morning brief: scheduler, `brief_me`, Settings section), #66 (open-help,
+friction and pattern ideas no longer propose app switchers). #67 found no
+bug: only 2 memories were ever saved because the model must choose
+`remember_preference`; the chat prompt now names it. Write-ups stay in
+todo.md until the live checks run.
+
+## Wave 11 — closed 2026-11-10
+
+Wave-close run: full suite 813 passed (agent), Swift type-check clean.
+#64 (plain-language tool summary on the idea card, the code-review card
+and Tool Manager) built and waits as `[~] live`.
+
+#68 — Idea scrub leaked the last word of a single-quoted quote [x]
+Added and fixed 2026-11-10 by the runner (found by the #64 agent).
+`privacy.scrub_personal_text` turned `'dinner at 7 with Sam'` into
+`'[placeholder] Sam'`: `_WORD_RE` kept the closing apostrophe in the token
+(`sam'`), so the last n-gram never matched the personal text. This reached
+the #51 pattern prompt and the #64 summary prompt under a cloud engine.
+Fix: `_words` in `ai/privacy.py` drops trailing apostrophes from each
+token. Test: `tests/test_idea_privacy.py::
+test_single_quoted_quote_does_not_leak_its_last_word` (fails without the
+fix). Not changed: tool names (e.g. `dinner_reminder`) are never scrubbed.
+
+## Wave 12 — closed 2026-11-10
+
+Wave-close run: full suite 814 passed (runner); Swift type-check and an
+optimized build clean. #62 (larger fonts, Text size setting) built and
+waits as `[~] live`. No `[ ]` item is left in todo.md; what remains is
+the combined live-check list.

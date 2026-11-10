@@ -39,6 +39,9 @@ class ApprovalRequestPayload(BaseModel):
     tool_args: dict[str, Any] = Field(default_factory=dict)
     reasoning: str
     timeout_seconds: int = 120
+    # Plain-language summary of a suggested tool (#64): set on
+    # ``generate_custom_tool`` idea cards, ``None`` otherwise.
+    summary: str | None = None
 
 
 class ApprovalResponsePayload(BaseModel):
@@ -66,6 +69,9 @@ class CodeApprovalRequestPayload(BaseModel):
     description: str
     code: str
     timeout_seconds: int = 300
+    # Plain-language summary shown above the code (#64): what the tool
+    # does, when it runs, what the drafted source touches, that it asks.
+    summary: str | None = None
 
 
 class CodeApprovalResponsePayload(BaseModel):

@@ -1,0 +1,118 @@
+[
+ {"id": "chat_open_url", "kind": "chat", "text": "Open github.com in my browser",
+  "expect": [{"tool": "open_url", "args": {"url": {"contains": "github.com"}}}]},
+
+ {"id": "chat_open_app", "kind": "chat", "text": "Open the Calculator app",
+  "allow": ["list_windows"],
+  "expect": [{"tool": "open_app", "args": {"name": {"contains": "calculator"}}}]},
+
+ {"id": "chat_read_clipboard", "kind": "chat", "text": "What's on my clipboard right now?",
+  "tool_results": {"read_clipboard": {"status": "ok", "text": "42 Example Street"}},
+  "expect": [{"tool": "read_clipboard"}]},
+
+ {"id": "chat_write_clipboard", "kind": "chat", "text": "Copy the text 'hello world' to my clipboard",
+  "expect": [{"tool": "write_clipboard", "args": {"text": {"contains": "hello world"}}}]},
+
+ {"id": "chat_create_reminder", "kind": "chat", "text": "Remind me to call the dentist",
+  "expect": [{"tool": "create_reminder", "args": {"title": {"contains": "dentist"}}}]},
+
+ {"id": "chat_list_reminders", "kind": "chat", "text": "What reminders do I have?",
+  "tool_results": {"list_reminders": {"status": "ok", "reminders": [{"title": "Buy stamps", "due": null}]}},
+  "expect": [{"tool": "list_reminders"}]},
+
+ {"id": "chat_list_events", "kind": "chat", "text": "What's on my calendar?",
+  "tool_results": {"list_events": {"status": "ok", "events": [{"title": "Standup", "start": "2026-12-01T09:00:00"}]}},
+  "expect": [{"tool": "list_events"}]},
+
+ {"id": "chat_create_event", "kind": "chat",
+  "text": "Add a calendar event called Team sync on 2026-12-01 at 3pm",
+  "expect": [{"tool": "create_event",
+              "args": {"title": {"contains": "team sync"}, "start": {"contains": "2026-12-01"}}}]},
+
+ {"id": "chat_find_files", "kind": "chat", "text": "Find my files about the tax return",
+  "tool_results": {"find_files": {"status": "ok", "files": [{"path": "/Users/me/Documents/tax_return_2025.pdf"}]}},
+  "expect": [{"tool": "find_files", "args": {"query": {"contains": "tax"}}}]},
+
+ {"id": "chat_summarize_file", "kind": "chat", "text": "Summarize the file /Users/me/Documents/notes.txt",
+  "tool_results": {"summarize_file": {"status": "ok", "path": "/Users/me/Documents/notes.txt", "preview": "Buy paint. Call the plumber on Friday."}},
+  "expect": [{"tool": "summarize_file", "args": {"path": {"equals": "/Users/me/Documents/notes.txt"}}}]},
+
+ {"id": "chat_move_file", "kind": "chat",
+  "text": "Move /Users/me/Downloads/report.pdf into /Users/me/Documents",
+  "expect": [{"tool": "move_file",
+              "args": {"src": {"equals": "/Users/me/Downloads/report.pdf"},
+                       "dst_dir": {"contains": "/Users/me/Documents"}}}]},
+
+ {"id": "chat_remember_preference", "kind": "chat", "text": "Remember that I prefer dark mode in every app",
+  "expect": [{"tool": "remember_preference", "args": {"preference": {"contains": "dark mode"}}}]},
+
+ {"id": "chat_create_note", "kind": "chat", "text": "Create a note titled Groceries with the text milk and eggs",
+  "expect": [{"tool": "create_note",
+              "args": {"title": {"contains": "groceries"}, "body": {"contains": "milk"}}}]},
+
+ {"id": "chat_list_windows", "kind": "chat", "text": "Which windows do I have open?",
+  "tool_results": {"list_windows": {"status": "ok", "windows": [{"app": "Safari", "title": "Example Domain"}]}},
+  "expect": [{"tool": "list_windows"}]},
+
+ {"id": "chat_active_tab", "kind": "chat", "text": "What page am I looking at in my browser?",
+  "tool_results": {"read_active_tab": {"status": "ok", "url": "https://example.com/", "title": "Example Domain"},
+                   "read_active_tab_text": {"status": "ok", "url": "https://example.com/", "title": "Example Domain", "text": "Example Domain"}},
+  "expect": [{"tool": ["read_active_tab", "read_active_tab_text"]}]},
+
+ {"id": "chat_notification", "kind": "chat", "text": "Show me a notification that says Stand up",
+  "expect": [{"tool": "show_notification"}]},
+
+ {"id": "chat_run_shortcut", "kind": "chat", "text": "Run my shortcut called Morning Routine",
+  "allow": ["list_shortcuts"],
+  "tool_results": {"list_shortcuts": {"status": "ok", "shortcuts": ["Morning Routine", "Focus"]}},
+  "expect": [{"tool": "run_shortcut", "args": {"name": {"contains": "morning routine"}}}]},
+
+ {"id": "chat_new_tool", "kind": "chat", "text": "Start a 25 minute pomodoro timer",
+  "allow": ["list_shortcuts"],
+  "tool_results": {"list_shortcuts": {"status": "ok", "shortcuts": ["Focus"]},
+                   "generate_custom_tool": {"status": "ok", "tool_name": "pomodoro_timer"}},
+  "expect": [{"tool": "generate_custom_tool", "args": {"tool_name": {"contains": "timer"}}}]},
+
+ {"id": "chat_definition_no_tool", "kind": "chat", "text": "What does idempotent mean?",
+  "expect": []},
+
+ {"id": "chat_thanks_no_tool", "kind": "chat", "text": "Thanks, that's all for now",
+  "expect": []},
+
+ {"id": "mail_task_reminder", "kind": "event",
+  "event": {"event_type": "mail_received",
+            "metadata": {"sender": "Sam Rivera <sam@example.org>", "subject": "Reminder: take the dog on a walk",
+                         "mailbox": "INBOX", "message_id": 4201}},
+  "tool_results": {"read_email": {"status": "ok", "message_id": 4201, "sender": "Sam Rivera <sam@example.org>",
+                                  "subject": "Reminder: take the dog on a walk", "date": "Tue, 10 Nov 2026 09:00:00 -0700",
+                                  "body": "Hi, please remember to take the dog on a walk this evening. Thanks!",
+                                  "truncated": false, "partial": false}},
+  "expect": [{"tool": "read_email", "args": {"message_id": {"equals": 4201}}},
+             {"tool": "create_reminder", "args": {"title": {"contains": "dog"}}}]},
+
+ {"id": "mail_meeting_event", "kind": "event",
+  "event": {"event_type": "mail_received",
+            "metadata": {"sender": "Alex Chen <alex@example.org>", "subject": "Lunch next week",
+                         "mailbox": "INBOX", "message_id": 4202}},
+  "tool_results": {"read_email": {"status": "ok", "message_id": 4202, "sender": "Alex Chen <alex@example.org>",
+                                  "subject": "Lunch next week", "date": "Tue, 10 Nov 2026 10:00:00 -0700",
+                                  "body": "Let's meet for lunch on 2026-12-03 at 12:30 at Cafe Roma. See you there.",
+                                  "truncated": false, "partial": false}},
+  "expect": [{"tool": "read_email", "args": {"message_id": {"equals": 4202}}},
+             {"tool": "create_event", "args": {"start": {"contains": "2026-12-03"}}}]},
+
+ {"id": "mail_receipt_no_action", "kind": "event",
+  "event": {"event_type": "mail_received",
+            "metadata": {"sender": "Acme Store <orders@example.com>", "subject": "Your receipt from Acme Store",
+                         "mailbox": "INBOX", "message_id": 4203}},
+  "tool_results": {"read_email": {"status": "ok", "message_id": 4203, "sender": "Acme Store <orders@example.com>",
+                                  "subject": "Your receipt from Acme Store", "date": "Tue, 10 Nov 2026 11:00:00 -0700",
+                                  "body": "Thank you for your purchase. Order 1001. Total: $12.00. No action is needed.",
+                                  "truncated": false, "partial": false}},
+  "expect": [{"tool": "read_email", "args": {"message_id": {"equals": 4203}}}]},
+
+ {"id": "event_file_no_action", "kind": "event",
+  "event": {"event_type": "file",
+            "metadata": {"path": "/Users/me/Downloads/photo.jpg", "action": "created"}},
+  "expect": []}
+]

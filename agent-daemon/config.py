@@ -30,6 +30,14 @@ GROQ_DEFAULT_MODELS: dict[str, str] = {
     "GROQ_DRAFTING_MODEL": "openai/gpt-oss-120b",
 }
 
+# Local MLX model defaults: small enough (~14 GB total) for any Apple
+# Silicon Mac. Bigger machines override them with ``MLX_*_MODEL``.
+MLX_DEFAULT_MODELS: dict[str, str] = {
+    "MLX_MAIN_MODEL": "mlx-community/Hermes-3-Llama-3.1-8B-4bit",
+    "MLX_ANALYSIS_MODEL": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    "MLX_DRAFTING_MODEL": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
+}
+
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +102,26 @@ class Settings:
     provider_drafting: str = field(
         default_factory=lambda: _env("AGENT_PROVIDER_DRAFTING", "")
     )
-    model_path: str = "mlx-community/Hermes-3-Llama-3.1-8B-4bit"
-    analysis_model_path: str = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
-    # Code-specialist model used exclusively by the meta-tool generator
-    # to draft new @tool modules. Kept separate from ``model_path`` so the
-    # tool-calling agent can stay on a generalist chat model while drafts
-    # are produced by a model trained primarily on source code.
-    drafting_model_path: str = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"
+    # Local MLX models (Hugging Face repo ids or local paths), overridable
+    # via ``MLX_MAIN_MODEL`` / ``MLX_ANALYSIS_MODEL`` / ``MLX_DRAFTING_MODEL``.
+    # The drafting model is used only by the meta-tool generator to draft
+    # new @tool modules, so it can be a code specialist while the
+    # tool-calling agent stays on a generalist chat model.
+    model_path: str = field(
+        default_factory=lambda: _env(
+            "MLX_MAIN_MODEL", MLX_DEFAULT_MODELS["MLX_MAIN_MODEL"]
+        )
+    )
+    analysis_model_path: str = field(
+        default_factory=lambda: _env(
+            "MLX_ANALYSIS_MODEL", MLX_DEFAULT_MODELS["MLX_ANALYSIS_MODEL"]
+        )
+    )
+    drafting_model_path: str = field(
+        default_factory=lambda: _env(
+            "MLX_DRAFTING_MODEL", MLX_DEFAULT_MODELS["MLX_DRAFTING_MODEL"]
+        )
+    )
     # Groq settings. ``groq_api_key`` falls back to the ``GROQ_API_KEY``
     # environment variable so the secret is never committed. Model ids
     # follow Groq's catalogue (https://console.groq.com/docs/models) and

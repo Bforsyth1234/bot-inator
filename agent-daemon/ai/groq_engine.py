@@ -14,7 +14,7 @@ import logging
 import threading
 from typing import Any, Optional
 
-from .mlx_engine import EVENT_ANALYSIS_SYSTEM_PROMPT, _THINK_BLOCK_RE
+from .mlx_engine import EVENT_ANALYSIS_SYSTEM_PROMPT, THINK_BLOCK_RE
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ class GroqEngine:
         except Exception:
             logger.exception("evaluate_event (groq) failed")
             return ""
-        return _THINK_BLOCK_RE.sub("", raw or "").strip()
+        return THINK_BLOCK_RE.sub("", raw or "").strip()
 
     # ---- internal helpers --------------------------------------------
 

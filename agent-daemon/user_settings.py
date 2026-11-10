@@ -24,9 +24,16 @@ ALLOWED_KEYS = frozenset({
     "GROQ_MAIN_MODEL",
     "GROQ_ANALYSIS_MODEL",
     "GROQ_DRAFTING_MODEL",
+    "MLX_MAIN_MODEL",
+    "MLX_ANALYSIS_MODEL",
+    "MLX_DRAFTING_MODEL",
     # "1"/"0": let cloud engines see email and message text (#52). Read
     # live by ai.privacy.personal_text_allowed, so it needs no restart.
     "AGENT_CLOUD_PERSONAL_TEXT",
+    # Morning brief (#65): "1"/"0" (default on) and "HH:MM" local time
+    # (default "08:00"). Read live by events.daily_brief; no restart.
+    "AGENT_DAILY_BRIEF",
+    "AGENT_DAILY_BRIEF_TIME",
 })
 PROVIDERS = ("local", "groq")
 

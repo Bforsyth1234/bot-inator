@@ -11,7 +11,7 @@ struct ThoughtStreamView: View {
             Divider()
             footer
         }
-        .frame(width: 420, height: 520)
+        .frame(minWidth: 380, maxWidth: .infinity, minHeight: 300, maxHeight: .infinity)
         .onAppear { ws.connect() }
     }
 
@@ -23,12 +23,12 @@ struct ThoughtStreamView: View {
                 .fill(ws.isConnected ? Color.green : Color.red)
                 .frame(width: 8, height: 8)
             Text(ws.isConnected ? "Connected" : "Disconnected")
-                .font(.caption)
+                .appFont(.secondary)
                 .foregroundStyle(.secondary)
             Spacer()
             if let state = ws.lastStatus?.state {
                 Text(state.rawValue)
-                    .font(.caption.monospaced())
+                    .appFont(.secondary, design: .monospaced)
                     .foregroundStyle(.secondary)
             }
         }
@@ -93,7 +93,7 @@ struct ThoughtStreamView: View {
             } label: { Label("Quit", systemImage: "power") }
         }
         .buttonStyle(.borderless)
-        .font(.caption)
+        .appFont(.secondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
     }
@@ -114,13 +114,13 @@ private struct ThoughtRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Text(Self.timeFormatter.string(from: timestamp))
-                    .font(.caption2.monospaced())
+                    .appFont(.fine, design: .monospaced)
                     .foregroundStyle(.secondary)
                 StageBadge(stage: payload.stage)
                 Spacer()
             }
             Text(payload.content)
-                .font(.body)
+                .appFont(.body)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -132,7 +132,7 @@ private struct StageBadge: View {
 
     var body: some View {
         Text(stage.rawValue)
-            .font(.caption2.weight(.semibold))
+            .appFont(.fine, weight: .semibold)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(color.opacity(0.18), in: Capsule())

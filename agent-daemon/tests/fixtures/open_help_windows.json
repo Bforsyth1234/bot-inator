@@ -177,7 +177,8 @@
    "tool_name": "recent_apps",
    "description": "List the apps the user switched between recently, such as Finder, Safari and Terminal.",
    "expected_logic": "Input: limit (int, default 10). Read the agent's recent app_activated history and return app names with the time each was last frontmost, newest first. If there is no history, return an empty list."
-  }
+  },
+  "stage": "no_content"
  },
  {
   "id": "unrelated_water_reminder",
@@ -412,6 +413,297 @@
    "tool_name": "file_bank_statement",
    "description": "Move a downloaded bank statement CSV into Documents/Finance/<year>.",
    "expected_logic": "Input: path (str) to a statement_YYYY-MM.csv file. Read the year from the name, create ~/Documents/Finance/<year> if needed, and move the file there unless a file with that name exists. dry_run defaults to True and only returns the destination. If the name has no year, return an error."
+  }
+ },
+ {
+  "id": "app_only_toggle_chrome_claude",
+  "expected": "drop",
+  "stage": "no_content",
+  "note": "2026-11-10 idea_feedback.json: the user switched between Chrome and Claude and was offered a toggle. Only app switches in the window: no model call at all (#66).",
+  "events": [
+   {
+    "event_type": "app_activated",
+    "app_name": "Google Chrome",
+    "window_title": "Inbox",
+    "metadata": {
+     "bundle_id": "com.google.Chrome",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Claude",
+    "window_title": "Claude",
+    "metadata": {
+     "bundle_id": "com.anthropic.claudefordesktop",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Google Chrome",
+    "window_title": "Inbox",
+    "metadata": {
+     "bundle_id": "com.google.Chrome",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Claude",
+    "window_title": "Claude",
+    "metadata": {
+     "bundle_id": "com.anthropic.claudefordesktop",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Google Chrome",
+    "window_title": "Inbox",
+    "metadata": {
+     "bundle_id": "com.google.Chrome",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Claude",
+    "window_title": "Claude",
+    "metadata": {
+     "bundle_id": "com.anthropic.claudefordesktop",
+     "pid": 100
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "toggle_chrome_claude",
+   "description": "Switches focus between Google Chrome and Claude with a single hotkey.",
+   "expected_logic": "Input: none. Use osascript to read the frontmost app; if it is Google Chrome activate Claude, otherwise activate Google Chrome. Return the name of the app that was activated."
+  }
+ },
+ {
+  "id": "app_only_count_app_switches",
+  "expected": "drop",
+  "stage": "no_content",
+  "note": "2026-11-10 idea_feedback.json: a tool that counts app switches (Screen Time already does). Only app switches in the window: no model call (#66).",
+  "events": [
+   {
+    "event_type": "app_activated",
+    "app_name": "Google Chrome",
+    "window_title": "Inbox",
+    "metadata": {
+     "bundle_id": "com.google.Chrome",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Microsoft Teams",
+    "window_title": "Chat",
+    "metadata": {
+     "bundle_id": "com.microsoft.teams2",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Google Chrome",
+    "window_title": "Inbox",
+    "metadata": {
+     "bundle_id": "com.google.Chrome",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Claude",
+    "window_title": "Claude",
+    "metadata": {
+     "bundle_id": "com.anthropic.claudefordesktop",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Microsoft Teams",
+    "window_title": "Chat",
+    "metadata": {
+     "bundle_id": "com.microsoft.teams2",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Google Chrome",
+    "window_title": "Inbox",
+    "metadata": {
+     "bundle_id": "com.google.Chrome",
+     "pid": 100
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "count_app_switches",
+   "description": "Counts occurrences of each app in recent \"switched to\" events and returns a sorted frequency list.",
+   "expected_logic": "Input: events_text (str). Find every line starting with 'switched to', take the app name, count each name and return a list of (app, count) sorted by count descending. Empty input returns an empty list."
+  }
+ },
+ {
+  "id": "app_only_window_title_idea",
+  "expected": "drop",
+  "stage": "no_content",
+  "note": "A plausible idea built from window titles alone. Focus is not content: with no file, mail, message or calendar event the window makes no model call (#66).",
+  "events": [
+   {
+    "event_type": "app_activated",
+    "app_name": "Numbers",
+    "window_title": "Q3 budget.numbers",
+    "metadata": {
+     "bundle_id": "com.apple.iWork.Numbers",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Preview",
+    "window_title": "Q3 budget.pdf",
+    "metadata": {
+     "bundle_id": "com.apple.Preview",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Numbers",
+    "window_title": "Q3 budget.numbers",
+    "metadata": {
+     "bundle_id": "com.apple.iWork.Numbers",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Preview",
+    "window_title": "Q3 budget.pdf",
+    "metadata": {
+     "bundle_id": "com.apple.Preview",
+     "pid": 100
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "export_budget_sheet_to_pdf",
+   "description": "Export the open Numbers budget sheet to a PDF next to the original.",
+   "expected_logic": "Input: path (str) to a .numbers document, dry_run (bool, default True). Use osascript to ask Numbers to export the document as PDF beside the original; dry_run only returns the target path. Error if the path does not exist."
+  }
+ },
+ {
+  "id": "mixed_files_app_switcher",
+  "expected": "drop",
+  "stage": "app_switcher",
+  "note": "Files appear, so the model is asked, but it still proposes an app switcher (macOS has Cmd-Tab). Dropped by the deterministic check before the judge (#66).",
+  "events": [
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/report_2026-10.csv",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Google Chrome",
+    "window_title": "Reports",
+    "metadata": {
+     "bundle_id": "com.google.Chrome",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Claude",
+    "window_title": "Claude",
+    "metadata": {
+     "bundle_id": "com.anthropic.claudefordesktop",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/Downloads/report_2026-11.csv",
+     "action": "created"
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Google Chrome",
+    "window_title": "Reports",
+    "metadata": {
+     "bundle_id": "com.google.Chrome",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Claude",
+    "window_title": "Claude",
+    "metadata": {
+     "bundle_id": "com.anthropic.claudefordesktop",
+     "pid": 100
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "switch_between_chrome_and_claude",
+   "description": "Automatically activates Claude after Chrome becomes the frontmost app.",
+   "expected_logic": "Input: none. Poll the frontmost app with osascript once a second; when it changes to Google Chrome, wait two seconds and activate Claude. Stop after ten minutes or when the report CSV download finishes."
+  }
+ },
+ {
+  "id": "mixed_files_app_name_only",
+  "expected": "drop",
+  "stage": "grounding",
+  "note": "Not a switcher, but its only link to the window is the name of an app the user switched to; the edited files are unrelated. An app name no longer grounds an idea (#66).",
+  "events": [
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/dev/shop/src/cart.py",
+     "action": "modified"
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Google Chrome",
+    "window_title": "GitHub",
+    "metadata": {
+     "bundle_id": "com.google.Chrome",
+     "pid": 100
+    }
+   },
+   {
+    "event_type": "file",
+    "metadata": {
+     "path": "/Users/me/dev/shop/src/cart_test.py",
+     "action": "modified"
+    }
+   },
+   {
+    "event_type": "app_activated",
+    "app_name": "Google Chrome",
+    "window_title": "GitHub",
+    "metadata": {
+     "bundle_id": "com.google.Chrome",
+     "pid": 100
+    }
+   }
+  ],
+  "idea": {
+   "tool_name": "chrome_bookmark_exporter",
+   "description": "Export Google Chrome bookmarks to an HTML page.",
+   "expected_logic": "Input: output (str, default ~/Desktop/bookmarks.html). Read the Bookmarks JSON in the Google Chrome profile folder and write one HTML link per bookmark, grouped by bookmark folder. Error if Chrome has no profile."
   }
  }
 ]

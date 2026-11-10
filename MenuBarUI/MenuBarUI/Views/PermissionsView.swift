@@ -132,7 +132,7 @@ struct PermissionsView: View {
                     }
                     Text(process.note)
                 }
-                .font(.caption)
+                .appFont(.secondary)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
             }
@@ -168,9 +168,9 @@ struct PermissionsView: View {
                 .help(label(row.status))
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.name)
-                Text(row.why).font(.caption).foregroundStyle(.secondary)
+                Text(row.why).appFont(.secondary).foregroundStyle(.secondary)
                 if let note = viewModel.messages[row.id] ?? (row.detail.isEmpty ? nil : row.detail) {
-                    Text(note).font(.caption).foregroundStyle(.secondary)
+                    Text(note).appFont(.secondary).foregroundStyle(.secondary)
                 }
             }
             Spacer()

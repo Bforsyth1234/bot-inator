@@ -156,15 +156,15 @@ struct ChatView: View {
         HStack(spacing: 10) {
             Image(systemName: "bubble.left.and.bubble.right.fill")
                 .foregroundStyle(Color.accentColor)
-                .font(.title3)
+                .appFont(.title3)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Chat").font(.headline)
+                Text("Chat").appFont(.headline)
                 Text(ws.isConnected ? "Connected" : "Offline")
-                    .font(.caption)
+                    .appFont(.secondary)
                     .foregroundStyle(ws.isConnected ? Color.secondary : Color.red)
                 if !ws.isConnected, let hint = ws.authHint {
                     Text(hint)
-                        .font(.caption2)
+                        .appFont(.fine)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -180,7 +180,7 @@ struct ChatView: View {
                     if let error = viewModel.errorMessage {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
-                            .font(.caption)
+                            .appFont(.secondary)
                     }
                     ForEach(viewModel.turns) { turn in
                         TurnRow(turn: turn).id(turn.id)
@@ -234,6 +234,7 @@ struct ChatView: View {
 private struct TurnRow: View {
     let turn: ChatTurn
     @State private var reasoningExpanded: Bool = false
+    @Environment(\.textSize) private var textSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -270,7 +271,7 @@ private struct TurnRow: View {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
                         Text("thinking…")
-                            .font(.caption)
+                            .appFont(.secondary)
                             .foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 10)
@@ -291,11 +292,11 @@ private struct TurnRow: View {
                     ForEach(inner, id: \.self) { t in
                         HStack(alignment: .top, spacing: 6) {
                             Text(t.stage.rawValue)
-                                .font(.caption2.weight(.semibold))
+                                .appFont(.fine, weight: .semibold)
                                 .foregroundStyle(.secondary)
-                                .frame(width: 90, alignment: .leading)
+                                .frame(width: 104 * textSize.layoutScale, alignment: .leading)
                             Text(t.content)
-                                .font(.caption)
+                                .appFont(.secondary)
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -304,7 +305,7 @@ private struct TurnRow: View {
                 .padding(.top, 4)
             } label: {
                 Text("Reasoning (\(inner.count))")
-                    .font(.caption)
+                    .appFont(.secondary)
                     .foregroundStyle(.secondary)
             }
         }

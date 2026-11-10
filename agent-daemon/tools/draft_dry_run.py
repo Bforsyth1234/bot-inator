@@ -79,7 +79,7 @@ PLANNER_SYSTEM_PROMPT = (
     '"expect_missing": ["<relative path>"]}]}'
 )
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+from ai.mlx_engine import THINK_BLOCK_RE as _THINK_BLOCK_RE
 
 # Runs inside the sandbox. argv: daemon_root, draft_path, tool_name, kwargs_json
 _PROBE = r'''
