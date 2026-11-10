@@ -52,7 +52,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #62
+Next ID: #64
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -1098,6 +1098,43 @@ event created in "Brooks Forsyth" for Nov 11 12:00–1:00 PM. ✔
 
 ---
 
+#63 — Write email: drafts in Mail.app [ ]
+Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: user
+Ask: "Can the app write email now? If not add that to the todo.md." It
+can't: #41 only reads (`read_email`, the mail watcher); no tool composes or
+sends mail.
+DECISIONS (user, 2026-11-10: "drafts only for now"; the rest proposed by
+the assistant):
+1. DRAFT FIRST. `draft_email(to, subject, body, cc="", reply_to_message_id=0)`
+   creates a visible draft in Mail.app (AppleScript `make new outgoing
+   message … with properties {visible:true}`), never sends. Approval-gated
+   (rule 7a): the card shows recipients, subject and body, all editable
+   (#18 pattern). The user presses Send in Mail.
+2. DRAFTS ONLY (user, 2026-11-10). No `send_email` tool; the app never
+   sends mail. Revisit only if the user asks.
+3. REPLIES. With `reply_to_message_id` (an id from `mail_received` /
+   `read_email`), use Mail's `reply` on that message so threading and
+   quoting are right.
+4. SAFETY. All user text reaches AppleScript via `on run argv` (as in
+   `tools/notes.py`); recipients validated as addresses; no attachments in
+   v1. Under a cloud main engine the draft body is written by the cloud
+   model from text the user gave or approved (the #31 placeholder rules
+   still apply to the email being replied to).
+5. Ideas: the #32 `mail_deadline` / invite follow-ups could offer "draft a
+   reply" once this exists.
+Files: new agent-daemon/tools/email_draft.py (+ test), registration in
+tools/__init__.py (not read-only), an approval card in ApprovalAlert.swift,
+Permissions row "Automation → Mail" in ai/permissions.py.
+Verify:
+⚬ Tests with osascript mocked: argv-only text (a body containing `"` and
+  `end tell` stays inert), address validation, reply path, gate check +
+  non-vacuity.
+⚬ Live: "draft an email to <me> saying hi" → card → a draft opens in Mail,
+  unsent; "reply to my last email saying thanks" → a threaded reply draft.
+Deviations:
+
+---
+
 #41 — Read email from Mail.app's local store [~] live
 Wave: 3 · Agent: _ · Added: 2026-11-09 · Source: user
 Ask: "I want the app to be able to read email." New mail becomes an
@@ -1457,6 +1494,29 @@ Follow-up: the System Events row offers Request although the sandbox (#53)
 blocks System Events for generated tools; the user kept it as is.
 
 ### Approvals and UI
+
+#62 — Larger fonts in the app [ ]
+Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: user
+Ask: "We need the fonts larger." The menu bar app's text is too small to
+read comfortably.
+Today (2026-11-10): the Swift views use `.caption` 54 times (thought stream,
+Debug tab, Permissions rows, tool details, notices), plus 8 fixed
+`.font(.system(size: …))` sizes, so most secondary text is caption-size.
+Approach (to decide when scheduled): bump the base styles one step
+(`.caption` → `.callout`/`.body`, `.subheadline` → `.body`) and replace the
+fixed point sizes with text styles, so the app also follows macOS's
+text-size setting; optionally a "Text size" picker in Settings (Small /
+Medium / Large) applied with `.dynamicTypeSize` or an environment scale.
+Check the fixed-size panel (420×600) and approval cards still fit.
+Files: MenuBarUI/MenuBarUI/Views/*.swift, MenuBarUIApp.swift (+ Settings if
+a picker is added).
+Verify:
+⚬ swiftc typecheck; rebuild; the user confirms the text is readable in the
+  panel, the "Open in window" view, Chat, Settings and approval cards.
+⚬ Nothing is clipped at the panel's fixed size.
+Deviations:
+
+---
 
 #15 — Closing the approval window with the red X [~] live [Q2]
 Wave: 4 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q2)
