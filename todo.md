@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #105
+Next ID: #106
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -1300,6 +1300,60 @@ Verify:
 ⚬ Live: a 5-minute call with one stated action item ("I'll send the deck
   by Friday") → one card with a Friday reminder and a follow-up draft →
   Approve → reminder created, unsent draft open.
+Deviations:
+
+---
+
+#105 — BUG: meeting notes fail when Dictation is off, and the recording is deleted [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-18 build: "why does this happen")
+Ask: After a meeting recording the app showed "Notes for Meeting failed:
+Siri and Dictation are disabled The recording was deleted."
+Findings (assistant, 2026-11-11, from the code and the message):
+1. The "apple" engine uses `SFSpeechRecognizer` with
+   `requiresOnDeviceRecognition = true` (`Services/MeetingRecorder.swift`,
+   `MeetingTranscriber.transcribe`). macOS refuses recognition while Siri
+   and Dictation are both turned off, even on-device; the error text is
+   macOS's own. Recording itself worked.
+2. Nothing checks this before recording: `supportsOnDeviceRecognition` is
+   only checked after the meeting, and the Speech Recognition permission
+   (#99) can be granted while Dictation is off.
+3. On ANY transcription failure both audio files are deleted
+   (`MeetingFiles.delete(micURL/systemURL)` right after the `catch`), so
+   the meeting is lost. Deleting after a SUCCESSFUL transcript is the
+   privacy promise in Info.plist ("deleted once it is transcribed"); on a
+   failure it only loses the user's data.
+User workaround today: System Settings → Keyboard → Dictation → On, or
+Settings → Meeting notes → Transcribe with → Whisper (MLX) after
+`agent-daemon/.venv/bin/pip install mlx-whisper`.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. CHECK BEFORE RECORDING: when "apple" is the engine, a quick test
+   recognition (or the error from a 0.5 s silent buffer) at "Take notes"
+   time; if Dictation/Siri is off, don't start: say "Turn on Dictation
+   (System Settings → Keyboard → Dictation) or switch to Whisper" with a
+   button that opens that pane. Show the same status in Settings →
+   Meeting notes next to the #99 permission rows.
+2. KEEP AUDIO ON FAILURE: on a transcription error keep the files (still
+   only in `~/.bot-inator/meetings/audio/`, 0600) and show "Retry" and
+   "Delete recording" in the panel; Retry re-runs transcription (e.g.
+   after turning Dictation on or switching engine). Unretried audio is
+   deleted after 24 hours by the existing purge at launch, so the
+   "deleted once transcribed" promise only bends for a failed one, for a
+   day; say so in the panel and update the Info.plist text if needed.
+3. Fall back automatically to Whisper when it's installed and "apple"
+   fails? NO: the user picked an engine; offer it as a button instead.
+Files:
+⚬ OWNED: MenuBarUI/MenuBarUI/Services/MeetingRecorder.swift,
+  MenuBarUI/MenuBarUI/Views/MeetingNotesSettingsView.swift; Info.plist
+  (usage text only, if changed); events/meeting_notes.py only if the
+  retry needs a daemon change.
+Verify:
+⚬ swiftc build; pytest gate if Python changes.
+⚬ Live: Dictation off → Take notes → refused before recording, with the
+  pane button. Turn Dictation on → record 1 minute → notes ready, audio
+  folder empty. Force a failure (e.g. switch to Whisper without
+  mlx-whisper installed) → "Retry" and "Delete recording" shown, audio
+  still present → install it / switch back → Retry → notes ready, audio
+  gone.
 Deviations:
 
 ### Approvals and UI
