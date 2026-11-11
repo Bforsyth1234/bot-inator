@@ -44,7 +44,7 @@ struct MenuBarUIApp: App {
         // for MenuBarExtra panels); this is the same content in a normal
         // window that stays open beside other apps.
         Window("bot-inator", id: "activity") {
-            ActivityWindowView()
+            ActivityWindowView(watchMe: { delegate.demonstration.toggleRecording() })
                 .environmentObject(delegate.ws)
                 .environmentObject(delegate.delivery)
                 .appTextSize()
@@ -95,6 +95,8 @@ struct InboxTab: View {
 /// Thoughts + Debug in a regular, resizable window ("Open in window").
 struct ActivityWindowView: View {
     @EnvironmentObject private var delivery: DeliveryViewModel
+    /// #84 "Watch me", the same toggle the menu bar panel uses (#100).
+    var watchMe: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 0) {
@@ -109,8 +111,15 @@ struct ActivityWindowView: View {
                     .tabItem { Label("Debug", systemImage: "ladybug") }
             }
             .frame(maxHeight: .infinity)
+            .layoutPriority(-1)
+            Divider()
+            // #100: the same bottom bars as the menu bar panel, minus
+            // "Open in window" (this is the window).
+            PanelFooter(watchMe: watchMe, showOpenInWindow: false)
+                .fixedSize(horizontal: false, vertical: true)
+                .layoutPriority(1)
         }
-        .frame(minWidth: 380, minHeight: 420)
+        .frame(minWidth: 460, minHeight: 420)
     }
 }
 
@@ -236,6 +245,27 @@ struct RootPopoverView: View {
             .frame(maxHeight: .infinity)
             .layoutPriority(-1)
             Divider()
+            PanelFooter(watchMe: watchMe, showOpenInWindow: true)
+                .fixedSize(horizontal: false, vertical: true)
+                .layoutPriority(1)
+        }
+        .frame(width: 460, height: 640)
+    }
+}
+
+/// The bars under the tabs, shared by the menu bar panel and the
+/// "Open in window" window (#100): the privacy ledger line (#82), Watch me
+/// (#84) and meeting notes (#86), then Pause (#87), Chat, Settings and
+/// Manage Tools.
+struct PanelFooter: View {
+    @EnvironmentObject private var delivery: DeliveryViewModel
+    @Environment(\.openWindow) private var openWindow
+    var watchMe: () -> Void
+    /// The menu bar panel shows "Open in window"; the window itself doesn't.
+    var showOpenInWindow: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
             // #82: what left this Mac today, one line.
             HStack {
                 PrivacyLedgerTodayLabel()
@@ -268,15 +298,17 @@ struct RootPopoverView: View {
                     .menuStyle(.borderlessButton)
                     .fixedSize()
                 Spacer()
-                Button {
-                    presentWindow(id: "activity")
-                } label: {
-                    Label("Open in window", systemImage: "macwindow")
-                        .labelStyle(.iconOnly)
+                if showOpenInWindow {
+                    Button {
+                        presentWindow(id: "activity")
+                    } label: {
+                        Label("Open in window", systemImage: "macwindow")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Open Thoughts and Debug in a window that stays open (⇧⌘B)")
+                    Spacer()
                 }
-                .buttonStyle(.borderless)
-                .help("Open Thoughts and Debug in a window that stays open (⇧⌘B)")
-                Spacer()
                 Button {
                     presentWindow(id: "chat")
                 } label: {
@@ -309,7 +341,6 @@ struct RootPopoverView: View {
             .fixedSize(horizontal: false, vertical: true)
             .layoutPriority(1)
         }
-        .frame(width: 460, height: 640)
     }
 
     // On ``LSUIElement`` apps SwiftUI's ``openWindow`` silently no-ops when
