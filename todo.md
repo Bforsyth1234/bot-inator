@@ -103,6 +103,7 @@ API auth → sandbox for installed tools → live checks.
 | 16 | A: #78 · B: #89 · C: #84 · D: #86 · E: #85 (A–C accepted 2026-11-10) | A new `ai/standing_rules.py`, `routes/rules.py`, `RulesView.swift` · B new `Services/ScreenTextBridge.swift`, `tools/read_front_window.py`, `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift` · C new `ai/demonstration.py`, `DemonstrationPanel.swift`, `Services/HotKey.swift` · D new `Services/MeetingRecorder.swift`, `events/meeting_notes.py`, `MeetingNotesSettingsView.swift`, `Info.plist`, `ai/permissions.py` · E new `events/remote_channel.py`, `RemoteSettingsView.swift`, `events/imessage_watcher.py`. Runner: orchestrator approval path, `main.py`, `tools/__init__.py`, `ai/privacy.py`, `requirements.txt`, Settings, LIVING_SPEC §1 | [x] closed 2026-11-11 (all `[~] live`) |
 | 17 | runner: #98 #99 #100 #101 #91 #92 #96 (prep) · subagent: #97 #93 (#94 #95 deleted by the user 2026-11-11) | runner `ai/permissions.py`, `PanelPlacement.swift`, `DemonstrationPanel.swift`, `MeetingRecorder.swift`, `PermissionsView.swift`, `MeetingNotesSettingsView.swift`, `MenuBarUIApp.swift` footer, `LICENSE`, `README.md`, `install.sh`, `run.sh`, `scripts/release/`, `docs/releasing.md` · subagent (worktree) providers, first run, `SettingsView.swift`, `docs/providers.md` | [x] closed 2026-11-11 (all `[~] live`; #96 signing prep only; 1678 tests) |
 | 18 | A: #102 #103 · B: #96 (the rest: daemon in the app, login switch, update notice) · C: #104 | A new `tools/quit_app.py`, new `tools/take_screenshot.py`, `tools/__init__.py`, `tools/meta_tool_generator.py` (prompt only), `ai/tool_health.py`, new tests · B `scripts/release/`, `docs/releasing.md`, new `Services/DaemonLauncher.swift`, `MenuBarUIApp.swift` (AppDelegate launch/stop only), `SettingsView.swift` (+ new settings view), `Info.plist`, `config.py` / `user_settings.py` (writable-path overrides only), new tests. C new `ai/tool_trust.py`, `Orchestrator._load_tool` (+ the trusted flag on approval payloads), tool routes in `routes/tool_detail.py`, `ToolDetailView.swift`, `ToolManagerView.swift`, `CodeReviewAlert.swift`, `ApprovalAlert.swift` (one label), `schemas/ws_messages.py` + `WSMessage.swift` (one optional field), new tests. Runner: disables generated `close_app` / `capture_screenshot` / `list_recent_emails` once their built-ins land, the tool_health sentence (A) pointing at trust (C), README, todo, LIVING_SPEC | [x] closed 2026-11-11 (#102 #103 #104 #96 `[~] live`; 1774 tests; #105 added, not scheduled) |
+| 19 | A: #106 · B: #105 · C: #107 (user 2026-11-11: "implement the other open todos") | A `events/remote_channel.py`, `tools/send_imessage.py`, `tests/test_remote_channel.py`, new tests · B `MenuBarUI/MenuBarUI/Services/MeetingRecorder.swift`, `Views/MeetingNotesSettingsView.swift`, `Info.plist` (usage text only), `events/meeting_notes.py` only if retry needs it · C new `tools/look_at_screen.py`, new `ai/vision_engine.py`, `config.py`, `user_settings.py`, `providers.py` / `routes/providers.py`, `ai/privacy.py`, `ai/egress_log.py`, `SettingsView.swift` (+ new vision settings view), `tools/__init__.py`, `tools/meta_tool_generator.py` (prompt), `requirements.txt`, `main.py` (engine setup only), new tests. Runner: merge, README, todo, LIVING_SPEC | [~] in progress |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -1119,8 +1120,8 @@ install the badge shows.
 
 ---
 
-#107 — Vision: "look at my screen" with a local vision model [ ]
-Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user ("can the app view the screen?" → "add vision to todo")
+#107 — Vision: "look at my screen" with a local vision model [~]
+Wave: 19 (slot C) · Agent: subagent · Added: 2026-11-11 · Source: user ("can the app view the screen?" → "add vision to todo")
 Ask: The app can read screen TEXT (front window #89, browser tab #59,
 window titles) and, with #102, save a screenshot, but no model ever looks
 at an image: Groq's gpt-oss and the local Qwen/Hermes text models are
@@ -1357,8 +1358,8 @@ Deviations:
 
 ---
 
-#105 — BUG: meeting notes fail when Dictation is off, and the recording is deleted [ ]
-Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-18 build: "why does this happen")
+#105 — BUG: meeting notes fail when Dictation is off, and the recording is deleted [~]
+Wave: 19 (slot B) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-18 build: "why does this happen")
 Ask: After a meeting recording the app showed "Notes for Meeting failed:
 Siri and Dictation are disabled The recording was deleted."
 Findings (assistant, 2026-11-11, from the code and the message):
@@ -1626,8 +1627,8 @@ Deviations:
 
 ---
 
-#106 — BUG: iPhone remote never replies (AppleScript breaks on ’, → and other non-ASCII) [ ]
-Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user ("send the responses back via imessage when the user messages the app")
+#106 — BUG: iPhone remote never replies (AppleScript breaks on ’, → and other non-ASCII) [~]
+Wave: 19 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user ("send the responses back via imessage when the user messages the app")
 Ask: The user wants the app's answers sent back by iMessage when they text
 it. That is #85, built and turned on (`/api/remote`: enabled, handle
 2032467111, idle 1 min), but no reply arrives.
