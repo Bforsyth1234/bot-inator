@@ -1490,6 +1490,13 @@ class Orchestrator:
                         "\n" + extra["summary"] if extra.get("summary") else ""
                     )
                 reasoning = f"Agent wants to call {tool_name}"
+                note_fn = getattr(tool, "card_note", None)
+                if callable(note_fn):
+                    # #102: a built-in's one line for its card (app, file).
+                    try:
+                        reasoning += ". " + str(note_fn(*call_args, **call_kwargs))
+                    except Exception:
+                        logger.debug("card_note for %s failed", tool_name, exc_info=True)
                 if mcp_server:
                     reasoning += f" (a tool from the MCP server {mcp_server!r})"
                 if shield is not None:
@@ -1577,6 +1584,10 @@ class Orchestrator:
             if tool_name == "read_email":
                 # The result goes back into the main engine's prompt (#31).
                 result = privacy.redact_email_result(result, "main")
+            elif tool_name == "list_recent_emails":
+                # #103: the same redaction, per listed email.
+                from tools.list_recent_emails import redact_result
+                result = redact_result(result, "main")
             label = f"{tool_name} (read-only)" if bypass else tool_name
             asyncio.run_coroutine_threadsafe(
                 orchestrator._emit_thought(event_id, "tool_result", f"{label}: {result}"),

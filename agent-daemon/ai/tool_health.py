@@ -13,7 +13,11 @@ code card, ``tools.meta_tool_generator.repair_tool``).
 * :func:`classify_failure`: not repairable, and said so: sandbox refusals
   (a denied path, app, executable or network is policy, and a "fix" would
   be a way around it), timeouts, a missing macOS permission (point to the
-  Permissions checklist, #59), bad arguments from the model.
+  Permissions checklist, #59), bad arguments from the model. Apple Event
+  -10004 is the sandbox, not a permission (#102/#103: macOS refuses quit
+  and Mail's message data to any sandboxed process); the reason names the
+  built-ins to use, and :func:`record_call` attaches it to the failed
+  call's result so the reply says it in one line.
 * The rule (:meth:`ToolHealthLog.evaluate`): two repairable failures in a
   row with the same error class, or three repairable failures in 7 days;
   one offer per tool per 7 days (``IdeaState`` section ``"repair"``); never
@@ -86,10 +90,30 @@ REASONS = {
     ),
 }
 
+# #102/#103: macOS refuses some Apple Events (quit, Mail's message data) to
+# EVERY process under sandbox-exec, Automation granted or not, so -10004 from
+# a sandboxed tool is the sandbox, not a missing permission.
+REASON_SANDBOX_APPLE_EVENT = (
+    "macOS refuses this Apple Event to any sandboxed tool (-10004), even with "
+    "Automation allowed, so no permission or code change fixes it. Use the "
+    "built-ins instead: quit_app to quit an app, list_recent_emails or "
+    "read_email for Mail."
+)
+REASON_SANDBOX_EXECUTABLE = (
+    "The tool sandbox does not let generated tools run that program. Use the "
+    "built-in take_screenshot for screenshots, quit_app to quit an app."
+)
+# Key added to a failed call's result dict: the one line the reply names.
+USER_NOTE_KEY = "tell_user"
+
+_SANDBOX_AE_RE = re.compile(
+    r"-10004\b|privilege violation|errAEPrivilegeError", re.I,
+)
+_SANDBOX_EXEC_RE = re.compile(r"screencapture|process-exec|\[Errno 1\].*(/usr/s?bin/|exec)", re.I)
 _TIMEOUT_RE = re.compile(r"timed? ?out|did not finish within|TimeoutExpired", re.I)
 _PERMISSION_RE = re.compile(
-    r"-1743\b|-25211\b|-10004\b|not authori[sz]ed to send apple events|"
-    r"assistive access|privilege violation|errAEEventNotPermitted|"
+    r"-1743\b|-25211\b|not authori[sz]ed to send apple events|"
+    r"assistive access|errAEEventNotPermitted|"
     r"full disk access|not allowed to send keystrokes",
     re.I,
 )
@@ -180,9 +204,13 @@ def classify_failure(
     if (exc is not None and type(exc).__name__ == "ToolSandboxTimeout") or \
             error_class in ("TimeoutError", "TimeoutExpired") or _TIMEOUT_RE.search(text):
         cat = CATEGORY_TIMEOUT
+    elif _SANDBOX_AE_RE.search(text):
+        return False, CATEGORY_SANDBOX, REASON_SANDBOX_APPLE_EVENT
     elif _PERMISSION_RE.search(text):
         cat = CATEGORY_PERMISSION
     elif _SANDBOX_RE.search(text) or error_class == "PermissionError":
+        if _SANDBOX_EXEC_RE.search(text):
+            return False, CATEGORY_SANDBOX, REASON_SANDBOX_EXECUTABLE
         cat = CATEGORY_SANDBOX
     elif _BAD_ARGS_RE.search(text):
         cat = CATEGORY_BAD_ARGUMENTS
@@ -506,6 +534,27 @@ def _is_disabled(orchestrator: Any, tool_name: str) -> bool:
     return (Path(gen) / "disabled" / f"{tool_name}.py").exists()
 
 
+def user_note(tool_name: str, failure: Optional[dict[str, Any]]) -> Optional[str]:
+    """One line for the reply when ``failure`` can't be repaired, else ``None``."""
+    if not failure or failure.get("repairable", True) or not failure.get("reason"):
+        return None
+    return f"Tell the user in one line why {tool_name} can't work: {failure['reason']}"
+
+
+def _attach_note(tool_name: str, result: Any, exc: Optional[BaseException],
+                 arg_values: Any) -> None:
+    """#102: put the not-repairable reason where the agent reads it (the
+    result dict, or the raised error's message) so the reply names it."""
+    note = user_note(tool_name, describe_failure(result=result, exc=exc, arg_values=arg_values))
+    if note is None:
+        return
+    if exc is not None:
+        if exc.args and isinstance(exc.args[0], str) and note not in exc.args[0]:
+            exc.args = (f"{exc.args[0]}\n{note}", *exc.args[1:])
+    elif isinstance(result, dict):
+        result.setdefault(USER_NOTE_KEY, note)
+
+
 def record_call(
     orchestrator: Any, tool_name: str, *, result: Any = None,
     exc: Optional[BaseException] = None, args: Iterable[Any] = (),
@@ -513,7 +562,16 @@ def record_call(
 ) -> Optional[dict[str, Any]]:
     """Record one generated-tool call on ``orchestrator.tool_health``; when
     the rule fires, push a ``pattern_detected`` repair idea onto the event
-    bus (thread-safe). Returns the idea or ``None``. Never raises."""
+    bus (thread-safe). Returns the idea or ``None``. Never raises.
+
+    A failure that can't be repaired (sandbox, permission, timeout, bad
+    arguments) gets its reason attached for the reply (:func:`user_note`):
+    ``result["tell_user"]``, or appended to the raised error's message."""
+    args = list(args)
+    try:
+        _attach_note(tool_name, result, exc, [args, dict(kwargs or {})])
+    except Exception:
+        logger.exception("tool health: explaining %s failed", tool_name)
     log = getattr(orchestrator, "tool_health", None)
     if log is None:
         return None
@@ -540,4 +598,5 @@ __all__ = [
     "CATEGORY_BAD_ARGUMENTS", "CATEGORY_PERMISSION", "CATEGORY_SANDBOX", "CATEGORY_TIMEOUT",
     "REPAIR_TOOL_NAME", "ToolHealthLog", "classify_failure", "default_path",
     "describe_failure", "error_class_of", "record_call", "redact_arguments", "repair_idea",
+    "user_note",
 ]
