@@ -28,6 +28,11 @@ final class WebSocketManager: ObservableObject {
     private var calendarStatusTask: Task<Void, Never>?
     private let calendarStatusInterval: TimeInterval = 30.0
 
+    /// Front-window text for the daemon's `read_front_window` (#89).
+    let screenTextBridge = ScreenTextBridge()
+    /// Last `screen_text_status` sent on this connection (nil: none yet).
+    private var sentScreenTextTrusted: Bool?
+
     private let url: URL
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
@@ -105,6 +110,7 @@ final class WebSocketManager: ObservableObject {
         isConnected = true
         reconnectDelay = 1.0
         sentCalendarStatus = nil  // a new connection needs its own calendar_status
+        sentScreenTextTrusted = nil  // and its own screen_text_status (#89)
         receiveTask = Task { [weak self] in await self?.receiveLoop() }
         startCalendarStatusRefresh()
     }
@@ -248,7 +254,31 @@ final class WebSocketManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard !Task.isCancelled else { return }
                 self?.sendCalendarStatusIfChanged()
+                self?.sendScreenTextStatusIfChanged()
             }
+        }
+    }
+
+    // MARK: - Front-window text (#89)
+
+    /// Tell the daemon this app reads front windows, and whether it has
+    /// Accessibility (never prompts). Sent once per connection and on change.
+    private func sendScreenTextStatusIfChanged() {
+        guard task != nil else { return }
+        let trusted = ScreenTextBridge.isTrusted()
+        guard trusted != sentScreenTextTrusted else { return }
+        sentScreenTextTrusted = trusted
+        send(.screenTextStatus(seq: nextSeq(), timestamp: Date(),
+                               payload: ScreenTextStatusPayload(accessibilityTrusted: trusted)))
+    }
+
+    private func handleScreenTextRequest(_ payload: ScreenTextRequestPayload) {
+        let bridge = screenTextBridge
+        Task { [weak self] in
+            let response = await bridge.handle(payload)
+            guard let self else { return }
+            self.send(.screenTextResponse(seq: self.nextSeq(), timestamp: Date(), payload: response))
+            self.sendScreenTextStatusIfChanged()
         }
     }
 
@@ -318,6 +348,11 @@ final class WebSocketManager: ObservableObject {
                 handleCalendarRequest(payload)
                 return
             }
+            if case .screenTextRequest(_, _, let payload) = parsed {
+                // Plumbing, not UI; the text is not kept in `messages` (#89).
+                handleScreenTextRequest(payload)
+                return
+            }
             messages.append(parsed)
             switch parsed {
             case .approvalRequest(let seq, _, let payload):
@@ -327,6 +362,7 @@ final class WebSocketManager: ObservableObject {
             case .status(_, _, let payload):
                 lastStatus = payload
                 sendCalendarStatusIfChanged()
+                sendScreenTextStatusIfChanged()
             case .notice(_, _, let payload):
                 showNotice(payload)
             case .toolsChanged(_, _, let payload):
@@ -414,6 +450,9 @@ struct DebugStats {
         case .calendarRequest: key = "calendar_request"
         case .calendarResponse: key = "calendar_response"
         case .calendarStatus: key = "calendar_status"
+        case .screenTextRequest: key = "screen_text_request"
+        case .screenTextResponse: key = "screen_text_response"
+        case .screenTextStatus: key = "screen_text_status"
         }
         framesByType[key, default: 0] += 1
     }

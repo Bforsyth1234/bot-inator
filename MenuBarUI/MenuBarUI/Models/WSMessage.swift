@@ -326,6 +326,10 @@ struct ChatContextPayload: Codable, Hashable {
     enum SelectionSource: String, Codable, Hashable {
         case selection
         case clipboard
+        /// #89: "include this window's text". Sent with no `selection`;
+        /// the daemon reads the window itself. Older daemons reject the
+        /// value, so send it only to a daemon that has `read_front_window`.
+        case window
     }
 
     var isEmpty: Bool {
@@ -437,6 +441,72 @@ struct CalendarStatusPayload: Codable, Hashable {
     let authorization: CalendarAuthorization
 }
 
+// MARK: - Front-window text through the app (#89)
+
+/// Why a `screen_text_request` read nothing (matches the daemon's
+/// `ScreenTextErrorCode`).
+enum ScreenTextErrorCode: String, Codable, Hashable {
+    case accessibilityOff = "accessibility_off"
+    case noWindow = "no_window"
+    case neverWatch = "never_watch"
+    case secureField = "secure_field"
+    case browser
+    case ownApp = "own_app"
+    case nothingReadable = "nothing_readable"
+    case failed
+}
+
+/// Server→client: read the focused window's Accessibility text once.
+/// `neverWatch` is the daemon's #87 list (bundle ids with a dot, app names
+/// without): those apps are refused before anything is read.
+struct ScreenTextRequestPayload: Codable, Hashable {
+    let requestId: String
+    var maxChars: Int? = nil
+    var neverWatch: [String]? = nil
+    var timeoutSeconds: Int? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case maxChars = "max_chars"
+        case neverWatch = "never_watch"
+        case timeoutSeconds = "timeout_seconds"
+    }
+}
+
+/// Client→server answer to a `screen_text_request`. `text` never holds a
+/// secure field's value; on `ok == false` it is nil and `errorCode` says why.
+struct ScreenTextResponsePayload: Codable, Hashable {
+    let requestId: String
+    let ok: Bool
+    var app: String? = nil
+    var bundleId: String? = nil
+    var title: String? = nil
+    var text: String? = nil
+    var truncated: Bool = false
+    var error: String? = nil
+    var errorCode: ScreenTextErrorCode? = nil
+    var accessibilityTrusted: Bool? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case ok, app
+        case bundleId = "bundle_id"
+        case title, text, truncated, error
+        case errorCode = "error_code"
+        case accessibilityTrusted = "accessibility_trusted"
+    }
+}
+
+/// Client→server: this app reads front windows for the daemon, and whether
+/// it has Accessibility (`AXIsProcessTrusted`, never prompts).
+struct ScreenTextStatusPayload: Codable, Hashable {
+    let accessibilityTrusted: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case accessibilityTrusted = "accessibility_trusted"
+    }
+}
+
 // MARK: - Discriminated Union
 
 enum WSMessage: Codable, Hashable {
@@ -453,6 +523,9 @@ enum WSMessage: Codable, Hashable {
     case calendarRequest(seq: Int, timestamp: Date, payload: CalendarRequestPayload)
     case calendarResponse(seq: Int, timestamp: Date, payload: CalendarResponsePayload)
     case calendarStatus(seq: Int, timestamp: Date, payload: CalendarStatusPayload)
+    case screenTextRequest(seq: Int, timestamp: Date, payload: ScreenTextRequestPayload)
+    case screenTextResponse(seq: Int, timestamp: Date, payload: ScreenTextResponsePayload)
+    case screenTextStatus(seq: Int, timestamp: Date, payload: ScreenTextStatusPayload)
 
     var seq: Int {
         switch self {
@@ -464,7 +537,9 @@ enum WSMessage: Codable, Hashable {
              .toolsChanged(let seq, _, _), .command(let seq, _, _),
              .userMessage(let seq, _, _),
              .calendarRequest(let seq, _, _), .calendarResponse(let seq, _, _),
-             .calendarStatus(let seq, _, _):
+             .calendarStatus(let seq, _, _),
+             .screenTextRequest(let seq, _, _), .screenTextResponse(let seq, _, _),
+             .screenTextStatus(let seq, _, _):
             return seq
         }
     }
@@ -479,7 +554,9 @@ enum WSMessage: Codable, Hashable {
              .toolsChanged(_, let ts, _), .command(_, let ts, _),
              .userMessage(_, let ts, _),
              .calendarRequest(_, let ts, _), .calendarResponse(_, let ts, _),
-             .calendarStatus(_, let ts, _):
+             .calendarStatus(_, let ts, _),
+             .screenTextRequest(_, let ts, _), .screenTextResponse(_, let ts, _),
+             .screenTextStatus(_, let ts, _):
             return ts
         }
     }
@@ -502,6 +579,9 @@ enum WSMessage: Codable, Hashable {
         case calendarRequest = "calendar_request"
         case calendarResponse = "calendar_response"
         case calendarStatus = "calendar_status"
+        case screenTextRequest = "screen_text_request"
+        case screenTextResponse = "screen_text_response"
+        case screenTextStatus = "screen_text_status"
     }
 
     init(from decoder: Decoder) throws {
@@ -550,6 +630,15 @@ enum WSMessage: Codable, Hashable {
         case .calendarStatus:
             self = .calendarStatus(seq: seq, timestamp: timestamp,
                                    payload: try container.decode(CalendarStatusPayload.self, forKey: .payload))
+        case .screenTextRequest:
+            self = .screenTextRequest(seq: seq, timestamp: timestamp,
+                                      payload: try container.decode(ScreenTextRequestPayload.self, forKey: .payload))
+        case .screenTextResponse:
+            self = .screenTextResponse(seq: seq, timestamp: timestamp,
+                                       payload: try container.decode(ScreenTextResponsePayload.self, forKey: .payload))
+        case .screenTextStatus:
+            self = .screenTextStatus(seq: seq, timestamp: timestamp,
+                                     payload: try container.decode(ScreenTextStatusPayload.self, forKey: .payload))
         }
     }
 
@@ -596,6 +685,15 @@ enum WSMessage: Codable, Hashable {
             try container.encode(payload, forKey: .payload)
         case .calendarStatus(_, _, let payload):
             try container.encode(MessageType.calendarStatus, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .screenTextRequest(_, _, let payload):
+            try container.encode(MessageType.screenTextRequest, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .screenTextResponse(_, _, let payload):
+            try container.encode(MessageType.screenTextResponse, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .screenTextStatus(_, _, let payload):
+            try container.encode(MessageType.screenTextStatus, forKey: .type)
             try container.encode(payload, forKey: .payload)
         }
     }

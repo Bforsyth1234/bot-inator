@@ -226,6 +226,38 @@ def test_request_accessibility_opens_pane(monkeypatch) -> None:
     assert out["permission"]["status"] == P.DENIED
 
 
+# ── Microphone / Speech Recognition (#86 meeting notes) ─────────────────
+
+@pytest.mark.parametrize("perm_id,name", [("microphone", "Microphone"),
+                                          ("speech_recognition", "Speech Recognition")])
+def test_meeting_rows_listed_and_app_reported(perm_id, name) -> None:
+    perm = P.get(perm_id)
+    assert perm is not None and perm.name == name
+    assert perm.request_kind == "settings"
+    assert any("MeetingRecorder" in u for u in perm.used_by)
+    row = P._row(perm)
+    assert row["status"] == P.UNKNOWN and "menu bar app" in row["detail"]
+    P.set_external_check(perm_id, lambda: P._result(P.GRANTED))
+    try:
+        assert P._row(perm)["status"] == P.GRANTED
+    finally:
+        P.set_external_check(perm_id, None)
+    assert P._row(perm)["status"] == P.UNKNOWN
+
+
+@pytest.mark.parametrize("perm_id", ["microphone", "speech_recognition"])
+def test_request_meeting_rows_open_pane(monkeypatch, perm_id) -> None:
+    opened = []
+    monkeypatch.setattr(P, "_open_url", opened.append)
+    out = P.request(perm_id)
+    assert out["action"] == "opened_settings"
+    assert opened == [P.SETTINGS_URLS[perm_id]]
+
+
+def test_screen_recording_names_meeting_recorder() -> None:
+    assert any("MeetingRecorder" in u for u in P.get("screen_recording").used_by)
+
+
 def test_bad_status_is_reported_unknown(monkeypatch) -> None:
     perm = P.get("screen_recording")
     monkeypatch.setattr(perm, "check", lambda: {"status": "yes"})

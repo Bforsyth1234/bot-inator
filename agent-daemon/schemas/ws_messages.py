@@ -251,6 +251,64 @@ class CalendarStatusPayload(BaseModel):
     authorization: CalendarAuthorization
 
 
+# ---- Front-window text through the menu bar app (#89) -------------------------
+# The app owns Accessibility (TCC); the daemon's ``read_front_window`` asks it
+# over this WebSocket, as Calendar does (#60).
+ScreenTextErrorCode = Literal[
+    "accessibility_off",  # AXIsProcessTrusted() is false for the app
+    "no_window",          # no other app / no focused window
+    "never_watch",        # the app is on the never-watch list (#87)
+    "secure_field",       # the focused element is a password field
+    "browser",            # a browser window: read_active_tab_text applies (#58)
+    "own_app",            # a bot-inator window
+    "nothing_readable",   # the window exposes no Accessibility text
+    "failed",             # anything else
+]
+
+
+class ScreenTextRequestPayload(BaseModel):
+    """Server→client: read the focused window's Accessibility text, once.
+
+    ``max_chars`` caps the text (the app caps at 8,000 regardless).
+    ``never_watch`` is the #87 list (bundle ids with a dot, app names
+    without); the app refuses those apps before reading anything. Sent to
+    ONE connection (the app that most recently sent ``screen_text_status``).
+    """
+
+    request_id: str
+    max_chars: int = 8000
+    never_watch: list[str] = Field(default_factory=list)
+    timeout_seconds: int = 2
+
+
+class ScreenTextResponsePayload(BaseModel):
+    """Client→server answer to a :class:`ScreenTextRequestPayload`.
+
+    ``text`` is the collected text (never a secure field's), already capped;
+    ``truncated`` says a cap (characters, nodes, depth or time) cut it.
+    On ``ok = false`` ``error_code`` says why and ``text`` is empty.
+    """
+
+    request_id: str
+    ok: bool
+    app: str | None = None
+    bundle_id: str | None = None
+    title: str | None = None
+    text: str | None = None
+    truncated: bool = False
+    error: str | None = None
+    error_code: ScreenTextErrorCode | None = None
+    accessibility_trusted: bool | None = None
+
+
+class ScreenTextStatusPayload(BaseModel):
+    """Client→server: this app can read the front window, and whether it has
+    Accessibility (``AXIsProcessTrusted``, never prompts). Sent on connect
+    and whenever it changes."""
+
+    accessibility_trusted: bool
+
+
 CommandAction = Literal[
     "pause_listeners",
     "resume_listeners",
@@ -270,7 +328,11 @@ class CommandPayload(BaseModel):
     duration: PauseDuration | None = None
 
 
-SelectionSource = Literal["selection", "clipboard"]
+# "window" (#89): the user ticked "include this window's text"; the app sends
+# no text, and the daemon reads the window itself (``read_front_window``,
+# with its never-watch / browser / secure-field / 7c rules) into
+# ``selection`` before the prompt is built.
+SelectionSource = Literal["selection", "clipboard", "window"]
 
 
 class ChatContextPayload(BaseModel):
@@ -383,6 +445,21 @@ class CalendarStatus(_BaseMessage):
     payload: CalendarStatusPayload
 
 
+class ScreenTextRequest(_BaseMessage):
+    type: Literal["screen_text_request"] = "screen_text_request"
+    payload: ScreenTextRequestPayload
+
+
+class ScreenTextResponse(_BaseMessage):
+    type: Literal["screen_text_response"] = "screen_text_response"
+    payload: ScreenTextResponsePayload
+
+
+class ScreenTextStatus(_BaseMessage):
+    type: Literal["screen_text_status"] = "screen_text_status"
+    payload: ScreenTextStatusPayload
+
+
 WSMessage = Annotated[
     Union[
         Thought,
@@ -398,6 +475,9 @@ WSMessage = Annotated[
         CalendarRequest,
         CalendarResponse,
         CalendarStatus,
+        ScreenTextRequest,
+        ScreenTextResponse,
+        ScreenTextStatus,
     ],
     Field(discriminator="type"),
 ]
