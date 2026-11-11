@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #103
+Next ID: #104
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -865,6 +865,42 @@ Verify:
   quits (with a document app: its save prompt appears). "take a
   screenshot" → one `take_screenshot` card → Approve → PNG on the Desktop.
   Neither request drafts a new tool.
+Deviations:
+
+---
+
+#103 — Built-in list_recent_emails (Mail won't give message data to a sandboxed tool) [~]
+Wave: 18 (slot A, with #102) · Agent: subagent · Added: 2026-11-11 · Source: user (live run: pasted the app's reply)
+Ask: The agent wrote `list_recent_emails` (`tools/generated/`, AppleScript
+`messages of inbox`), the user approved it, and it failed with -10004.
+The app then told the user to grant Automation → Mail, which was already
+granted: wrong advice.
+Findings (assistant, 2026-11-11, on this Mac): under a `sandbox-exec`
+profile of only `(allow default)`, `tell application "Mail" to count
+messages of inbox` and `get subject of item 1 of (messages of inbox)`
+both fail with -10004; the same calls unsandboxed work (6206 messages).
+`activate` works sandboxed. So Mail's message data is closed to every
+generated tool, like `quit` (#102).
+DECISIONS (assistant, 2026-11-11):
+1. A READ-ONLY built-in `list_recent_emails(count=10, mailbox="")` in the
+   daemon, reading Mail's Envelope Index read-only (reuse
+   `events/mail_watcher.py`'s schema helpers and `tools/read_email.py`'s
+   paths; no AppleScript): sender, subject, date, mailbox, message_id for
+   the newest `count` (cap 50), skipping junk/trash/sent/drafts like the
+   watcher. Bodies stay with `read_email(message_id)`.
+2. PRIVACY: under a cloud main engine, subjects are redacted exactly like
+   `read_email` results (#31/#52) unless the user allowed personal text;
+   needs Full Disk Access like the watcher, and says so on failure.
+3. The drafter prompt (#102 decision 4) also says: Mail message data,
+   like quitting apps, isn't reachable from a generated tool; use
+   `list_recent_emails` / `read_email`.
+4. The runner disables the generated `list_recent_emails` (name clash).
+Verify:
+⚬ Tests on a fixture Envelope Index: newest-first, cap, mailbox filter,
+  skipped mailboxes, redaction under a cloud main engine, missing FDA →
+  a clear error. Non-vacuity per rule 5.
+⚬ Live: "what are my last 5 emails?" in Chat → no new tool drafted, no
+  card (read-only), five senders/subjects listed.
 Deviations:
 
 ### Privacy
