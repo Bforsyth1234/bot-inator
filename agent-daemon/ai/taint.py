@@ -47,6 +47,8 @@ OUTSIDE_TEXT_EVENTS: frozenset[str] = frozenset({"imessage_received", "mail_rece
 # say so with ``is_mcp=True``. ``read_front_window`` is #89's.
 OUTSIDE_TEXT_TOOLS: Mapping[str, str] = {
     "read_email": "email",
+    # #103: subjects and senders of received mail are outside text too.
+    "list_recent_emails": "email",
     "read_active_tab_text": "web_page",
     "summarize_file": "file",
     "read_clipboard": "clipboard",

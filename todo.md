@@ -163,6 +163,11 @@ None open from waves 1–12 (marked done by the user 2026-11-10; list in DONE.md
 - #86 Meeting notes: Settings → Meeting notes on; a meeting with one other attendee → "Take notes for <title>?" at prep time → click → Microphone + Speech prompts → say "I'll send the deck by Friday" → Stop → `~/.bot-inator/meetings/audio/` empty → one card: Friday reminder, draft to the attendee, note → Approve.
 - #85 iPhone remote: grant Automation → Messages; Settings → iPhone remote → your handle → on; leave the Mac idle 10 min; mail yourself a deadline → the card in your own thread with a code → "yes <code>" → reminder created, Mac card closes. Text "what's on my calendar tomorrow?" → answer in the thread. Check the self-sent row is `is_from_me=1` in chat.db.
 
+Wave 18 (slot A):
+
+- #102 Quit / screenshot: restart the daemon; Chat "quit Spotify" → one `quit_app` card whose Reasoning names Spotify and com.spotify.client → Approve → Spotify quits. With a TextEdit doc unsaved, "quit TextEdit" → its save prompt appears. "quit Finder" → its card says it will refuse; Approve → refused, Finder stays. "take a screenshot" → one `take_screenshot` card ("Captures everything visible on screen and saves it to ~/Desktop/Screenshot ….png") → Approve → PNG on the Desktop showing other apps' windows (if only the wallpaper: grant Screen Recording, the reply says so). Neither request drafts a new tool. Then, after the runner disables `close_app`, run a generated tool that hits -10004 (or re-enable the old one briefly) → the reply names "macOS refuses this Apple Event to any sandboxed tool…" in one line, not "grant Automation".
+- #103 Recent mail: "what are my last 5 emails?" in Chat → no tool drafted, no card (read-only), five senders/subjects newest first, none from Sent/Junk/Trash. "…in my INBOX" filters. With main on Groq (personal text off) the subjects show as the placeholder. Without Full Disk Access for the daemon → the reply says to grant it.
+
 ---
 
 ## Completed items (archived to DONE.md)
@@ -798,7 +803,7 @@ Deviations:
 
 ---
 
-#102 — Built-in quit_app and take_screenshot (generated versions can't work in the sandbox) [~]
+#102 — Built-in quit_app and take_screenshot (generated versions can't work in the sandbox) [~] live
 Wave: 18 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-17 build: "it denied that too")
 Ask: The user asked the app to close Spotify, and later to take a
 screenshot. Each time the agent wrote a tool (`close_app`,
@@ -866,10 +871,63 @@ Verify:
   screenshot" → one `take_screenshot` card → Approve → PNG on the Desktop.
   Neither request drafts a new tool.
 Deviations:
+⚬ (slot A, 2026-11-11) RULE 4 (built-ins are not callable from inside a
+  generated tool): the decision says "callable from generated tools through
+  the existing built-in path", but that path imports the built-in INSIDE the
+  sandboxed child (`tool_sandbox` docstring), where quit and screencapture
+  fail the same way. Making them work there needs a daemon proxy in
+  `tools/tool_sandbox.py`, which this slot may not edit. So both detect the
+  child (`TMPDIR` contains `/tool-sandbox-`) and return "call the X tool
+  directly instead"; the drafting prompt says the same and tells the
+  drafter to return an error naming the built-in rather than write such a
+  tool. The agent calls them as top-level tools.
+⚬ Card: no Swift change. The card's Reasoning line carries a per-tool
+  `card_note` ("Quits Spotify (com.spotify.client). Like Quit in its menu,
+  it asks to save unsaved work." / "Captures everything visible on screen
+  and saves it to ~/Desktop/Screenshot ….png."), read by 7 lines in
+  `Orchestrator._wrap_tool_for_approval` (`getattr(tool, "card_note")`).
+  The app icon is not shown (would need a new card field in
+  `ApprovalAlert.swift`; the bundle id names the app).
+⚬ Protected apps: also the Dock, SystemUIServer, Control Center and
+  WindowManager (quitting them blanks system UI), and background-only
+  processes (activation policy "prohibited") are never matched.
+⚬ take_screenshot paths compare case-insensitively (found by a test:
+  APFS is case-insensitive, so `~/library/x.png` IS `~/Library`), refuse
+  non-.png suffixes (no suffix gets .png), require the folder to exist,
+  and never overwrite. The deny list is read from `tool_sandbox`'s own
+  constants (imported, not edited).
+⚬ tool_health: Apple Event -10004 / "privilege violation" moved from
+  "permission" to "sandbox" with its own reason (Automation was granted in
+  both live failures; the old reason told the user to grant a permission).
+  -1743 stays "permission". A denied screencapture/exec gets a reason naming
+  take_screenshot. `record_call` attaches `tell_user: "Tell the user in one
+  line why <tool> can't work: <reason>"` to a failed result dict (or
+  appends it to the raised error's message), so the reply names it. All in
+  `ai/tool_health.py`; no orchestrator change for this part.
+⚬ Not done here: disabling the generated `close_app` /
+  `capture_screenshot` (runner, decision 3); LIVING_SPEC §4/§6 rows
+  (runner, rule 9).
+Results (slot A, 2026-11-11): new `tools/quit_app.py`,
+`tools/take_screenshot.py`; registered in `tools/__init__.py` (both gated,
+not read-only); drafting prompt "Sandbox limits" block and a
+generate_custom_tool docstring line in `tools/meta_tool_generator.py`;
+`ai/tool_health.py` as above; `ai/orchestrator.py` +7 lines (card_note).
+Tests: new `tests/test_quit_app.py` (16), `tests/test_take_screenshot.py`
+(23), `tests/test_drafting_prompt_limits.py` (3),
+`tests/test_tool_health_sandbox_reason.py` (7). NSRunningApplication and
+subprocess faked; nothing quit or captured. Full suite (with #103):
+1745 passed. Non-vacuity (each guard broken on a copy, its test failed,
+restored): not-running refusal, protected bundle ids, own pid,
+background-process skip, in-sandbox note (both tools), gated (adding
+either to READ_ONLY_TOOL_NAMES fails 3 tests), card_note hook, home check,
+denied trees, case fold, no overwrite, empty capture → error, -10004 →
+sandbox, executable reason, note attached, no note when repairable,
+prompt limits, generate_custom_tool docstring: all 19 FAIL when broken.
+Live check: see Live checks (wave 18).
 
 ---
 
-#103 — Built-in list_recent_emails (Mail won't give message data to a sandboxed tool) [~]
+#103 — Built-in list_recent_emails (Mail won't give message data to a sandboxed tool) [~] live
 Wave: 18 (slot A, with #102) · Agent: subagent · Added: 2026-11-11 · Source: user (live run: pasted the app's reply)
 Ask: The agent wrote `list_recent_emails` (`tools/generated/`, AppleScript
 `messages of inbox`), the user approved it, and it failed with -10004.
@@ -902,6 +960,42 @@ Verify:
 ⚬ Live: "what are my last 5 emails?" in Chat → no new tool drafted, no
   card (read-only), five senders/subjects listed.
 Deviations:
+⚬ (slot A, 2026-11-11) Junk / Trash are skipped by a regex in
+  `tools/list_recent_emails.py` on top of the watcher's own-mail rule
+  (`mail_watcher.is_own_mailbox`, imported): the watcher itself skips only
+  Sent / Drafts / Outbox, and changing it would change `mail_received`.
+  Also skipped: rows with `messages.deleted` set (when the column exists),
+  and the same `global_message_id` seen in a second Gmail mailbox.
+  `mail_watcher.py` not edited.
+⚬ RULE 4 (taint): added `"list_recent_emails": "email"` to
+  `ai/taint.OUTSIDE_TEXT_TOOLS` (one line). Subjects and senders are
+  outside text like `read_email`; without it, a card after "list my
+  emails" would not carry the #81 origin notes. Not in the slot's file
+  list; documented here.
+⚬ Redaction: `redact_result` in the new module applies
+  `privacy.redact_email_result` to each listed email (one note on the
+  list, not per item); the orchestrator applies it in the same place as
+  read_email's (+4 lines, `elif tool_name == "list_recent_emails"`).
+  `ai/privacy.py` not edited.
+⚬ Ordered by `date_received DESC, ROWID DESC`; scans at most 5,000 rows
+  in batches of 200 to fill `count` past skipped mailboxes. The mailbox
+  filter matches the whole name or its last part, ignoring case ("INBOX",
+  "work"); a skipped mailbox stays skipped even when named.
+Results (slot A, 2026-11-11): new `tools/list_recent_emails.py`, registered
+read-only in `tools/__init__.py`; drafting prompt names it (and that Mail
+data isn't reachable from a generated tool) with read_email; tool_health
+-10004 reason names it. Tests: new `tests/test_list_recent_emails.py`
+(17) on a fixture Envelope Index: newest-first, cap 50, mailbox filter,
+skipped mailboxes (8 cases), deleted/duplicate rows, missing FDA (exact
+error), no index, AGENT_MAIL_ROOT, read-only + taint registration,
+redaction through the real approval wrapper (local / cloud / opted in,
+and the UI thought). Full suite 1745 passed. Non-vacuity: newest-first,
+cap, mailbox filter, junk/trash skip, dedupe, FDA message (first version
+of that test was vacuous: the fallback message also said "Full Disk
+Access"; tightened to the exact error, now fails when broken),
+orchestrator redaction, read-only registration, taint mark: all FAIL
+when broken.
+Live check: see Live checks (wave 18).
 
 ### Privacy
 

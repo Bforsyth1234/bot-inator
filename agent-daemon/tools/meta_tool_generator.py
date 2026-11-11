@@ -104,6 +104,17 @@ Endpoint rules (CRITICAL — read before writing any HTTP code):
 * Return a dict with a `status` key of either "ok" or "error".
 * Do not emit backticks, markdown fences, commentary, or any text outside the module source.
 
+Sandbox limits (CRITICAL — your tool runs under macOS sandbox-exec; these fail there no matter how they are written):
+* It CANNOT quit or close apps: macOS refuses the quit Apple Event to every sandboxed process (-10004), from AppleScript, `osascript`, `kill` or AppKit alike.
+* It CANNOT read Mail's messages (lists, subjects, senders, bodies): Mail refuses message data to sandboxed processes (-10004), even with Automation allowed.
+* It CANNOT run programs other than `osascript`, `shortcuts`, `mdfind` and `open` (e.g. no `screencapture`, `kill`, `pkill`, `killall`, `sh`, `curl`).
+* It CANNOT open URLs, files or apps except through `open` on PATH (the daemon checks the arguments); no NSWorkspace, `open location` or LaunchServices calls.
+* Calling the built-ins below from inside your tool does not help: they run in the same sandbox. The assistant calls them directly instead, so for these tasks do NOT write a tool:
+  - quit / close an app: the built-in `quit_app(app_name)`;
+  - take a screenshot or screen capture: the built-in `take_screenshot(path)`;
+  - list recent emails: the built-in `list_recent_emails(count, mailbox)`; one email's body: `read_email(message_id)`.
+* If the requested tool needs one of these anyway, return ``{"status": "error", "message": "<which built-in to call instead>"}`` rather than code that cannot work.
+
 User-visible output rules:
 * NEVER use `print()` to communicate with the user. The daemon's stdout is not a user interface.
 * To notify the user (timer fires, reminder triggers, task completes, alert), either:
@@ -969,7 +980,11 @@ def generate_custom_tool(
     provide (timers, calculators, file utilities, stdlib HTTP calls,
     etc.). Also appropriate when the pattern recognizer has proposed a
     concrete automation. Do NOT call this for conversational turns that
-    only need a direct text answer. The function drives the main MLX
+    only need a direct text answer. Never call it to quit or close an app,
+    take a screenshot, or list or read emails: a generated tool runs in a
+    sandbox that cannot do those, so call the built-ins ``quit_app``,
+    ``take_screenshot``, ``list_recent_emails`` and ``read_email`` instead.
+    The function drives the main MLX
     engine to write a stdlib-only Python module, runs static safety
     checks on the draft, asks the user to review (and optionally edit)
     the source via a ``code_approval_request`` frame, atomically writes
