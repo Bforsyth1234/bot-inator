@@ -68,7 +68,16 @@ SOURCES: tuple[tuple[str, str], ...] = (
     ("calendar", "Calendar"),
     ("mail", "Mail"),
     ("reminders", "Reminders"),
+    ("waiting_on", "Waiting on"),
 )
+
+# Offers pushed after the scheduled brief (#73 nudges, #77 look-ahead), each
+# a ``pattern_detected`` built-in idea that goes through the normal card.
+MAX_NUDGES = 3
+NUDGE_SECTION = "waiting_on"
+NUDGE_COOLDOWN = 7 * 24 * 3600.0
+LOOKAHEAD_SECTION = "lookahead"
+LOOKAHEAD_COOLDOWN = 7 * 24 * 3600.0
 
 SQL_RECENT_MAIL = """
     SELECT m.ROWID, s.subject, a.address, {sender_name}, m.date_received, mb.url,
@@ -329,6 +338,13 @@ def format_brief(payload: dict[str, Any]) -> str:
         "Reminders", "nothing due", payload["reminders"],
         lambda r: f"{r['title']} ({'overdue, ' if r['overdue'] else 'due '}{r['when']})",
     )
+    if payload.get("waiting_on") is not None:
+        from ai import waiting_on as wo
+
+        lines += wo.format_section(payload["waiting_on"])
+    look = (payload.get("lookahead") or {}).get("text")
+    if look:
+        lines += str(look).splitlines()
     return "\n".join(lines)
 
 
@@ -339,8 +355,16 @@ def gather_brief(
     recent_mail: Optional[Callable[..., Any]] = None,
     list_reminders: Optional[Callable[..., Any]] = None,
     redact_subject: Optional[Callable[[str], str]] = None,
+    waiting_on: Optional[Callable[..., Any]] = None,
+    check_gaps: Optional[Callable[..., Any]] = None,
 ) -> dict[str, Any]:
     """Gather today's brief from the read-only sources. Never raises.
+
+    Two more sections: ``waiting_on`` (#73, sent mail with no reply;
+    ``waiting_on(now, redact_subject=)`` answers like
+    ``ai.waiting_on.waiting_on``) and ``lookahead`` (#77, gaps in the next
+    days; ``check_gaps`` like ``events.lookahead.check_gaps``, given this
+    brief's own calendar / mail / reminder sources).
 
     The sources are injectable (tests pass fakes): ``list_events(start=,
     end=)`` and ``list_reminders(list_name=, include_completed=)`` answer
@@ -355,6 +379,9 @@ def gather_brief(
     list_reminders = list_reminders or _default_list_reminders
     fetch_mail = recent_mail or globals()["recent_mail"]
     redact = redact_subject or _redact_subject
+    # The brief and the look-ahead both list open reminders: ask once
+    # (AppleScript can be slow).
+    list_reminders = _once(list_reminders)
 
     def source(result: Optional[dict[str, Any]], reason: str, items: Callable[[dict[str, Any]], list], cap: int) -> dict[str, Any]:
         if result is None:
@@ -387,19 +414,59 @@ def gather_brief(
         lambda r: [i for i in (_reminder_item(x, now) for x in r.get("reminders") or []) if i],
         MAX_REMINDERS,
     )
+    waiting = _waiting_section(waiting_on, now, redact)
+    sources = {"calendar": calendar, "mail": mail, "reminders": reminders, "waiting_on": waiting}
     payload: dict[str, Any] = {
         "date": now.date().isoformat(),
         "day": now.strftime("%A %B %-d"),
-        "calendar": calendar,
-        "mail": mail,
-        "reminders": reminders,
-        "unavailable": [
-            label for key, label in SOURCES
-            if {"calendar": calendar, "mail": mail, "reminders": reminders}[key]["status"] != "ok"
-        ],
+        **sources,
+        "unavailable": [label for key, label in SOURCES if sources[key]["status"] != "ok"],
     }
+    try:
+        if check_gaps is None:
+            from . import lookahead
+
+            check_gaps = lookahead.check_gaps
+        payload["lookahead"] = check_gaps(
+            now, list_events=list_events, recent_mail=fetch_mail,
+            list_reminders=list_reminders, redact_subject=redact,
+        )
+    except Exception as exc:  # the look-ahead must never sink the brief
+        logger.exception("look-ahead failed")
+        payload["lookahead"] = {"status": "unavailable", "gaps": [], "skipped": [],
+                                "text": f"Look-ahead: unavailable: {exc}"}
     payload["text"] = format_brief(payload)
     return payload
+
+
+def _once(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """``fn`` with its answers kept per arguments for one gather."""
+    seen: dict[str, Any] = {}
+
+    def call(*args: Any, **kwargs: Any) -> Any:
+        key = repr((args, sorted(kwargs.items())))
+        if key not in seen:
+            seen[key] = fn(*args, **kwargs)
+        return seen[key]
+
+    return call
+
+
+def _waiting_section(fn: Optional[Callable[..., Any]], now: datetime, redact: Callable[[str], str]) -> dict[str, Any]:
+    """The #73 "Waiting on" source: ``{"status": "ok", "items"}`` or unavailable."""
+    try:
+        if fn is None:
+            from ai import waiting_on as wo
+
+            fn = wo.waiting_on
+        result = fn(now, redact_subject=redact)
+    except Exception as exc:
+        return {"status": "unavailable", "reason": str(exc) or exc.__class__.__name__}
+    if not isinstance(result, dict):
+        return {"status": "unavailable", "reason": "unexpected answer"}
+    if result.get("status") != "ok":
+        return {"status": "unavailable", "reason": str(result.get("reason") or result.get("error") or "no answer")}
+    return result
 
 
 def build_brief_text(now: Optional[datetime] = None, **sources: Any) -> str:
@@ -432,11 +499,18 @@ def describe(event: ContextEvent) -> str:
             return f"{noun} unavailable"
         return f"{len(src.get('items') or [])} {noun}"
 
-    return (
+    text = (
         f"Morning brief for {meta.get('day', 'today')}: "
         f"{count('calendar', 'events')}, {count('mail', 'emails')}, "
         f"{count('reminders', 'reminders due')}"
     )
+    waiting = meta.get("waiting_on")
+    if isinstance(waiting, dict) and waiting.get("status") == "ok":
+        text += f", {len(waiting.get('items') or [])} waiting"
+    gaps = (meta.get("lookahead") or {}).get("gaps") if isinstance(meta.get("lookahead"), dict) else None
+    if gaps:
+        text += f", {len(gaps)} look-ahead gaps"
+    return text
 
 
 def build_prompt(event: ContextEvent) -> str:
@@ -455,6 +529,9 @@ def build_prompt(event: ContextEvent) -> str:
         "subject. Skip receipts and notifications. Never guess what a "
         "message says beyond its subject.\n"
         "- Reminders: overdue first.\n"
+        "- Waiting on: who the user is waiting on, with the subject.\n"
+        "- Look-ahead: keep each Look-ahead line as written (they are "
+        "checked facts), including a \"Look-ahead skipped\" line.\n"
         "- If a line says a source is unavailable, keep that line with its "
         "reason. Never drop it and never invent items.\n"
         "- If there is nothing at all, say so in one line.\n\n"
@@ -511,8 +588,15 @@ class DailyBriefScheduler:
         enabled: Callable[[], bool] = brief_enabled,
         time_of_day: Callable[[], dtime] = brief_time,
         startup_delay: float = DEFAULT_STARTUP_DELAY,
+        idea_state: Any = None,
+        feedback: Any = None,
     ) -> None:
         self._bus = bus
+        # Cooldowns (``ai.idea_sources.IdeaState``) and declined ideas
+        # (``IdeaFeedback``) for the offers after the brief; main.py attaches
+        # the shared ones (:meth:`attach_ideas`).
+        self.idea_state = idea_state
+        self.feedback = feedback
         self._state_path = Path(state_path).expanduser() if state_path else DEFAULT_STATE_PATH
         self._poll_interval = poll_interval
         self._clock = clock
@@ -571,7 +655,75 @@ class DailyBriefScheduler:
         # Push first: if the bus isn't ready the brief is retried, not lost.
         self._bus.push_threadsafe(event)
         _write_last_run(self._state_path, now)
+        # Offers follow the scheduled brief only, never "Brief me now".
+        try:
+            self.push_offers(event.metadata or {})
+        except Exception:
+            logger.exception("daily brief offers failed")
         return event
+
+    def attach_ideas(self, idea_state: Any, feedback: Any = None) -> None:
+        self.idea_state = idea_state
+        self.feedback = feedback
+
+    def _state(self) -> Any:
+        if self.idea_state is None:
+            from ai.idea_sources import IdeaState
+
+            self.idea_state = IdeaState(None)  # in memory: no file of our own
+        return self.idea_state
+
+    def _declined(self, idea: dict[str, Any]) -> bool:
+        check = getattr(self.feedback, "resembles_rejected", None)
+        if check is None:
+            return False
+        try:
+            return bool(check(str(idea.get("tool_name") or ""), str(idea.get("description") or "")))
+        except Exception:
+            logger.exception("daily brief: feedback lookup failed")
+            return False
+
+    def offers_for(self, payload: dict[str, Any]) -> list[ContextEvent]:
+        """The offer events for a brief payload, with their cooldowns started.
+
+        #73: a "draft a nudge?" idea per waiting item, at most
+        :data:`MAX_NUDGES`, one per message id per :data:`NUDGE_COOLDOWN`.
+        #77: each look-ahead gap's offer, one per gap key per
+        :data:`LOOKAHEAD_COOLDOWN`, dropped when it resembles a declined idea.
+        """
+        from ai import waiting_on as wo
+
+        from . import lookahead
+
+        state = self._state()
+        out: list[ContextEvent] = []
+        waiting = payload.get("waiting_on") or {}
+        if waiting.get("status") == "ok":
+            nudges = 0
+            for item in waiting.get("items") or []:
+                if nudges >= MAX_NUDGES:
+                    break
+                key = str(item.get("message_id") or "")
+                if not key or state.active(NUDGE_SECTION, key):
+                    continue
+                state.start(NUDGE_SECTION, key, NUDGE_COOLDOWN)
+                out.append(ContextEvent(event_type="pattern_detected", metadata=wo.nudge_idea(item)))
+                nudges += 1
+        look = payload.get("lookahead") or {}
+        for offer in lookahead.offer_events(look) if isinstance(look, dict) else []:
+            meta = offer.metadata or {}
+            key = str(meta.get("lookahead_key") or "")
+            if not key or state.active(LOOKAHEAD_SECTION, key) or self._declined(meta):
+                continue
+            state.start(LOOKAHEAD_SECTION, key, LOOKAHEAD_COOLDOWN)
+            out.append(offer)
+        return out
+
+    def push_offers(self, payload: dict[str, Any]) -> list[ContextEvent]:
+        offers = self.offers_for(payload)
+        for offer in offers:
+            self._bus.push_threadsafe(offer)
+        return offers
 
     def run_now(self) -> ContextEvent:
         """Publish a brief now ("Brief me now"). Doesn't count as today's run."""

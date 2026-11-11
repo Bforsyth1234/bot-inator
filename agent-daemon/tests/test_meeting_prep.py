@@ -197,11 +197,16 @@ def test_subjects_redacted_under_a_cloud_engine(monkeypatch):
     assert [m["subject"] for m in payload["mail"]["items"]] == [privacy.PLACEHOLDER] * 2
     assert "Budget numbers attached" not in json.dumps(payload)
     assert "Budget numbers attached" not in mp.build_prompt(mp.make_event(payload))
-    assert payload["mail"]["items"][0]["sender"] == "Alice Example <alice@example.com>"
+    # #80: under a cloud main engine addresses are dropped, names kept.
+    assert payload["mail"]["items"][0]["sender"] == "Alice Example"
+    assert payload["attendees"]["items"] == ["Alice Example", "Bob"]
+    assert "@example.com" not in payload["text"]
+    assert "@example.com" not in mp.build_prompt(mp.make_event(payload))
 
     monkeypatch.setattr(privacy, "role_is_cloud", lambda role: False)
     local = gather_prep(meeting(), NOW, **sources)
     assert local["mail"]["items"][0]["subject"] == "Budget numbers attached"
+    assert local["attendees"]["items"] == ["Alice Example <alice@example.com>", "Bob <bob@example.com>"]
 
 
 # ---- prompt / describe ----------------------------------------------------------------------

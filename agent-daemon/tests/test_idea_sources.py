@@ -44,7 +44,9 @@ def _meeting(video_url: str = "https://zoom.us/j/123456") -> ContextEvent:
     (_file("Zoom.dmg"), "installer_downloaded"),
     (_file("Zoom.dmg", action="renamed"), "installer_downloaded"),
     (_file("Archive.ZIP"), "archive_downloaded"),
-    (_file("statement.pdf"), None),
+    # #76: a document in Downloads is a prepared-offer kind; other PDFs aren't.
+    (_file("statement.pdf"), "document_downloaded"),
+    (_file("paper.pdf"), None),
     (_file("Screenshot 2026-11-08 at 10.00.00.png"), None),
     (_file("Zoom.dmg.crdownload"), None),
     (_file("Zoom.dmg", action="modified"), None),

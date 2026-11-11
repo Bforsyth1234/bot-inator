@@ -277,6 +277,17 @@ async def lifespan(app: FastAPI):
     # instances on the same file would overwrite each other.
     idea_feedback = IdeaFeedback(settings.idea_feedback_path)
     idea_state = IdeaState(settings.idea_feedback_path.with_name("idea_state.json"))
+    # #76: next-step cards for documents and mail invites / deadlines
+    # arrive filled in. Read-only preparation, one detection-engine call.
+    from ai.prepared_offers import Preparer  # noqa: WPS433
+
+    preparer = Preparer(
+        evaluate=make_detection_evaluator(
+            detection_engine,
+            system_prompt="Extract facts; reply with one JSON object only.",
+        ),
+        role="detection",
+    )
     idea_sources = [
         NextStepSuggester(
             event_bus=bus,
@@ -290,6 +301,7 @@ async def lifespan(app: FastAPI):
                 detection_engine, max_tokens=JUDGE_MAX_TOKENS,
                 system_prompt=NEEDS_REPLY_JUDGE_SYSTEM_PROMPT,
             ),
+            preparer=preparer,
         ),
         ChatGapDetector(
             event_bus=bus,
@@ -433,6 +445,10 @@ async def lifespan(app: FastAPI):
     app.state.daily_brief = next(
         (l for l in listeners if isinstance(l, DailyBriefScheduler)), None
     )
+    # #73 / #77: offers after the scheduled brief share the idea cooldowns
+    # and the declined-idea store.
+    if app.state.daily_brief is not None:
+        app.state.daily_brief.attach_ideas(idea_state, idea_feedback)
     app.state.listener_names = listener_names
 
     try:
@@ -485,6 +501,7 @@ from routes import mcp as mcp_routes  # noqa: E402
 from routes import meeting_prep as meeting_prep_routes  # noqa: E402
 from routes import outcomes as outcomes_routes  # noqa: E402
 from routes import permissions as permissions_routes  # noqa: E402
+from routes import preferences as preferences_routes  # noqa: E402
 from routes.tool_detail import router as tool_detail_router  # noqa: E402
 
 app.include_router(daily_brief_routes.router)
@@ -497,6 +514,8 @@ app.include_router(outcomes_routes.router)
 app.include_router(activity_routes.router)
 app.include_router(meeting_prep_routes.router)
 app.include_router(mcp_routes.router)
+# Wave 14 (#72): learned preferences.
+app.include_router(preferences_routes.router)
 
 
 def _next_seq() -> int:

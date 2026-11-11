@@ -128,6 +128,9 @@ struct ToolManagerView: View {
             // DECLINED IDEAS (#56): review and remove remembered denials.
             Divider()
             DeclinedIdeasView()
+            // LEARNED PREFERENCES (#72): what card decisions taught the agent.
+            Divider()
+            LearnedPreferencesView()
             // MCP SERVERS (#69): other apps' local tools, off until enabled.
             Divider()
             McpServersView()

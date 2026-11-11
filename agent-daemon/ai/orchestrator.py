@@ -44,7 +44,7 @@ from schemas.ws_messages import (
 )
 from tools import READ_ONLY_TOOL_NAMES
 
-from . import activity_store, chat_context, privacy, tool_summary
+from . import activity_store, chat_context, preference_learning, prepared_offers, privacy, tool_summary
 from .idea_outcomes import edit_facts, trigger_kind_of
 
 from .mlx_engine import MLXEngine
@@ -110,6 +110,20 @@ def _mail_skips_agent(event: ContextEvent) -> bool:
     if meta.get("bulk"):
         return True
     return NextStepSuggester.classify(event) in _MAIL_KINDS_HANDLED_BY_IDEAS
+
+
+def _offered_tool(meta: dict[str, Any]) -> str:
+    """The tool an idea's card asks about: a prepared offer's card tool
+    (one action's tool, or the bundle), else the built-in tool, else ""."""
+    prepared = meta.get(prepared_offers.PREPARED_KEY)
+    if prepared:
+        try:
+            offer = prepared_offers.PreparedOffer.from_dict(prepared)
+            if offer.actions:
+                return str(offer.to_card()["tool_name"])
+        except Exception:
+            logger.exception("prepared offer unreadable")
+    return str(meta.get("builtin_tool") or "")
 
 
 def _now_iso() -> str:
@@ -822,9 +836,28 @@ class Orchestrator:
                 event_id, "reasoning", f"Prompt: {prompt[:200]}"
             )
             meta = event.metadata or {}
+            # #72: the user's denials say "don't offer this here": refuse
+            # before any card (never instead of one).
+            offered = _offered_tool(meta)
+            if offered and await asyncio.to_thread(
+                self._learned_refusal, offered, trigger_kind_of("pattern_detected", meta)
+            ):
+                await self._emit_thought(
+                    event_id, "complete",
+                    f"Not offered: the user denied {offered} for this kind of event before.",
+                )
+                return
             self._current_builtin_idea = meta if meta.get("builtin_tool") else None
             self._current_idea = meta
             self._turn_kind = "pattern"
+            if meta.get(prepared_offers.PREPARED_KEY):
+                # #76: the card arrives filled in; the bundle IS the approval.
+                try:
+                    await self._handle_prepared_offer(event_id, meta)
+                finally:
+                    self._current_builtin_idea = None
+                    self._current_idea = None
+                return
             # #61: a tool installed this turn records which idea led to it.
             from tools import meta_tool_generator
 
@@ -979,7 +1012,10 @@ class Orchestrator:
             return []
         query = self._describe_event(event)
         try:
-            return await asyncio.to_thread(self.memory.recall_memory, query, 3)
+            # #72: learned preferences ride along with the similar memories.
+            return await asyncio.to_thread(
+                preference_learning.recall_with_preferences, self.memory, query, 3
+            )
         except Exception:
             logger.exception("memory.recall_memory failed")
             return []
@@ -1248,6 +1284,10 @@ class Orchestrator:
                             "ask again; reply 'no action' or answer without it."
                         ),
                     }
+            if refusal is None and not is_read_only:
+                # #72: a learned "don't offer <tool> for <trigger>" refuses
+                # the call before its card; it never runs a call without one.
+                refusal = Orchestrator._learned_refusal(orchestrator, tool_name)
             done_key = ""
             if not is_read_only and refusal is None:
                 done_key = tool_name + json.dumps(
@@ -1429,6 +1469,7 @@ class Orchestrator:
         tool_args: dict[str, Any],
         reasoning: str,
         summary: Optional[str] = None,
+        actions: Optional[list[dict[str, Any]]] = None,
     ) -> tuple[bool, dict[str, Any] | None]:
         """Return ``(approved, edited_args)`` from the user.
 
@@ -1453,6 +1494,7 @@ class Orchestrator:
                 reasoning=reasoning,
                 summary=summary or None,
                 timeout_seconds=int(self.approval_timeout),
+                actions=actions or None,
             ),
         )
         offer_id = self._record_offer_shown(tool_name, tool_args)
@@ -1469,6 +1511,7 @@ class Orchestrator:
             offer_id, "approved" if resp.approved else "declined"
         )
         self._record_decision(tool_name, tool_args, bool(resp.approved), resp.edited_args)
+        self._schedule_preference_learning()
         if tool_name == "generate_custom_tool":
             self._record_idea_feedback(tool_args, bool(resp.approved))
         idea = self._current_builtin_idea
@@ -1546,6 +1589,75 @@ class Orchestrator:
             )
         except Exception:
             logger.exception("approval_decisions.record failed")
+
+    # ---- learned preferences (#72) -----------------------------------------
+
+    def _schedule_preference_learning(self) -> Optional[asyncio.Future[Any]]:
+        """Learn from the decision log off the event loop (saving embeds)."""
+        log = getattr(self, "approval_decisions", None)
+        memory = getattr(self, "memory", None)
+        if log is None or memory is None:
+            return None
+        try:
+            fut = asyncio.get_running_loop().run_in_executor(
+                None, preference_learning.learn, log, memory
+            )
+        except Exception:
+            logger.exception("preference learning not scheduled")
+            return None
+        self._preference_learning = fut
+        return fut
+
+    def _learned_refusal(self, tool_name: str, trigger: Optional[str] = None) -> Optional[dict[str, Any]]:
+        """The refusal for a call the user's denials stopped, else None.
+
+        ``trigger`` defaults to the current turn's trigger kind. Chat turns
+        and build cards are never stopped (``preference_learning``).
+        """
+        memory = getattr(self, "memory", None)
+        if memory is None:
+            return None
+        if trigger is None:
+            trigger = trigger_kind_of(
+                getattr(self, "_current_event_type", "") or "",
+                getattr(self, "_current_idea", None) or {},
+            )
+        try:
+            if preference_learning.is_suppressed(memory, tool_name, trigger):
+                return preference_learning.refusal(tool_name, trigger)
+        except Exception:
+            logger.exception("learned preference check failed")
+        return None
+
+    # ---- prepared offers (#76) ----------------------------------------------
+
+    async def _handle_prepared_offer(self, event_id: str, meta: dict[str, Any]) -> None:
+        """Show a prepared offer's card; run its ticked actions only after
+        the user approves. Deny or timeout runs nothing. The #79 offer and
+        decision records happen in ``_request_approval`` as for any card."""
+        try:
+            offer = prepared_offers.PreparedOffer.from_dict(meta[prepared_offers.PREPARED_KEY])
+            card = offer.to_card() if offer.actions else None
+        except Exception:
+            logger.exception("prepared offer unreadable")
+            card = None
+        if card is None:
+            await self._emit_thought(event_id, "complete", "Prepared offer was empty; nothing offered.")
+            return
+        # The card's tool is what the user decides on (one tool, or the bundle).
+        self._current_builtin_idea = {**meta, "builtin_tool": card["tool_name"]}
+        self._current_idea = meta
+        approved, edited = await self._request_approval(event_id=event_id, **card)
+        if not approved:
+            await self._emit_thought(event_id, "complete", "Prepared offer not approved; nothing ran.")
+            return
+        table = {getattr(t, "name", getattr(t, "__name__", "")): t for t in (self.tools or [])} or None
+        results = await asyncio.to_thread(prepared_offers.run_approved_actions, offer, edited, table)
+        for item in results:
+            self._turn_tool_calls.add(item["tool"])
+            await self._emit_thought(event_id, "tool_result", f"{item['tool']}: {item['result']}")
+        ran = ", ".join(r["tool"] for r in results) or "nothing (every step was unticked)"
+        await self._emit_thought(event_id, "complete", f"Prepared offer approved; ran {ran}.")
 
     def _previously_declined(self, args: list[Any], kwargs: dict[str, Any]) -> str:
         """Name of a declined tool idea this generate_custom_tool call

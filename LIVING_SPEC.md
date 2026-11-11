@@ -160,6 +160,20 @@ Approval flow:
 4. Default timeout: 120 s. On timeout or `approved: false`, the wrapper
    returns `{"skipped": True, "reason": "user_denied"}` back into the
    agent loop which surfaces a `no action` thought.
+5. Prepared offers (#76): `approval_request` may carry `actions`
+   (`[{tool, args, enabled, label}]`, `ApprovalAction`; absent = a one-call
+   card). Two or more actions: `tool_name` is `prepared_offer` and the card
+   shows a tick box per action; the response's `edited_args` carries
+   `{"actions": [...]}` back (or plain `{"args","kwargs"}` edits for a
+   one-action card). The bundle card IS the approval: only the ticked
+   actions run, after Approve, through the normal tool functions, and only
+   tools the offer listed (`move_file`, `create_reminder`, `create_event`).
+   Deny or timeout runs nothing. The #79 offer and decision records happen
+   as for any card.
+6. Learned preferences (#72): a call whose tool + trigger kind the user
+   denied 3 times in a row (no approval between) is refused before its card
+   with `user_declined_before`; a `pattern_detected` idea for it is not
+   offered. A preference never lets a call run without its card (7a).
 
 Calendar flow (#60): the menu bar app owns EventKit (the daemon's Python
 is silently denied it), and the daemon asks it over this WebSocket.
@@ -178,7 +192,9 @@ is silently denied it), and the daemon asks it over this WebSocket.
    request shows the macOS prompt) and for `request_access`.
 3. The app answers **`calendar_response`** `{request_id, ok, events? |
    event_id? + calendar?, error?, authorization?}`; `main.py` routes it to
-   the bridge. Events are #42 dicts. A disconnect fails pending requests.
+   the bridge. Events are #42 dicts, plus optional `attendees`
+   `[{name, email, is_self}]` (#80; the key is absent when the backend
+   doesn't know, `[]` for no other people). A disconnect fails pending requests.
 4. `ready()` (watcher / setup-scan gate) = the reported status is
    `full_access`; the Permissions `calendars` row reads the same status,
    and its Request click sends `request_access`. No app connected → the
@@ -227,6 +243,8 @@ the bearer token (see Auth above):
 | PUT    | `/api/activity`           | `{enabled}`: the history switch (#75).            |
 | DELETE | `/api/activity`           | Forget every activity row (#75).                  |
 | GET/PUT| `/api/meeting-prep`       | `{enabled, minutes_before 1..10, locked_fields}` (#71). |
+| GET    | `/api/preferences/learned` | Preferences learned from card decisions, newest first: `[{id, text, rule, tool_name, trigger_kind, created_at}]` (#72). |
+| DELETE | `/api/preferences/learned/{id}` | Forget one (tombstoned: old decisions don't re-learn it) (#72). |
 | GET    | `/api/mcp/servers`        | MCP servers, their tools and flags, the load cap (#69). |
 | POST   | `/api/mcp/servers`        | Add `{name, command, args, env}` (stdio only) (#69). |
 | DELETE | `/api/mcp/servers/{name}` | Stop and forget a server (#69).                   |
@@ -284,7 +302,8 @@ restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 | `ai/friction.py`              | `FrictionDetector`: copy in A → paste in B loops   |
 |                               | and app ping-pong → judged ideas.                  |
 | `events/mail_watcher.py`      | Mail.app Envelope Index (read-only) → mail_received|
-| `events/calendar_watcher.py`  | Upcoming meetings → event_starting_soon.           |
+| `events/calendar_watcher.py`  | Upcoming meetings → event_starting_soon (with      |
+|                               | `attendees` when known, #80; personal field).      |
 | `events/clipboard_watcher.py` | Clipboard changes → clipboard_changed (app + kind, |
 |                               | never content).                                    |
 | `events/daily_brief.py`       | One `daily_brief` event a day at                   |
@@ -294,9 +313,37 @@ restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 |                               | last-24 h mail headers (no bodies; subjects        |
 |                               | redacted for cloud engines) and due reminders,     |
 |                               | read-only; names a source it can't read; never     |
-|                               | prompts for a permission (#65).                    |
+|                               | prompts for a permission (#65). Sections added in  |
+|                               | wave 14: "Waiting on" (#73, `ai/waiting_on.py`,    |
+|                               | sent mail that asked something, unanswered for     |
+|                               | AGENT_WAITING_ON_DAYS 1..14, default 3) and        |
+|                               | "Look-ahead" (#77, `events/lookahead.py`: travel,  |
+|                               | mail deadlines, clashes in the next 3 days, from   |
+|                               | the brief's own sources; skipped checks named).    |
+|                               | After the SCHEDULED brief only: ≤3 "draft a        |
+|                               | nudge?" `draft_email` ideas (cooldown 7 d per      |
+|                               | message id) and each look-ahead gap's built-in     |
+|                               | offer (cooldown 7 d per gap key; dropped when it   |
+|                               | resembles a declined idea), as `pattern_detected`. |
 | `ai/privacy.py`               | Replaces personal text (iMessage, mail) in cloud   |
 |                               | engines' prompts unless AGENT_CLOUD_PERSONAL_TEXT=1|
+|                               | Also calendar `attendees` (`event_starting_soon`,  |
+|                               | `meeting_prep`) and the brief's `waiting_on` /     |
+|                               | `lookahead` in detection windows (#80). Meeting    |
+|                               | prep drops attendee/sender email addresses (names  |
+|                               | kept) under a cloud main engine (#80).             |
+| `ai/preference_learning.py`   | Learns from the #79 decision log after each card   |
+|                               | (off the event loop): 3 denials of a tool for one  |
+|                               | trigger kind → stop offering it; shortened drafts  |
+|                               | → "keeps drafts short". Saved as memories          |
+|                               | (`kind=preference, source=approval`), recalled with|
+|                               | every prompt; `routes/preferences.py` (#72).       |
+| `ai/prepared_offers.py`       | `Preparer`: read-only preparation before a next-   |
+|                               | step card (documents in Downloads → name, folder,  |
+|                               | reminder; mail invites/deadlines → filled          |
+|                               | `create_event`/`create_reminder`); ≤1 detection    |
+|                               | call, 10 s; any failure = the plain offer. Wired in|
+|                               | `NextStepSuggester(preparer=…)` (#76).             |
 | `ai/permissions.py`           | Permission table + never-prompting checks (#59);   |
 |                               | `GET /api/permissions` in `routes/permissions.py`. |
 | `ai/idea_match.py`            | Declined-idea matching (names, model2vec, judge);  |
@@ -455,7 +502,10 @@ bypass the approval gate and run inline; all other tools still emit an
 | `read_clipboard`   | ✅         | `pbpaste` → string.                              |
 | `write_clipboard`  |           | `pbcopy` ← string.                                |
 | `summarize_file`   | ✅         | Metadata + ≤2 KB preview for text files.         |
-| `move_file`        |           | Moves a file into an existing directory.          |
+| `move_file`        |           | Moves a file into an existing directory; optional |
+|                    |           | `new_name` (plain name, no separators, no leading |
+|                    |           | dot, keeps the extension if omitted); never       |
+|                    |           | overwrites an existing file (#76).                |
 | `send_imessage`    |           | AppleScript `tell application "Messages"` → send  |
 |                    |           | to a buddy on the iMessage service.               |
 | `remember_preference`| ✅       | Persists a user preference string into the shared |
@@ -481,6 +531,8 @@ bypass the approval gate and run inline; all other tools still emit an
 |                    |           | headers, reminders due (#65).                     |
 | `list_events`      | ✅         | Calendar events in a range, via the menu bar      |
 |                    |           | app's EventKit (#60; app must be running).        |
+|                    |           | `attendees`: other people's names only, never     |
+|                    |           | addresses (#80).                                  |
 | `create_event`     |           | Adds a Calendar event (app's EventKit; default    |
 |                    |           | calendar unless one is named).                    |
 | `list_reminders`   | ✅         | Reminders (EventKit/AppleScript), soonest first.  |

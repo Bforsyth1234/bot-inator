@@ -18,12 +18,22 @@ import tools
 import user_settings
 from ai import privacy
 from events import daily_brief as db
+from events import lookahead
 from events.daily_brief import DailyBriefScheduler, gather_brief
 from events.event_bus import EventBus
 from routes import daily_brief as routes_db
 from tools import calendar_access
 
 TZ = timezone(timedelta(hours=-7))
+
+
+@pytest.fixture(autouse=True)
+def _no_sent_mail(monkeypatch):
+    """#73: the brief's "Waiting on" source reads sent mail; these tests
+    fake it (the wave-14 wiring tests cover the section itself)."""
+    from ai import waiting_on as wo
+
+    monkeypatch.setattr(wo, "waiting_on", lambda now=None, **k: {"status": "ok", "items": [], "truncated": False})
 
 
 def at(hour: int, minute: int = 0, day: int = 10) -> datetime:
@@ -232,7 +242,8 @@ def test_start_stop_publishes_on_a_real_bus(tmp_path):
 # ---- gathering -----------------------------------------------------------------
 
 def fake_events(start="", end=""):
-    assert start == "2026-11-10" and end == ""
+    # The brief asks for today; the look-ahead (#77) for 14 days back to 2 ahead.
+    assert (start, end) in {("2026-11-10", ""), ("2026-10-27", "2026-11-12")}
     return {"status": "ok", "events": [
         {"title": "Standup", "start": "2026-11-10T09:00:00-07:00",
          "end": "2026-11-10T09:30:00-07:00", "location": "Zoom", "all_day": False,
@@ -243,7 +254,8 @@ def fake_events(start="", end=""):
 
 
 def fake_mail(since):
-    assert since == at(8, 0, day=9)  # the last 24 hours
+    # The last 24 hours (brief), or 60 days of headers (look-ahead, #77).
+    assert since in {at(8, 0, day=9), at(8, 0) - timedelta(days=60)}
     return {"status": "ok", "messages": [
         {"message_id": 41, "sender": "Alice <alice@example.com>",
          "subject": "Can you review the contract?", "date": "2026-11-10T01:00:00+00:00",
@@ -294,6 +306,8 @@ def test_payload_built_from_fake_tool_results():
         "- Pay rent (overdue, since Sunday November 8)",
         "- Call dentist (overdue, today 7:00 AM)",
         "- Book flights (due today 5:00 PM)",
+        "Waiting on: nothing unanswered",
+        "Look-ahead skipped: unopened files (" + lookahead.NO_FILE_HISTORY + ")",
     ])
     # Bodies and notes never enter the payload.
     dumped = json.dumps(payload)
@@ -315,6 +329,8 @@ def test_empty_sources_say_so():
         "Calendar: nothing today",
         "Mail: nothing new in the last 24 hours",
         "Reminders: nothing due",
+        "Waiting on: nothing unanswered",
+        "Look-ahead skipped: unopened files (" + lookahead.NO_FILE_HISTORY + ")",
     ]
 
 

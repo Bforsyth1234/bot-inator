@@ -47,6 +47,7 @@ from pathlib import Path, PurePath
 from typing import Any, Awaitable, Callable, Iterable, Optional, Protocol
 
 from ai import needs_reply as reply_checks
+from ai import prepared_offers
 from ai import privacy
 from ai.pattern_recognizer import PatternRecognizer
 from ai.privacy import redact_event, redacted_event
@@ -139,6 +140,9 @@ FOLLOW_UPS: dict[str, str] = {
         "draft_email only opens an unsent draft for the user to review; "
         "never say the email was sent."
     ),
+    # #76: an invoice / receipt / statement / ticket in Downloads. The
+    # preparer fills the card (name, folder, reminder) before it is shown.
+    prepared_offers.DOCUMENT_TRIGGER: prepared_offers.DOCUMENT_FOLLOW_UP,
 }
 
 # Kinds a built-in tool handles directly: kind -> (idea name, built-in tool).
@@ -152,7 +156,11 @@ BUILTIN_FOLLOW_UPS: dict[str, tuple[str, str]] = {
     "mail_shipping": ("open_email_tracking_page", "open_url"),
     "mail_deadline": ("remind_email_deadline", "create_reminder"),
     "mail_needs_reply": ("draft_email_reply", "draft_email"),
+    prepared_offers.DOCUMENT_TRIGGER: (prepared_offers.DOCUMENT_IDEA_NAME, "move_file"),
 }
+
+# Kinds the #76 preparer fills in before the card is shown.
+PREPARED_KINDS: frozenset[str] = frozenset({prepared_offers.DOCUMENT_TRIGGER, *prepared_offers.MAIL_KINDS})
 
 # Judge for #70: does this email ask the user for a reply? Read by
 # NextStepSuggester(reply_judge=...); the runner builds the evaluator with
@@ -501,6 +509,7 @@ class NextStepSuggester(_CooldownSource):
         reply_judge: Optional[Evaluate] = None,
         read_message: Optional[ReadMessage] = None,
         user_addresses: Iterable[str] = (),
+        preparer: Optional[Any] = None,
     ) -> None:
         super().__init__(
             event_bus=event_bus, evaluate=evaluate,
@@ -515,6 +524,8 @@ class NextStepSuggester(_CooldownSource):
         # one thread in the same poll make one offer, not two.
         self._reply_inflight: set[str] = set()
         self._reply_notice_sent = False
+        # #76: ``ai.prepared_offers.Preparer`` (main.py); None = plain offers.
+        self.preparer = preparer
 
     # One offer per thread for two weeks, and per sender for half a day.
     REPLY_THREAD_COOLDOWN = 14 * 24 * 3600.0
@@ -535,6 +546,8 @@ class NextStepSuggester(_CooldownSource):
             name = PurePath(str(meta.get("path") or "")).name
             if not name or name.startswith(".") or name.lower().endswith(_TEMP_SUFFIXES):
                 return None
+            if prepared_offers.classify_document_event(event):
+                return prepared_offers.DOCUMENT_TRIGGER
             return _FILE_KINDS.get(PurePath(name).suffix.lower())
         if event.event_type == "imessage_received":
             text = str(meta.get("text") or "")
@@ -638,7 +651,7 @@ class NextStepSuggester(_CooldownSource):
             idea = self._claim_builtin(event, kind)
             if idea is None:
                 return None
-            return asyncio.create_task(self._publish_idea(idea), name="next-step")
+            return asyncio.create_task(self._publish_prepared(idea, event), name="next-step")
         if self._cooling(kind):
             return None
         # Cool down per kind before the model call so a burst of PDFs
@@ -665,6 +678,17 @@ class NextStepSuggester(_CooldownSource):
             return None
         self._start_cooldown(key)
         return idea
+
+    async def _publish_prepared(self, idea: dict[str, Any], event: ContextEvent) -> None:
+        """#76: fill the card before it is shown (read-only preparation),
+        then publish. Preparation never blocks the offer: on any failure the
+        plain idea is published."""
+        if self.preparer is not None and idea.get("trigger") in PREPARED_KINDS:
+            try:
+                idea = await self.preparer.prepare(idea, event)
+            except Exception:
+                logger.exception("prepared offer failed; plain offer")
+        await self._publish_idea(idea)
 
     # ---- reply drafts (#70) ----------------------------------------------
 
@@ -777,7 +801,7 @@ class NextStepSuggester(_CooldownSource):
         if not published and fallback is not None:
             idea = self._claim_builtin(event, fallback)
             if idea is not None:
-                await self._publish_idea(idea)
+                await self._publish_prepared(idea, event)
 
     async def _check_and_offer_reply(
         self, event: ContextEvent, sender: str, sender_key: str, claimed: list[str],

@@ -41,6 +41,9 @@ ALLOWED_KEYS = frozenset({
     # Activity history (#75): "1"/"0" (default on). Read live by
     # ai.activity_store through os.environ (routes/activity.py updates it).
     "AGENT_ACTIVITY_HISTORY",
+    # Waiting on (#73): whole days a sent question may go unanswered before
+    # the brief lists it, 1..14 (default 3). Read live by ai.waiting_on.
+    "AGENT_WAITING_ON_DAYS",
 })
 PROVIDERS = ("local", "groq")
 

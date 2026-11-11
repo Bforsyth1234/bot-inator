@@ -395,11 +395,39 @@ def _ok(items: list[Any], cap: int, **extra: Any) -> dict[str, Any]:
     return {"status": "ok", "items": items[:cap], "truncated": len(items) > cap, **extra}
 
 
-def _person_text(person: dict[str, Any]) -> str:
+ADDRESS_HIDDEN = "[address kept on this Mac]"
+
+
+def _person_text(person: dict[str, Any], hide_address: bool = False) -> str:
     name, email = person.get("name") or "", person.get("email") or ""
+    if hide_address:
+        return name or (ADDRESS_HIDDEN if email else "")
     if name and email:
         return f"{name} <{email}>"
     return name or email
+
+
+def _hide_addresses(text: str) -> str:
+    """``text`` with email addresses removed, names kept (#80): ``"Alice
+    <alice@x.com>"`` -> ``"Alice"``, a bare address -> :data:`ADDRESS_HIDDEN`."""
+    text = str(text or "")
+    if not _EMAIL_RE.search(text):
+        return text
+    name = re.sub(r"<[^>]*>", "", text)
+    name = _EMAIL_RE.sub("", name).strip().strip('"').strip()
+    return name or ADDRESS_HIDDEN
+
+
+def _addresses_hidden() -> bool:
+    """True when the main engine (which words the card) runs in the cloud
+    and the user has not allowed personal text there (#80, #31/#52)."""
+    from ai import privacy
+
+    try:
+        return privacy.should_redact("main")
+    except Exception:
+        logger.exception("meeting prep: privacy lookup failed")
+        return True
 
 
 def _gather_files(title: str, find_files: Callable[..., Any]) -> dict[str, Any]:
@@ -483,8 +511,14 @@ def gather_prep(
     find_files: Optional[Callable[..., Any]] = None,
     find_note: Optional[Callable[..., Any]] = None,
     redact_subject: Optional[Callable[[str], str]] = None,
+    hide_addresses: Optional[bool] = None,
 ) -> Optional[dict[str, Any]]:
     """Gather the prep card for an ``event_starting_soon`` payload. Never raises.
+
+    ``hide_addresses`` (default: ``privacy.should_redact("main")``) drops
+    attendee and sender email addresses from the payload and the card,
+    keeping names (#80); the addresses are still used locally for the mail
+    lookup.
 
     Returns None when the meeting gets no prep (:func:`skip_reason`). The
     sources are injectable (tests pass fakes): ``mail_with(addresses,
@@ -502,6 +536,7 @@ def gather_prep(
     find_files = find_files or _default_find_files
     find_note = find_note or _default_find_note
     redact = redact_subject or _redact_subject
+    hide = _addresses_hidden() if hide_addresses is None else bool(hide_addresses)
     start = _parse(meta.get("start"))
     assert start is not None  # skip_reason checked it
     title = str(meta.get("title") or "(untitled)")
@@ -512,7 +547,7 @@ def gather_prep(
         mail = _unavailable("no attendees to look up (" + ATTENDEES_UNKNOWN + ")")
     else:
         guests = others(people)
-        attendees = _ok([_person_text(p) for p in guests], MAX_ATTENDEES)
+        attendees = _ok([_person_text(p, hide) for p in guests], MAX_ATTENDEES)
         addresses = [p["email"] for p in guests if p["email"]]
         if not addresses:
             mail = _unavailable("no attendee has an email address")
@@ -525,7 +560,7 @@ def gather_prep(
                     mail = _ok([
                         {
                             "message_id": m.get("message_id"),
-                            "sender": str(m.get("sender") or "unknown"),
+                            "sender": (_hide_addresses if hide else str)(str(m.get("sender") or "unknown")),
                             # Sender + subject only; bodies never enter the card.
                             "subject": redact(str(m.get("subject") or "")),
                             "date": str(m.get("date") or ""),

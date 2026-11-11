@@ -522,12 +522,15 @@ struct ApprovalEditSpec {
             ),
             ApprovalEditSpec(
                 toolName: "move_file",
-                params: ["src", "dst_dir"],
+                params: ["src", "dst_dir", "new_name"],
                 fields: [
                     .init(key: "src", label: "File", placeholder: "/path/to/file",
                           required: true, monospaced: true),
                     .init(key: "dst_dir", label: "Move to folder", placeholder: "/path/to/folder",
                           required: true, monospaced: true),
+                    // #76: optional rename; empty keeps the file's own name.
+                    .init(key: "new_name", label: "File name", placeholder: "Keep the current name",
+                          monospaced: true),
                 ],
                 approveLabel: "Approve & Move"
             ),
