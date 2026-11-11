@@ -195,7 +195,8 @@ You still approve every call. Built-in tools a generated tool calls
 (e.g. `show_notification`) run inside the same sandbox without a second
 approval. If `sandbox-exec` is missing or fails its self-test, generated
 tools are not loaded. `AGENT_TOOL_SANDBOX=0` turns the sandbox off and
-runs them in the daemon process as before.
+runs them in the daemon process as before. A tool run in the daemon (trusted, or sandbox off) gets privacy-ledger
+rows for the hosts its Python code connected to, best effort, not a boundary.
 
 ## Configuration
 

@@ -54,8 +54,10 @@ SANDBOX_BLOCKS: tuple[str, ...] = (
     "Network access, unless the tool imports a network module.",
 )
 NETWORK_NOTE = (
-    "This tool imports a network module ({reason}). Outside the sandbox its "
-    "network use is not recorded in the privacy ledger."
+    "This tool imports a network module ({reason}). Outside the sandbox the "
+    "privacy ledger lists the hosts its Python code connects to, best effort: "
+    "it is a record, not a boundary, and what a program the tool starts "
+    "sends is not visible."
 )
 
 
