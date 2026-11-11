@@ -1572,7 +1572,7 @@ Deviations:
 
 ---
 
-#93 — First-run engine choice: recommend local or a cloud key from this Mac's memory [ ]
+#93 — First-run engine choice: recommend local or a cloud key from this Mac's memory [~] live
 Wave: — (not scheduled; after #97) · Agent: _ · Added: 2026-11-10 · Source: user ("perhaps we should default taking ai api keys for users with out 128gb macs? would that make it more user friendly?")
 Ask: A new user should not be left on a local setup their Mac runs
 badly. On a small Mac, point them at a cloud key.
@@ -1665,9 +1665,62 @@ Verify:
   would have supplied testers, was deleted 2026-11-11).
 ⚬ Live: on a fresh `~/.bot-inator` the screen shows the recommendation
   for this Mac's memory → pick Cloud → no model download starts.
+Results (assistant, 2026-11-11, branch `worktree-agent-a184e9e296193e9be`
+from wave-17, commit 7eac1c9):
+⚬ New `ai/first_run.py` (`physical_memory_gb`, `recommend`, `is_pending`,
+  `PendingEngine`, `check_model_folder`, `local_download_bytes`,
+  `is_downloaded`, `Downloader`), `routes/first_run.py` (GET state, POST
+  /download, POST /choice), `FirstRunView.swift` (window + view model),
+  `tests/test_first_run.py` (28 tests), `docs/providers.md`. Changed:
+  main.py (`_build_engines` returns `PendingEngine`s while pending, eager
+  load skipped, router included), user_settings.py (`AGENT_FIRST_RUN_CHOICE`
+  key), tests/conftest.py (`AGENT_SKIP_FIRST_RUN=1`), tests/test_egress_log.py
+  (hook point `ai/first_run.py: Downloader._run`, which goes through
+  `egress_log.model_download`), MenuBarUIApp.swift (one line in
+  `applicationDidFinishLaunching`), .env.example, LIVING_SPEC §1.
+⚬ pytest: 1675 passed (1640 after #97 + 7 #97 ledger tests + 28 here).
+  swiftc build to a scratch path: clean.
+⚬ Non-vacuity (each reverted → test failed → restored → 28 pass): pending
+  gate in `_build_engines` (4 fail, including "pending start loads and
+  downloads nothing"), 409 once answered, key required for Cloud, loopback
+  required for Local server, "download first" for the download source,
+  GGUF refusal (2 fail), threshold 24→128 (2 fail).
+⚬ This Mac reads 128 GB → recommends Local (in-process, not the screen).
 Deviations:
+1. "Choosing writes settings and loads engines": the route saves; the app
+   then calls the existing `POST /api/restart`, and the re-exec'd daemon
+   (no longer pending) builds and eager-loads the chosen engines. Engines
+   are wired into the orchestrator and app state at startup, so a hot swap
+   was more risk than the restart Settings already uses. The test checks
+   the saved file, then rebuilds engines from it as the restart does.
+2. Opened from AppDelegate as an AppKit window (`FirstRunWindowController`)
+   rather than a new SwiftUI `Window` scene: AppDelegate has no
+   `openWindow`. One line in MenuBarUIApp.swift.
+3. Pending also needs `AGENT_SKIP_FIRST_RUN` unset (env only): the test
+   settings path never exists, so without it every test app start would be
+   pending. A `.env`-only setup with no settings.json also sees the screen.
+4. Local "download" source: the choice is refused until the models are in
+   the HF cache (the Download button), so a Local choice can never start a
+   download on its own (8c). Progress is the cache size against
+   `STOCK_MODEL_BYTES` (measured 2026-11-11 from this Mac's cache: 13.7 GB
+   = 12.7 GiB); a non-stock hub model shows size unknown.
+5. Folder mode asks for all roles' folders (one folder may serve several),
+   so no role silently falls back to a stock download.
+6. Decision 6 (Groq plan): Groq's rate-limits page lists the GPT-OSS models
+   under the Developer plan; the free plan's table was not readable.
+   UNVERIFIED; the screen says a Developer-plan key was checked and free is
+   not verified.
+7. Decision 3 not measured (no 16 GB Mac). While pending, the embedding
+   model (sentence-transformers, #82 hook) can still load on first memory
+   use; only the three engines are gated.
+Live check: move `~/.bot-inator/settings.json` aside (or run with
+`AGENT_SETTINGS_PATH` at a new path), start the daemon and app → "Set up
+bot-inator" opens, "Recommended for this Mac" on Local (128 GB), nothing
+selected → no engine log line "Loading MLX model" → pick Cloud key, a
+preset, paste a key → Use this engine → daemon restarts on that preset, no
+model download, permissions checklist shows. Restore the settings file.
 
-#97 — One OpenAI-compatible provider, with presets for OpenAI, Anthropic, Gemini, xAI and Groq [ ]
+#97 — One OpenAI-compatible provider, with presets for OpenAI, Anthropic, Gemini, xAI and Groq [~] live
 Wave: — (not scheduled; before #93) · Agent: _ · Added: 2026-11-10 · Source: user ("i want to add more support to other apis. is there a standard? or do we just do the big 4 anthropic openai and gemini and grok?"; user: "yes please")
 Ask: Let the user bring a key from the provider they already pay for,
 without one integration per provider.
@@ -1782,6 +1835,34 @@ Checked, no problem: preset keys put in `os.environ` do not reach MCP
 servers; the `mcp` package starts them with `get_default_environment()`
 (an allow-list: HOME, PATH, ...) plus the server's own configured env.
 Generated tools get a minimal env too (`tools/tool_sandbox.py`).
+Results (assistant, 2026-11-11): provider-97 (4985d41) brought onto
+wave-17 as commit 7ea273a on branch `worktree-agent-a184e9e296193e9be`.
+⚬ Conflicts resolved: `GroqEngine.__init__` takes both `role` (#82) and the
+  preset fields; `_chat_completion` keeps the ledger hook and sends
+  `{token_param: max_tokens}`; `build_engine` now passes `role`; main.py
+  uses `build_engine` for every non-local role and keeps the wave-15/16
+  routers; `ALLOWED_KEYS` keeps the wave-16 keys plus the preset keys; the
+  `test_every_hook_point_records` skip from the old branch was dropped (the
+  hooks are wired now). README.md was NOT changed (another agent owns it):
+  the user docs are in `docs/providers.md`.
+⚬ New on merge: `egress_log.record_completion` skips a loopback base URL,
+  so a Local server call is not a ledger row (decision 6). Tests: 6 cloud
+  presets each give one row with their host and role, and no key in the
+  row; a local_server call gives none.
+⚬ pytest: 1640 passed after the merge, 1647 with the new tests (1675 with
+  #93). swiftc build clean. Non-vacuity: loopback skip removed → the
+  loopback test failed; `role=None` in `build_engine` → 6 cloud tests
+  failed; both restored.
+⚬ Model ids re-checked 2026-11-11: Anthropic `claude-sonnet-5-5` /
+  `claude-haiku-5-5` confirmed on its models page; Gemini's
+  OpenAI-compat base URL confirmed. OpenAI, Gemini, xAI and OpenRouter
+  still ship no default model (the docs pages, read through a summarizer,
+  named ids that were not cross-checked; the user picks from List models).
+Live check (one row per preset the user has a key for): Settings → preset
+→ paste key → List models → pick → Test → Save → Restart Daemon → a chat
+turn, a tool call that raises a card, a judge call, a tool draft; then
+Settings → Privacy ledger shows rows for that host. Presets with no run
+stay "untested".
 
 ---
 
