@@ -300,6 +300,7 @@ HOOK_POINTS: dict[str, str] = {
     "tools/open_url.py": "open_url",
     "ai/memory.py": "_load_st_model",
     "routes/providers.py": "_client",  # #97 Settings "List models" / "Test"
+    "ai/first_run.py": "Downloader._run",  # #93 first-run "Download" button
 }
 # file -> why a network import there sends nothing for the ledger.
 EXEMPT: dict[str, str] = {}

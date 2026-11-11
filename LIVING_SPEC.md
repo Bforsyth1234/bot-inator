@@ -147,9 +147,20 @@ alternative: any OpenAI-compatible preset (#97: Groq, OpenAI, Anthropic,
 Gemini, xAI, OpenRouter, custom), first Groq (`AGENT_PROVIDER=groq`, Phase
 4.7). Whether an engine is cloud is decided by its base URL's host, not the
 provider name: a loopback URL (Ollama, LM Studio: the `local_server`
-preset) is local. With a cloud provider selected,
+preset) is local, and its calls are not ledger rows. With a cloud provider selected,
 event summaries, chat and tool drafts leave the machine; nothing else
 about the consent model changes.
+
+**First run (#93).** A fresh install (no `~/.bot-inator/settings.json`)
+starts with no engine loaded and downloads nothing; the app shows the
+first-run screen (`FirstRunView.swift`, `routes/first_run.py`,
+`ai/first_run.py`). It marks Local (24 GB of memory and up) or Cloud key
+(under 24 GB) "Recommended for this Mac" but selects nothing: the user
+picks Local, Cloud key or Mixed (only tool drafts to the cloud), and a
+cloud engine needs their own key. The stock local models download only
+from the screen's Download button. An install with a settings file never
+sees the screen, and its routes refuse (409) once it is answered.
+`AGENT_SKIP_FIRST_RUN=1` turns it off (tests, scripted setups).
 
 **The egress ledger (#82).** Everything that leaves the Mac is recorded in
 `~/.bot-inator/egress.db` (`ai/egress_log.py`, override `AGENT_EGRESS_DB`,

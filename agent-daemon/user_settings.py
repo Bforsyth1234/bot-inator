@@ -59,6 +59,10 @@ ALLOWED_KEYS = frozenset({
     # "whisper". Read live by events.meeting_notes.
     "AGENT_MEETING_NOTES",
     "AGENT_MEETING_NOTES_ENGINE",
+    # First run (#93): "local" | "cloud" | "mixed", what the user picked on
+    # the first-run screen. Informational; its presence is not the gate
+    # (the settings file existing is).
+    "AGENT_FIRST_RUN_CHOICE",
 }) | providers.preset_env_keys()  # <PRESET>_API_KEY / _API_BASE / _<ROLE>_MODEL (#97)
 PROVIDERS = providers.PROVIDERS
 

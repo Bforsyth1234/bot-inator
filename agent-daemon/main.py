@@ -152,6 +152,13 @@ def _build_engines() -> tuple[Any, Any, Any]:
         "analysis": settings.analysis_model_path,
         "drafting": settings.drafting_model_path,
     }
+    from ai import first_run  # noqa: WPS433
+
+    if first_run.is_pending():
+        # #93: nothing loads or downloads until the user picks an engine.
+        logger.info("First run not answered yet: no engine loaded")
+        pending = [first_run.PendingEngine(r) for r in ("main", "analysis", "drafting")]
+        return pending[0], pending[1], pending[2]
     engines: list[Any] = []
     for role in ("main", "analysis", "drafting"):
         provider = settings.engine_provider(role)
@@ -214,7 +221,9 @@ async def lifespan(app: FastAPI):
     # For the Groq provider eager-loading is essentially free — it just
     # constructs the OpenAI client and validates the API key — but we
     # still skip it under ``AGENT_EAGER_LOAD=0`` for symmetry with tests.
-    if os.environ.get("AGENT_EAGER_LOAD", "1") != "0":
+    from ai.first_run import PendingEngine  # noqa: WPS433
+
+    if os.environ.get("AGENT_EAGER_LOAD", "1") != "0" and not isinstance(engine, PendingEngine):
         logger.info(
             "Eager-loading %s models: main=%s analysis=%s drafting=%s",
             settings.engine_providers(),
@@ -680,6 +689,10 @@ app.include_router(remote_routes.router)
 app.include_router(meeting_notes_routes.router)
 # #97: provider presets (List models, Test).
 app.include_router(providers_routes.router)
+# #93: first-run engine choice.
+from routes import first_run as first_run_routes  # noqa: E402
+
+app.include_router(first_run_routes.router)
 
 
 def _next_seq() -> int:

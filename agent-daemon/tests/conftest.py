@@ -40,6 +40,10 @@ os.environ.setdefault(
 # A developer's .env opt-in to sending personal text to the cloud (#31) must
 # not change test expectations; tests that need it set it themselves.
 os.environ.setdefault("AGENT_CLOUD_PERSONAL_TEXT", "0")
+# #93: the settings path above usually does not exist, which would make
+# every app start "first run pending" (no engines). tests/test_first_run.py
+# clears this to exercise the screen.
+os.environ.setdefault("AGENT_SKIP_FIRST_RUN", "1")
 # Wave 13: keep the developer's real ~/.bot-inator stores out of tests:
 # activity history (#75), MCP servers (#69), suggestion outcomes and the
 # approval-decision log (#79).
