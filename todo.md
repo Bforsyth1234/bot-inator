@@ -1120,7 +1120,7 @@ install the badge shows.
 
 ---
 
-#107 — Vision: "look at my screen" with a local vision model [~]
+#107 — Vision: "look at my screen" with a local vision model [~] live
 Wave: 19 (slot C) · Agent: subagent · Added: 2026-11-11 · Source: user ("can the app view the screen?" → "add vision to todo")
 Ask: The app can read screen TEXT (front window #89, browser tab #59,
 window titles) and, with #102, save a screenshot, but no model ever looks
@@ -1169,7 +1169,104 @@ Verify:
 ⚬ Live: open a chart in Numbers or a web page → Chat "what does the chart
   in this window show?" → one card naming the window → Approve → a
   correct description; no PNG left on disk.
-Deviations:
+Deviations (slot C, 2026-11-11):
+⚬ Decision 3 "otherwise local, or refuse": REFUSE. A cloud vision provider
+  without the opt-in, without a chosen `<PREFIX>_VISION_MODEL` (no preset
+  has a default) or without a key is refused with the reason BEFORE
+  anything is captured; it never silently switches to the local model (an
+  unexpected 3 GB load) or the other way. A loopback preset (Ollama, LM
+  Studio) is local and needs no opt-in (#97 decision 6).
+⚬ Also only in a turn the user started (#89's `user_asked()`: chat / quick
+  ask). The card is consent, but this is what makes "no background capture"
+  hold: an event, idea or timer turn gets an error and nothing is captured.
+⚬ The ANSWER is personal text too (7c): under a cloud MAIN engine without
+  the opt-in it is the #31 placeholder (+ note), even with local vision. So
+  cloud-main users must opt in to use it; local-main users are unaffected.
+⚬ Decision 4 widened: refuse on secure input (`IsSecureEventInputEnabled`
+  via ctypes; unknown counts as on; Terminal's Secure Keyboard Entry
+  blocks every look), a never-watch app in front OR as the target, for
+  `screen` any never-watch app window on screen, private browser windows
+  (title markers), and Chrome/Safari tabs on the #58 sensitive-site list
+  (URL via `read_active_tab`'s AppleScript; if the URL can't be read the
+  check passes and the card still names the window). Browsers are NOT
+  refused, unlike #89 (a chart on a web page is the main use).
+  bot-inator's own windows are skipped: "front window" is the first layer-0
+  window of another app, so asking from the chat panel looks behind it.
+⚬ The card's window is pinned (window id, 5 min): if the user clicks
+  elsewhere before Approve, the window named on the card is the one
+  captured (all checks re-run on it).
+⚬ Images are scaled to a 1,600 px long side before the model (measured:
+  2880x1800 = 5,064 image tokens, 8.3 s; 1280 px = 1,024 tokens, 1.3 s;
+  same answer). Captured with `-x -o -l <id>` (no shadow) / `-x -m`, into a
+  0700 `botinator-look-*` temp folder removed in `finally`.
+⚬ The local model unloads after 10 idle minutes (frees ~4.4 GB) and holds
+  `MLXEngine._metal_lock` while loading and generating (two MLX
+  generations at once abort the process). Never in `_build_engines` or
+  eager loading; `main.py` only unloads it at shutdown.
+⚬ Vision is not an `ENGINE_ROLES` role (that would build and eager-load
+  it). Settings: `AGENT_VISION_PROVIDER` ("local" | preset),
+  `MLX_VISION_MODEL`, `<PREFIX>_VISION_MODEL`, read live; route
+  `GET/PUT /api/providers/vision` in `routes/providers.py` (no `main.py`
+  route change, no restart). Default model by memory: 2B below 24 GB
+  (#93's threshold), else 4B.
+⚬ The Vision settings section has its own copy of the personal-text
+  toggle (same `PUT /api/settings cloud_personal_text`): the existing one
+  only shows when a TEXT engine is cloud, so a local-text + cloud-vision
+  user could not reach it.
+⚬ Cloud calls use a plain OpenAI client and `egress_log.record_image`
+  (kind `inference`, role `vision`, tool `look_at_screen`, note "one
+  screenshot (N KB)", bytes = image + prompt), NOT the wrapped client,
+  which would store the base64 image as the row's text. Only the prompt
+  is ever kept (when keep-text is on).
+⚬ RULE 4: one line in `tests/test_egress_log.py` (not an owned file):
+  `HOOK_POINTS["ai/vision_engine.py"] = "_answer_cloud"`. The #82 guard
+  fails on any new network import without a hook point; the model download
+  (`_load_mlx_vlm`) is checked in `tests/test_vision_engine.py` (the guard
+  takes one point per file).
+⚬ For the runner (files not owned): `ai/taint.py` OUTSIDE_TEXT_TOOLS
+  `"look_at_screen": "window"` (screen text can carry injected
+  instructions, like read_front_window); LIVING_SPEC §4/§6 rows; README.
+Results (slot C, 2026-11-11):
+⚬ mlx-vlm 0.6.13 RESOLVED with the pins in a scratch venv (requirements +
+  mlx-vlm): mlx 0.32.4, mlx-lm 0.32.2, transformers 5.22.2 unchanged; it
+  adds llguidance, miniaudio, mlx-audio, opencv-python, sounddevice. Then
+  `uv pip install` into `agent-daemon/.venv` (dry run: 6 additions, no
+  upgrades); `requirements.txt` has `mlx-vlm>=0.6.13,<0.7`.
+⚬ Measured on this Mac (128 GB, warm disk cache, generated test chart,
+  never a real screenshot): 4B load 0.5-1.3 s; peak 4.3 GB (1200x800) to
+  4.8 GB (2880x1800), max RSS 3.9 GB; 1.1-2.1 s per answer at 1200x800,
+  8.3 s at 2880x1800. Through the real code path (`look_at_screen_impl`,
+  capture and window list faked, real 4B): first answer 3.7 s including
+  the load, second 1.1 s, both correct ("Q2, 340"; "Quarterly sales
+  (units)"), peak 4.38 GB, no image or folder left. 2B: load 0.7 s, peak
+  3.4 GB, 1.0 s at 1280 px, correct but wordy. A cold (not cached in RAM)
+  load was not measured.
+⚬ Files: new `tools/look_at_screen.py`, `ai/vision_engine.py`,
+  `MenuBarUI/.../Views/VisionSettingsView.swift`, `tests/test_look_at_screen.py`
+  (31), `tests/test_vision_engine.py` (21); edited `config.py`,
+  `user_settings.py`, `providers.py`, `routes/providers.py`,
+  `ai/privacy.py`, `ai/egress_log.py`, `tools/__init__.py` (registered,
+  gated, not read-only), `tools/meta_tool_generator.py` (prompt + docstring),
+  `requirements.txt`, `main.py` (shutdown unload), `SettingsView.swift`
+  (embeds the section), `tests/test_egress_log.py` (one line).
+⚬ Tests: 1828 passed. Swift typecheck clean; full `swiftc` build to a
+  scratch path links.
+⚬ Non-vacuity (each guard broken, its tests FAIL, restored): gated (in
+  READ_ONLY), image deleted (no rmtree), cloud opt-in, cloud needs a chosen
+  model, ledger row, refused before capture, secure input, unknown secure
+  = on, never-watch front / target / on screen, private window, sensitive
+  site, user turn only, own window skipped, answer redaction, scale-down,
+  card pin, Metal lock, lazy load once, drafter prompt: all 21 FAIL.
+Live check (needs the user): restart the daemon (new tool + mlx-vlm) and
+the app (Vision section). (1) Numbers chart or a web chart in front, Chat
+"what does the chart in this window show?" → ONE `look_at_screen` card
+naming that window and "the local vision model (Qwen3-VL-4B…)" → Approve →
+a correct description in a few seconds; `ls $TMPDIR | grep botinator-look`
+is empty. (2) Deny the card → nothing captured. (3) 1Password in front, or
+a password field focused → refused, no card action. (4) Settings → Vision
+shows "Screenshots stay on this Mac". Not verified here: a real capture
+(never taken, by instruction), the card's wording in the real app, the
+idle unload in a long-running daemon, a cloud vision provider.
 
 ### Privacy
 

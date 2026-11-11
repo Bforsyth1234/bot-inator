@@ -128,3 +128,108 @@ async def test_provider(preset_id: str, body: ProviderProbe) -> dict[str, Any]:
     # A reasoning model can spend 16 tokens thinking and return no text;
     # the request still succeeded, which is what this checks.
     return {"ok": True, "provider": preset.id, "model": model, "reply": reply[:200]}
+
+
+# ---- vision (#107) -------------------------------------------------------------
+#
+# ``GET /api/providers/vision`` / ``PUT /api/providers/vision``: which model
+# ``look_at_screen`` asks. Saved to the settings file AND mirrored into
+# ``os.environ``, which ``ai.vision_engine.route`` reads live, so a change
+# needs no restart. A key exported in the daemon's shell is locked.
+
+class VisionUpdate(BaseModel):
+    provider: Optional[str] = None      # "local" or a preset id
+    local_model: Optional[str] = None   # an MLX repo id; "" = the default
+    cloud_model: Optional[str] = None   # for ``provider`` (or the saved one)
+
+
+def _vision_view() -> dict[str, Any]:
+    import importlib.util  # noqa: WPS433
+
+    import config  # noqa: WPS433
+    import user_settings  # noqa: WPS433
+    from ai import privacy, vision_engine  # noqa: WPS433
+
+    try:
+        installed = importlib.util.find_spec("mlx_vlm") is not None
+    except Exception:
+        installed = False
+    r = vision_engine.route()
+    exported = user_settings.shell_exported
+    locked = []
+    if config.VISION_PROVIDER_ENV in exported:
+        locked.append("provider")
+    if config.MLX_VISION_MODEL_ENV in exported:
+        locked.append("local_model")
+    if any(p.vision_model_env() in exported for p in providers.PRESETS.values()):
+        locked.append("cloud_model")
+    return {
+        "provider": settings.vision_provider(),
+        "local_model": settings.vision_local_model(),
+        "default_local_model": config.default_vision_model(),
+        "local_models": [
+            {"id": m, "bytes": config.VISION_MODEL_BYTES.get(m, 0),
+             "cached": vision_engine.model_cached(m)}
+            for m in (config.VISION_DEFAULT_MODEL, config.VISION_SMALL_MODEL)
+        ],
+        "mlx_vlm_installed": installed,
+        "cloud_models": {
+            p.id: settings.vision_cloud_model(p.id) for p in providers.PRESETS.values()
+        },
+        "presets": [
+            {"id": p.id, "label": p.label,
+             "cloud": not providers.is_loopback_url(settings.provider_api_base(p.id))}
+            for p in providers.PRESETS.values()
+        ],
+        "cloud_personal_text": privacy.personal_text_allowed(),
+        "route": {"kind": r.kind, "model": r.model, "host": r.host, "refused": r.refused},
+        "locked_fields": locked,
+    }
+
+
+def _save_vision(updates: dict[str, str]) -> None:
+    import os  # noqa: WPS433
+
+    import user_settings  # noqa: WPS433
+
+    for key in updates:
+        if key in user_settings.shell_exported:
+            raise HTTPException(status_code=409, detail=f"{key} is set in the daemon's shell")
+    user_settings.write(updates)
+    for key, value in updates.items():
+        if value:
+            os.environ[key] = value
+        else:
+            os.environ.pop(key, None)
+
+
+@router.get("/vision")
+async def get_vision() -> dict[str, Any]:
+    return _vision_view()
+
+
+@router.put("/vision")
+async def put_vision(body: VisionUpdate) -> dict[str, Any]:
+    import config  # noqa: WPS433
+
+    updates: dict[str, str] = {}
+    provider = settings.vision_provider()
+    if body.provider is not None:
+        provider = body.provider.strip().lower() or "local"
+        if provider != "local" and provider not in providers.PRESETS:
+            raise HTTPException(status_code=400, detail=f"unknown provider {provider!r}")
+        # Stored even when "local", so an explicit local beats a .env value.
+        updates[config.VISION_PROVIDER_ENV] = provider
+    if body.local_model is not None:
+        model = body.local_model.strip()
+        if model == config.default_vision_model():
+            model = ""  # don't pin the default: a future default reaches this user
+        updates[config.MLX_VISION_MODEL_ENV] = model
+    if body.cloud_model is not None:
+        preset = providers.PRESETS.get(provider)
+        if preset is None:
+            raise HTTPException(status_code=400, detail="choose a cloud provider for vision first")
+        updates[preset.vision_model_env()] = body.cloud_model.strip()
+    if updates:
+        _save_vision(updates)
+    return _vision_view()

@@ -362,4 +362,70 @@ class Settings:
         return problems
 
 
+    # --- vision (#107) ----------------------------------------------------
+    # A fourth engine role, used only by ``look_at_screen``. Not in
+    # ``ENGINE_ROLES``: it is never built or eager-loaded at start (the
+    # model loads on first use, ai/vision_engine.py). Read live from the
+    # environment so a Settings change needs no restart.
+
+    def vision_provider(self) -> str:
+        """``AGENT_VISION_PROVIDER``: ``"local"`` (default) or a preset id."""
+        return normalize_provider(
+            os.environ.get(VISION_PROVIDER_ENV, ""), source=VISION_PROVIDER_ENV
+        ) or "local"
+
+    def vision_local_model(self) -> str:
+        """``MLX_VISION_MODEL``, else the default for this Mac's memory."""
+        return os.environ.get(MLX_VISION_MODEL_ENV, "").strip() or default_vision_model()
+
+    def vision_cloud_model(self, provider: str) -> str:
+        """The chosen cloud vision model (``<PREFIX>_VISION_MODEL``), ``""``
+        when none is chosen. There is no default: decision 3 needs one
+        picked in Settings."""
+        preset = providers.PRESETS.get(provider)
+        if preset is None:
+            return ""
+        return os.environ.get(preset.vision_model_env(), "").strip()
+
+    def vision_is_cloud(self) -> bool:
+        """True when screenshots would go off the Mac (by host, #97 decision 6)."""
+        provider = self.vision_provider()
+        if provider == "local":
+            return False
+        return not providers.is_loopback_url(self.provider_api_base(provider))
+
+
+# Vision defaults (#107). Both are MLX 4-bit Qwen3-VL builds; sizes from the
+# Hugging Face cache on 2026-11-11. Measured on this Mac (wave 19): the 4B
+# peaks at 4.3-4.8 GB, the 2B at 3.4 GB.
+VISION_PROVIDER_ENV = "AGENT_VISION_PROVIDER"
+MLX_VISION_MODEL_ENV = "MLX_VISION_MODEL"
+VISION_DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+VISION_SMALL_MODEL = "mlx-community/Qwen3-VL-2B-Instruct-4bit"
+VISION_MODEL_BYTES: dict[str, int] = {
+    VISION_DEFAULT_MODEL: 2_900_000_000,
+    VISION_SMALL_MODEL: 1_700_000_000,
+}
+# Below this much memory the 2B is the default (#93's memory check): the
+# 4B's ~4.5 GB on top of the text models leaves too little on a 16 GB Mac.
+VISION_SMALL_BELOW_GB = 24
+
+_vision_default: Optional[str] = None
+
+
+def default_vision_model() -> str:
+    """The 4B, or the 2B on a Mac with less than ``VISION_SMALL_BELOW_GB``."""
+    global _vision_default
+    if _vision_default is None:
+        try:
+            from ai.first_run import physical_memory_gb  # noqa: WPS433
+
+            gb = physical_memory_gb()
+        except Exception:
+            gb = None
+        small = gb is not None and gb < VISION_SMALL_BELOW_GB
+        _vision_default = VISION_SMALL_MODEL if small else VISION_DEFAULT_MODEL
+    return _vision_default
+
+
 settings = Settings()
