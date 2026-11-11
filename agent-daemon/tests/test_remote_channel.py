@@ -206,9 +206,8 @@ def test_attributed_body_text_is_read(env, on):
 def test_yes_code_approves_exactly_that_request(env, on):
     code_a = env.ch.mirror_approval("req_a", "create_reminder", _args(title="Pay rent"))
     code_b = env.ch.mirror_approval("req_b", "create_note", _args(title="Ideas"))
-    assert code_a and code_b and code_a != code_b
-    assert len(code_a) == rc.CODE_LENGTH
-    env.db.add(f"yes {code_b.lower()}")
+    assert (code_a, code_b) == ("a", "b")  # one letter each, in order
+    env.db.add(f"YES {code_b.upper()}")
     assert env.ch.poll_once() == 1
     assert env.submitted == [("req_b", True)]
     assert env.ch.pending_codes() == {code_a: "req_a"}
@@ -221,7 +220,7 @@ def test_yes_code_approves_exactly_that_request(env, on):
 
 def test_wrong_reused_expired_and_forgotten_codes_do_nothing(env, on):
     code = env.ch.mirror_approval("req_a", "create_reminder", _args(title="x"))
-    env.db.add("yes ZZZZ")  # wrong
+    env.db.add("yes z")  # wrong
     env.ch.poll_once()
     assert env.submitted == []
     env.db.add(f"yes {code}")
@@ -426,3 +425,32 @@ def test_settings_route(tmp_path, monkeypatch):
     assert view["enabled"] is True and view["handle"] == OWN and view["idle_minutes"] == 5
     view = client.put("/api/remote", json={"handle": ""}).json()
     assert view["enabled"] is False
+
+
+# ---- one-letter codes (user, 2026-11-11) --------------------------------------
+
+def test_short_replies_and_card_text(env, on):
+    code = env.ch.mirror_approval("req_a", "open_app", _args(name="Spotify"))
+    assert code == "a"
+    assert 'Reply "yes a" or "no a" within 15 min.' in env.sent[-1][1]
+    env.db.add("y a")
+    env.ch.poll_once()
+    assert env.submitted == [("req_a", True)]
+    code = env.ch.mirror_approval("req_b", "open_app", _args(name="Music"))
+    env.db.add(f"n {code}")
+    env.ch.poll_once()
+    assert env.submitted[-1] == ("req_b", False)
+
+
+def test_ended_letter_rests_before_reuse(env, on):
+    first = env.ch.mirror_approval("req_a", "create_note", _args(title="x"))
+    env.ch.forget("req_a")  # answered on the Mac
+    second = env.ch.mirror_approval("req_b", "create_note", _args(title="y"))
+    assert first == "a" and second == "b"  # "a" is resting
+    env.db.add("yes a")  # a late reply to the first card
+    env.ch.poll_once()
+    assert env.submitted == []  # did not approve req_b
+    env.clock.t += rc.CODE_REUSE_S + 1
+    env.ch.forget("req_b")
+    env.clock.t += rc.CODE_REUSE_S + 1
+    assert env.ch.mirror_approval("req_c", "create_note", _args(title="z")) == "a"

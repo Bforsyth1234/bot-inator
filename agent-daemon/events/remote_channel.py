@@ -14,9 +14,12 @@ USER ANSWERS (2026-11-10) and DECISIONS (todo #85), binding:
 2. THE MODEL NEVER PICKS A RECIPIENT. :meth:`RemoteChannel._send` always
    sends to the configured handle, with the AppleScript template from
    ``tools/send_imessage.py`` (that tool stays unregistered).
-3. APPROVE BY CODE. A mirrored card carries a 4-character code; ``yes K7Q2``
-   resolves that request and no other. A bare ``yes`` does nothing. Codes are
-   single use and end with the request (:meth:`forget`) or at their expiry.
+3. APPROVE BY CODE. A mirrored card carries a one-letter code (user,
+   2026-11-11: "make the codes more normal and shorter"); ``yes a`` (or
+   ``y a``) resolves that request and no other. A bare ``yes`` does nothing.
+   Codes are single use and end with the request (:meth:`forget`), its
+   answer or its expiry; an ended letter rests for ``CODE_REUSE_S`` so a
+   late reply can't hit a newer card that got the same letter.
 4. NEVER FROM THE PHONE: code review (there is no API for it here),
    ``generate_custom_tool``, ``run_shortcut``, cards with #81 origin notes and
    cards with prepared actions (#76). They wait for the Mac.
@@ -44,7 +47,6 @@ import json
 import logging
 import os
 import re
-import secrets
 import sqlite3
 import subprocess
 import threading
@@ -71,8 +73,11 @@ MAX_IDLE_MINUTES = 120
 
 REMOTE_TIMEOUT_S = 15 * 60.0
 MAX_PER_HOUR = 20
-CODE_LENGTH = 4
-CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I/L
+# One lowercase letter per open card; i, l and o are skipped (read as 1/0).
+CODE_LETTERS = "abcdefghjkmnpqrstuvwxyz"
+# An ended code isn't handed out again for this long (a late "yes a" must
+# not approve a newer card that happens to get "a").
+CODE_REUSE_S = REMOTE_TIMEOUT_S
 PREFIX = "bot-inator: "
 REMOTE_SOURCE = "remote"  # metadata["source"] of a phone-originated user_message
 IMESSAGE_SERVICE = "iMessage"
@@ -89,7 +94,7 @@ MAX_ARG_CHARS = 200
 MAX_BODY_CHARS = 1500
 ECHO_TTL_S = 600.0
 
-_REPLY_RE = re.compile(r"^\s*(yes|no)\b\s*([A-Za-z0-9]*)\s*[.!]*\s*$", re.IGNORECASE)
+_REPLY_RE = re.compile(r"^\s*(yes|no|y|n)\b\s*([A-Za-z0-9]*)\s*[.!]*\s*$", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _PHONE_RE = re.compile(r"^\+?[\d\s().\-]{7,}$")
 
@@ -283,6 +288,7 @@ class RemoteChannel:
         self._lock = threading.RLock()
         self._pending: dict[str, _Pending] = {}   # code -> pending
         self._by_request: dict[str, str] = {}     # request_id -> code
+        self._resting: dict[str, float] = {}      # ended code -> reusable at
         self._sent_at: deque[float] = deque()
         self._echoes: list[_Echo] = []
         self._open_turns: set[str] = set()
@@ -393,6 +399,10 @@ class RemoteChannel:
             code = self._by_request.pop(request_id, None)
             if code is not None:
                 self._pending.pop(code, None)
+                self._rest_locked(code)
+
+    def _rest_locked(self, code: str) -> None:
+        self._resting[code] = self._clock() + CODE_REUSE_S
 
     def pending_codes(self) -> dict[str, str]:
         with self._lock:
@@ -400,16 +410,28 @@ class RemoteChannel:
             return {c: p.request_id for c, p in self._pending.items()}
 
     def _new_code_locked(self) -> str:
-        while True:
-            code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
-            if code not in self._pending:
+        """The first letter no open card has and none used recently; two
+        letters ("aa", "ab", …) only if all of them are taken."""
+        now = self._clock()
+        for code, until in list(self._resting.items()):
+            if until <= now:
+                self._resting.pop(code, None)
+        busy = set(self._pending) | set(self._resting)
+        for code in CODE_LETTERS:
+            if code not in busy:
                 return code
+        for first in CODE_LETTERS:
+            for second in CODE_LETTERS:
+                if first + second not in busy:
+                    return first + second
+        raise RuntimeError("no free remote approval code")  # 529 open cards
 
     def _expire_locked(self) -> None:
         now = self._clock()
         for code, p in list(self._pending.items()):
             if p.expires_at <= now:
                 self._pending.pop(code, None)
+                self._rest_locked(code)
                 self._by_request.pop(p.request_id, None)
 
     # ---- phone turns ---------------------------------------------------------
@@ -603,21 +625,22 @@ class RemoteChannel:
         text = row.text.strip()
         match = _REPLY_RE.match(text)
         if match:
-            self._handle_reply(match.group(1).lower() == "yes", match.group(2).upper())
+            self._handle_reply(match.group(1).lower() in ("yes", "y"), match.group(2).lower())
             return
         self._start_turn(row, text)
 
     def _handle_reply(self, approved: bool, code: str) -> None:
         if not code:
-            self._send('Reply with the card\'s code, like "yes K7Q2".')
+            self._send('Reply with the card\'s letter, like "yes a".')
             return
         with self._lock:
             self._expire_locked()
             pending = self._pending.pop(code, None)
             if pending is not None:
                 self._by_request.pop(pending.request_id, None)
+                self._rest_locked(code)
         if pending is None:
-            self._send(f"No open card has the code {code}.")
+            self._send(f"No open card has the letter {code}.")
             return
         submit = self._submit
         ok = bool(submit(pending.request_id, approved)) if submit is not None else False

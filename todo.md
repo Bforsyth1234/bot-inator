@@ -1615,6 +1615,13 @@ Verify:
 ⚬ Live: with the Mac idle, mail yourself a deadline → the reminder card
   arrives on the phone → reply "yes <code>" → reminder created. Text
   "what's on my calendar tomorrow?" → the answer in the thread.
+⚬ 2026-11-11 (user: "can we make the codes more normal and shorter. like
+  yes a no b"): codes are now one lowercase letter per open card (a, b, …;
+  i/l/o skipped; two letters only past 23 open cards). Replies `yes a`,
+  `y a`, `no a`, `n a`, any case; a bare yes still does nothing. An ended
+  letter rests for 15 min (`CODE_REUSE_S`) so a late reply can't approve a
+  newer card with the same letter. `tests/test_remote_channel.py` +2 (25);
+  non-vacuity: no resting → 1 fails; no y/n → 1 fails.
 Deviations:
 
 ---
