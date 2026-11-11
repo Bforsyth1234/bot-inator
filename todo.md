@@ -905,7 +905,7 @@ Deviations:
 
 ---
 
-#104 — Per-tool trust: run a reviewed generated tool outside the sandbox [~]
+#104 — Per-tool trust: run a reviewed generated tool outside the sandbox [~] live
 Wave: 18 (slot C) · Agent: subagent · Added: 2026-11-11 · Source: user ("i really think the sandbox is holding the app back"; chose A, "build A and add it to wave 18")
 Ask: Some useful generated tools can never work sandboxed: macOS refuses
 `quit` (#102) and Mail message data (#103) to ANY `sandbox-exec` process,
@@ -948,7 +948,80 @@ Verify:
 ⚬ Live: Tool Manager → `close_app` → Run outside the sandbox → confirm →
   "quit Spotify" → card says "Runs outside the sandbox" → Approve →
   Spotify quits. Edit the file → it's sandboxed again.
+Results (subagent, wave 18 slot C, 2026-11-11):
+⚬ New `ai/tool_trust.py`: `ToolTrust` store at `~/.bot-inator/tool_trust.json`
+  (or `$AGENT_TOOL_TRUST_PATH`; `path=None` = memory), atomic write, 0600.
+  Entry = name + SHA-256 of the file's bytes + `trusted_at` + `via`
+  (`tool_manager` / `code_review`). `check()` (the loader) drops an entry
+  whose hash no longer matches, so an edit / repair / reinstall puts the
+  tool back in the sandbox for good (restoring the old bytes does not
+  re-trust it). `SANDBOX_BLOCKS` + `NETWORK_NOTE` = the confirm-sheet text.
+⚬ `Orchestrator._load_tool`: in-process import when `AGENT_TOOL_SANDBOX=0`
+  OR the store says trusted; otherwise the sandboxed proxy. Names loaded
+  in-process go in `_unsandboxed_tools`; `_request_approval` sets
+  `outside_sandbox` on the card from it. `request_code_approval`: an approved
+  response with `outside_sandbox` registers a pending trust for the
+  approved source (`edited_code or code`); the next load trusts it only if
+  the installed file has exactly that hash (meta_tool_generator untouched).
+⚬ Routes (`routes/tool_detail.py`, already included in main.py; app token via
+  the middleware): `GET /api/tools/{name}` gains `trust` {trusted, sha256,
+  trusted_at, can_trust, sandbox_blocks, network_note} for generated tools,
+  and the sandbox note says "runs in the daemon process" when trusted;
+  `POST /api/tools/{name}/trust` {trusted, sha256}: trusting needs the hash the
+  detail showed (409 if the file changed), only for an enabled tool (409 for
+  built-ins / disabled / quarantined), then reloads the generated tools;
+  `GET /api/tool-trust` lists tools trusted at their current source (badge).
+⚬ Swift: Tool detail → Sandbox section "Run outside the sandbox" switch →
+  `TrustConfirmSheet` (the blocked list, the privacy-ledger note when it
+  imports a network module, "every call still asks"); off needs no confirm.
+  Tool Manager row badge "Runs outside the sandbox". Code review card:
+  off-by-default checkbox. Approval card header: "Runs outside the sandbox".
+⚬ Tests: new `tests/test_tool_trust.py` (18). Full suite 1696 passed
+  (`.venv/bin/python -m pytest -q -p no:cacheprovider tests`, 85 s). Swift
+  `swiftc -O` build to a scratch path: OK, no warnings.
+⚬ Non-vacuity (each reverted, test_tool_trust run, restored): loader check
+  removed → trusted-loads-in-process fails; hash-mismatch keep → 2 fail;
+  `outside_sandbox=` dropped from the card → card test fails; review
+  pending not recorded → checkbox test fails; expected-sha check off → 2
+  fail (store + route); pending applied without hash match → exact-source
+  test fails; an import of `ai.tool_trust` added to `tools/notes.py` →
+  only-loader-and-routes test fails; middleware removed from the fixture →
+  token test fails. Not covered by a failing revert: the 0600 chmod
+  (mkstemp already creates 0600, so removing chmod keeps 0600).
+⚬ For the runner (ai/tool_health.py, slot A's file): append to
+  `REASONS[CATEGORY_SANDBOX]`: "If you reviewed this tool and trust it, you
+  can let it run outside the sandbox: Tool Manager → the tool → Run outside
+  the sandbox." Note `-10004` / "privilege violation" (the #102/#103 quit
+  and Mail refusals) currently classify as CATEGORY_PERMISSION, so the
+  sentence only shows for them if #102/#103 reclassify sandboxed -10004 as
+  sandbox (or the same sentence is added to the permission reason).
 Deviations:
+⚬ Two optional schema fields, not one (rule 4: one field can't carry both
+  directions): `ApprovalRequestPayload.outside_sandbox` (daemon → app) and
+  `CodeApprovalResponsePayload.outside_sandbox` (app → daemon, the
+  checkbox). Swift mirrors both.
+⚬ Two small edits outside the slot's list, owned by no wave-18 slot:
+  `Services/WebSocketManager.swift` (`sendCodeApprovalResponse` gains a
+  defaulted `outsideSandbox` param) and `Services/ApprovalPresenter.swift`
+  (the code-review closure forwards it). Without them the checkbox can't
+  reach the daemon.
+⚬ `tests/conftest.py`: one `AGENT_TOOL_TRUST_PATH` line, so tests never read
+  or rewrite the developer's real trust file (the loader drops stale
+  entries).
+⚬ When the sandbox is on but unusable (`_refuse_unsandboxed`), trusted tools
+  are refused too (unchanged behaviour; kept small).
+⚬ Known limit: a trusted tool runs with full user access, so it could
+  itself write `~/.bot-inator/tool_trust.json`; that's what trusting means
+  (same as `AGENT_TOOL_SANDBOX=0`), and the confirm sheet says so.
+Live check (batched): the runner's plan disables the generated `close_app`
+once `quit_app` lands, and the route only trusts an enabled tool. So run it
+before that, or with any enabled generated tool: Tool Manager → tool → ⓘ →
+Run outside the sandbox → confirm sheet lists the blocks → Run Outside the
+Sandbox → row badge shows → ask for it in Chat → card says "Runs outside the
+sandbox" → Approve → it works (for `close_app`: Spotify quits). Then edit the
+file (one character) → reload → badge gone, detail switch off, card has no
+label. Also: draft a new tool with the review checkbox ticked → after
+install the badge shows.
 
 ### Privacy
 

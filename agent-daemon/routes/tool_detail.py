@@ -1,4 +1,5 @@
-"""``GET /api/tools/{name}``: one tool's detail for the Tool Manager (#61).
+"""``GET /api/tools/{name}``: one tool's detail for the Tool Manager (#61),
+and ``POST /api/tools/{name}/trust``: run it outside the sandbox (#104).
 
 Returns, for a built-in or a generated tool (loaded, disabled or
 quarantined)::
@@ -12,6 +13,8 @@ quarantined)::
      gate: "needs approval"|"runs without asking",   # READ_ONLY_TOOL_NAMES
      inputs: [{name, type, description, optional}],
      sandbox: {enabled, network_allowed, note} | null,   # generated only
+     trust: {trusted, sha256, trusted_at, can_trust, sandbox_blocks,
+             network_note} | null,   # generated only (#104)
      source_path, error_text}
 
 Built-in summaries and run conditions come from the tool's schema and
@@ -252,12 +255,17 @@ def _find(request: Request, name: str, gen: Path) -> tuple[str, Any, Optional[Pa
     raise HTTPException(status_code=404, detail=f"no tool named {name!r}")
 
 
-def _sandbox_info(live: Any, path: Path) -> dict[str, Any]:
+def _sandbox_info(live: Any, path: Path, trusted: bool = False) -> dict[str, Any]:
     try:
         from tools import tool_sandbox as sb
     except Exception:  # pragma: no cover - defensive
         sb = None  # type: ignore[assignment]
     enabled = bool(sb and sb.sandbox_enabled())
+    if trusted and live is not None and not hasattr(live, "network_allowed"):
+        # #104: loaded in-process because the user trusted this source.
+        return {"enabled": False, "network_allowed": True,
+                "note": "runs in the daemon process (you trusted it to run "
+                        "outside the sandbox)"}
     if live is not None and hasattr(live, "network_allowed"):
         return {"enabled": True, "network_allowed": bool(live.network_allowed),
                 "note": str(getattr(live, "sandbox_note", ""))}
@@ -274,6 +282,99 @@ def _sandbox_info(live: Any, path: Path) -> dict[str, Any]:
     else:
         note = "runs under sandbox-exec; no network"
     return {"enabled": enabled, "network_allowed": reason is not None, "note": note}
+
+
+def _trust_store(request: Request):
+    from ai import tool_trust
+
+    override = getattr(request.app.state, "tool_trust", None)
+    if isinstance(override, tool_trust.ToolTrust):
+        return override
+    return tool_trust.store_for(getattr(request.app.state, "orchestrator", None))
+
+
+def _trust_info(request: Request, name: str, path: Path, state: str) -> dict[str, Any]:
+    """#104: trust state plus the confirm sheet's text for a generated tool."""
+    from ai import tool_trust
+    from tools import tool_sandbox
+
+    sha = tool_trust.source_sha256(path)
+    entry = _trust_store(request).entry(name)
+    try:
+        reason = tool_sandbox.network_reason(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        reason = None
+    return {
+        "trusted": bool(entry) and entry.get("sha256") == sha,
+        "sha256": sha,
+        "trusted_at": (entry or {}).get("trusted_at"),
+        "can_trust": state in ("loaded", "not_loaded") and sha is not None,
+        "sandbox_blocks": list(tool_trust.SANDBOX_BLOCKS),
+        "network_note": tool_trust.NETWORK_NOTE.format(reason=reason) if reason else None,
+    }
+
+
+@router.get("/api/tool-trust")
+async def list_tool_trust(request: Request) -> dict[str, Any]:
+    """Generated tools trusted at their current source (#104), for the Tool
+    Manager badge. A stale entry (the file changed) is not listed."""
+    gen = _generated_dir(request)
+    store = _trust_store(request)
+    names = [n for n in store.names() if _IDENTIFIER_RE.match(n)
+             and store.is_trusted(n, gen / f"{n}.py")]
+    return {"trusted": names}
+
+
+@router.post("/api/tools/{name}/trust")
+async def set_tool_trust(name: str, request: Request) -> dict[str, Any]:
+    """Run a reviewed generated tool outside the sandbox, or stop (#104).
+
+    Body ``{"trusted": bool, "sha256": str}``; trusting needs the SHA-256
+    the detail returned, so the user trusts the code they looked at. The
+    app token is checked by the app-wide middleware (#27). Reloads the
+    generated tools so the change applies to the next call.
+    """
+    import asyncio
+
+    from ai import tool_trust
+
+    if not _IDENTIFIER_RE.match(name):
+        raise HTTPException(status_code=404, detail=f"no tool named {name!r}")
+    try:
+        data = await request.json()
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or not isinstance(data.get("trusted"), bool):
+        raise HTTPException(status_code=422,
+                            detail='body must be {"trusted": bool, "sha256": str}')
+    gen = _generated_dir(request)
+    kind, _live, path, state = _find(request, name, gen)
+    if kind != "generated" or path is None:
+        raise HTTPException(status_code=409, detail="built-in tools are not sandboxed")
+    store = _trust_store(request)
+    if data["trusted"]:
+        sha = data.get("sha256")
+        if not isinstance(sha, str) or not sha:
+            raise HTTPException(status_code=422,
+                                detail="sha256 of the reviewed source is required")
+        if state not in ("loaded", "not_loaded"):
+            raise HTTPException(status_code=409, detail=f"enable the tool first (it is {state})")
+        try:
+            store.trust(name, path, expected_sha256=sha)
+        except tool_trust.TrustError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    else:
+        store.revoke(name)
+    orch = getattr(request.app.state, "orchestrator", None)
+    loaded = None
+    if (orch is not None and callable(getattr(orch, "load_dynamic_tools", None))
+            and state in ("loaded", "not_loaded")):
+        loaded = name in await asyncio.to_thread(orch.load_dynamic_tools, gen)
+    return {
+        "status": "ok", "tool_name": name, "trusted": bool(data["trusted"]),
+        "loaded": loaded,
+        "outside_sandbox": name in (getattr(orch, "_unsandboxed_tools", None) or ()),
+    }
 
 
 @router.get("/api/tools/{name}")
@@ -299,7 +400,7 @@ async def tool_detail(name: str, request: Request) -> dict[str, Any]:
     body: dict[str, Any] = {
         "name": name, "kind": kind, "state": state, "summary": summary,
         "gate": gate, "inputs": inputs, "sandbox": None, "error_text": None,
-        "plain_summary": None,
+        "plain_summary": None, "trust": None,
     }
     if kind == "builtin":
         body["when_it_runs"] = _builtin_when(doc, summary, inputs, free)
@@ -317,7 +418,8 @@ async def tool_detail(name: str, request: Request) -> dict[str, Any]:
         "hints": [],
         "provenance": prov,
     }
-    body["sandbox"] = _sandbox_info(live, path)
+    body["trust"] = _trust_info(request, name, path, state)
+    body["sandbox"] = _sandbox_info(live, path, body["trust"]["trusted"])
     body["source_path"] = str(path.resolve())
     if state == "quarantined":
         try:

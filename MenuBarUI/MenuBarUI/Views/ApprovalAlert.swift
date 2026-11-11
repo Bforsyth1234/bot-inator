@@ -96,6 +96,12 @@ struct ApprovalAlert: View {
                 Text(payload.toolName)
                     .appFont(.label, design: .monospaced)
                     .foregroundStyle(.secondary)
+                if payload.outsideSandbox == true {
+                    // #104: the user trusted this generated tool's code.
+                    Label("Runs outside the sandbox", systemImage: "lock.open.fill")
+                        .appFont(.secondary, weight: .semibold)
+                        .foregroundStyle(.orange)
+                }
             }
             Spacer()
             if let timeout = payload.timeoutSeconds {

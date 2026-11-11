@@ -74,3 +74,9 @@ os.environ.setdefault("AGENT_DELIVERY_BUSY_CHECKS", "0")
 # standing rules (#78).
 _wave16_tmp = _tempfile.mkdtemp(prefix="bot-inator-w16-")
 os.environ.setdefault("AGENT_STANDING_RULES_PATH", os.path.join(_wave16_tmp, "standing_rules.json"))
+# Wave 18: keep the developer's real ~/.bot-inator/tool_trust.json (#104)
+# out of tests: the loader drops a trust entry whose hash no longer matches.
+os.environ.setdefault(
+    "AGENT_TOOL_TRUST_PATH",
+    os.path.join(_tempfile.mkdtemp(prefix="bot-inator-w18-"), "tool_trust.json"),
+)

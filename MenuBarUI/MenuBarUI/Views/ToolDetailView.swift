@@ -65,6 +65,25 @@ struct ToolDetail: Decodable, Equatable {
         }
     }
 
+    /// #104: whether the user trusted this exact source to run outside the
+    /// sandbox, plus the confirm sheet's text. Generated tools only; nil from
+    /// older daemons.
+    struct Trust: Decodable, Equatable {
+        let trusted: Bool
+        let sha256: String?
+        let trustedAt: String?
+        let canTrust: Bool
+        let sandboxBlocks: [String]
+        let networkNote: String?
+        enum CodingKeys: String, CodingKey {
+            case trusted, sha256
+            case trustedAt = "trusted_at"
+            case canTrust = "can_trust"
+            case sandboxBlocks = "sandbox_blocks"
+            case networkNote = "network_note"
+        }
+    }
+
     let name: String
     let kind: String
     let state: String
@@ -76,6 +95,7 @@ struct ToolDetail: Decodable, Equatable {
     let gate: String
     let inputs: [Input]
     let sandbox: Sandbox?
+    var trust: Trust? = nil
     let sourcePath: String?
     let errorText: String?
 
@@ -83,7 +103,7 @@ struct ToolDetail: Decodable, Equatable {
     var runsFreely: Bool { gate == "runs without asking" }
 
     enum CodingKeys: String, CodingKey {
-        case name, kind, state, summary, gate, inputs, sandbox
+        case name, kind, state, summary, gate, inputs, sandbox, trust
         case whenItRuns = "when_it_runs"
         case plainSummary = "plain_summary"
         case sourcePath = "source_path"
@@ -190,6 +210,39 @@ final class ToolDetailViewModel: ObservableObject {
         }
     }
 
+    @Published private(set) var isSettingTrust = false
+    @Published var trustMessage: String?
+
+    /// POST ``/api/tools/<name>/trust`` (#104). Trusting sends the SHA-256
+    /// this view loaded, so the daemon refuses if the file changed since.
+    func setTrust(_ name: String, trusted: Bool) async {
+        isSettingTrust = true
+        defer { isSettingTrust = false }
+        do {
+            var request = try DaemonAuth.request(
+                baseURL.appendingPathComponent("api/tools/\(name)/trust"),
+                method: "POST"
+            )
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            var body: [String: Any] = ["trusted": trusted]
+            if let sha = detail?.trust?.sha256 { body["sha256"] = sha }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await session.data(for: request)
+            try DaemonAuth.checkAuth(response)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"]
+                trustMessage = "Could not change it: \(detail as? String ?? "HTTP \(http.statusCode)")"
+            } else {
+                trustMessage = trusted
+                    ? "Trusted. It runs outside the sandbox from its next call; every call still asks."
+                    : "Back in the sandbox."
+            }
+        } catch {
+            trustMessage = "Could not change it: \(error.localizedDescription)"
+        }
+        await load(name)
+    }
+
     /// Put back the tool's prior committed version (#90): a user click, no card.
     func restorePrevious(_ name: String) async {
         isRestoring = true
@@ -218,6 +271,8 @@ struct ToolDetailView: View {
     let toolName: String
     @StateObject private var viewModel = ToolDetailViewModel()
     @Environment(\.dismiss) private var dismiss
+    /// #104: the confirm sheet before a tool runs outside the sandbox.
+    @State private var confirmTrust = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -241,6 +296,17 @@ struct ToolDetailView: View {
         }
         .frame(minWidth: 480, minHeight: 440)
         .task { await viewModel.load(toolName) }
+        .sheet(isPresented: $confirmTrust) {
+            if let trust = viewModel.detail?.trust {
+                TrustConfirmSheet(toolName: toolName, trust: trust) { confirmed in
+                    confirmTrust = false
+                    if confirmed {
+                        Task { await viewModel.setTrust(toolName, trusted: true) }
+                    }
+                }
+                .appTextSize()
+            }
+        }
     }
 
     private var header: some View {
@@ -315,6 +381,7 @@ struct ToolDetailView: View {
                 Label(sandbox.networkAllowed ? "Network allowed" : "No network",
                       systemImage: sandbox.networkAllowed ? "network" : "network.slash")
                 Text(sandbox.note).appFont(.secondary).foregroundStyle(.secondary)
+                if let trust = detail.trust { trustControls(trust) }
             }
         }
         if detail.isGenerated, let health = viewModel.health {
@@ -335,6 +402,38 @@ struct ToolDetailView: View {
                     .textSelection(.enabled)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// #104: "Run outside the sandbox". Turning it on opens the confirm
+    /// sheet; turning it off needs no confirmation.
+    @ViewBuilder
+    private func trustControls(_ trust: ToolDetail.Trust) -> some View {
+        Toggle(isOn: .init(
+            get: { trust.trusted },
+            set: { on in
+                if on { confirmTrust = true }
+                else { Task { await viewModel.setTrust(toolName, trusted: false) } }
+            }
+        )) {
+            Text("Run outside the sandbox")
+        }
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .disabled(viewModel.isSettingTrust || (!trust.trusted && !trust.canTrust))
+        .help(trust.canTrust || trust.trusted
+              ? "Let this reviewed tool do what the sandbox blocks. Every call still asks."
+              : "Enable the tool first")
+        if trust.trusted {
+            Label("Runs outside the sandbox\(trust.trustedAt.map { " · trusted \($0)" } ?? "")",
+                  systemImage: "lock.open.fill")
+                .appFont(.secondary, weight: .semibold)
+                .foregroundStyle(.orange)
+            Text("Any change to the file (an edit, a repair, a reinstall) puts it back in the sandbox.")
+                .appFont(.secondary).foregroundStyle(.secondary)
+        }
+        if let message = viewModel.trustMessage {
+            Text(message).appFont(.secondary).foregroundStyle(.secondary)
         }
     }
 
@@ -443,5 +542,51 @@ struct ToolDetailView: View {
         } catch {
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         }
+    }
+}
+
+/// #104: what turning off the sandbox for one tool means, before it happens.
+struct TrustConfirmSheet: View {
+    let toolName: String
+    let trust: ToolDetail.Trust
+    let onDone: (_ confirmed: Bool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "lock.open.fill")
+                    .foregroundStyle(.orange)
+                    .appFont(.title2)
+                Text("Run \(toolName) outside the sandbox?").appFont(.headline)
+            }
+            Text("Only do this for a tool whose code you reviewed and trust. It will run in the daemon with your full user access. The sandbox stops a generated tool from:")
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(trust.sandboxBlocks, id: \.self) { line in
+                    Text("• \(line)")
+                        .appFont(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if let note = trust.networkNote {
+                Label(note, systemImage: "network")
+                    .appFont(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Every call still asks for your approval, and its card says \u{201C}Runs outside the sandbox\u{201D}. Any change to the file puts it back in the sandbox.")
+                .appFont(.secondary)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { onDone(false) }
+                    .keyboardShortcut(.cancelAction)
+                Button("Run Outside the Sandbox") { onDone(true) }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(18)
+        .frame(width: 480)
     }
 }

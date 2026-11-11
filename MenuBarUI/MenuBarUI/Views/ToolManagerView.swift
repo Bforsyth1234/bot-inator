@@ -27,6 +27,9 @@ struct AgentTool: Codable, Hashable, Identifiable {
 @MainActor
 final class ToolManagerViewModel: ObservableObject {
     @Published private(set) var tools: [AgentTool] = []
+    /// #104: generated tools trusted to run outside the sandbox (at their
+    /// current source). Empty from older daemons.
+    @Published private(set) var trustedNames: Set<String> = []
     @Published private(set) var isLoading: Bool = false
     @Published var errorMessage: String?
 
@@ -64,6 +67,21 @@ final class ToolManagerViewModel: ObservableObject {
             errorMessage = nil
         } catch {
             errorMessage = "Failed to fetch tools: \(error.localizedDescription)"
+        }
+        await refreshTrust()
+    }
+
+    private struct TrustList: Decodable { let trusted: [String] }
+
+    /// Best effort: an older daemon without the route shows no badges.
+    func refreshTrust() async {
+        do {
+            let request = try DaemonAuth.request(baseURL.appendingPathComponent("api/tool-trust"))
+            let (data, response) = try await session.data(for: request)
+            try Self.checkStatus(response)
+            trustedNames = Set(try JSONDecoder().decode(TrustList.self, from: data).trusted)
+        } catch {
+            trustedNames = []
         }
     }
 
@@ -136,7 +154,9 @@ struct ToolManagerView: View {
             McpServersView()
         }
         .frame(minWidth: 440, minHeight: 420)
-        .sheet(item: $selectedTool) { tool in
+        .sheet(item: $selectedTool, onDismiss: {
+            Task { await viewModel.refreshTrust() }
+        }) { tool in
             ToolDetailView(toolName: tool.name)
                 .appTextSize()
         }
@@ -233,6 +253,13 @@ struct ToolManagerView: View {
                     Text("Disabled")
                         .appFont(.secondary)
                         .foregroundStyle(.secondary)
+                }
+                if tool.isGenerated && viewModel.trustedNames.contains(tool.name) {
+                    // #104: the user trusted this exact source.
+                    Label("Runs outside the sandbox", systemImage: "lock.open.fill")
+                        .appFont(.fine, weight: .semibold)
+                        .foregroundStyle(.orange)
+                        .help("You trusted this tool's code. Any change to the file puts it back in the sandbox.")
                 }
             }
             Spacer()

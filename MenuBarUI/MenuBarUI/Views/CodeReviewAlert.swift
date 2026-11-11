@@ -9,11 +9,15 @@ struct CodeReviewAlert: View {
     /// Invoked on Approve/Deny. `editedCode` is non-nil only when the user
     /// modified the draft in the editor; the backend writes that text to
     /// disk in place of the original. The presenter closes the window; its
-    /// red X sends a denial (#15).
-    let onDecision: (_ approved: Bool, _ editedCode: String?, _ note: String) -> Void
+    /// red X sends a denial (#15). `outsideSandbox` is the off-by-default
+    /// "Run outside the sandbox" checkbox (#104).
+    let onDecision: (_ approved: Bool, _ editedCode: String?, _ note: String,
+                     _ outsideSandbox: Bool) -> Void
 
     @State private var draft: String = ""
     @State private var userNote: String = ""
+    /// #104: off by default; the daemon trusts only this exact source.
+    @State private var runOutsideSandbox = false
     /// Repair cards (#90) open on the diff; "Full source" shows the editor.
     @State private var showFullSource = false
     @Environment(\.textSize) private var textSize
@@ -31,6 +35,7 @@ struct CodeReviewAlert: View {
                 codeEditorSection
             }
             noteSection
+            trustSection
             Spacer(minLength: 0)
             buttonRow
         }
@@ -184,11 +189,29 @@ struct CodeReviewAlert: View {
         }
     }
 
+    /// #104: let this reviewed tool run outside the sandbox. Every call still
+    /// asks; any later change to the file (edit, repair) turns this off.
+    private var trustSection: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Toggle(isOn: $runOutsideSandbox) {
+                Text("Run outside the sandbox")
+                    .appFont(.body)
+            }
+            .toggleStyle(.checkbox)
+            Text(runOutsideSandbox
+                 ? "This code will run with your full user access: no sandbox limits on files, apps, programs or network, and its network use is not in the privacy ledger. Every call still asks. Any change to the code turns this off."
+                 : "Leave off unless the sandbox blocks something this tool needs (quitting apps, reading Mail). You can change it later in Tool Manager.")
+                .appFont(.fine)
+                .foregroundStyle(runOutsideSandbox ? Color.orange : Color.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var buttonRow: some View {
         HStack {
             Spacer()
             Button(role: .destructive) {
-                onDecision(false, nil, userNote)
+                onDecision(false, nil, userNote, false)
             } label: {
                 Label("Deny", systemImage: "xmark.circle.fill")
             }
@@ -197,7 +220,7 @@ struct CodeReviewAlert: View {
             Button {
                 let edited: String? =
                     (draft != payload.code) ? draft : nil
-                onDecision(true, edited, userNote)
+                onDecision(true, edited, userNote, runOutsideSandbox)
             } label: {
                 Label(previousCode != nil ? "Approve Repair" : "Approve & Install",
                       systemImage: "checkmark.circle.fill")
