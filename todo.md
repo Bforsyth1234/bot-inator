@@ -105,6 +105,7 @@ API auth → sandbox for installed tools → live checks.
 | 18 | A: #102 #103 · B: #96 (the rest: daemon in the app, login switch, update notice) · C: #104 | A new `tools/quit_app.py`, new `tools/take_screenshot.py`, `tools/__init__.py`, `tools/meta_tool_generator.py` (prompt only), `ai/tool_health.py`, new tests · B `scripts/release/`, `docs/releasing.md`, new `Services/DaemonLauncher.swift`, `MenuBarUIApp.swift` (AppDelegate launch/stop only), `SettingsView.swift` (+ new settings view), `Info.plist`, `config.py` / `user_settings.py` (writable-path overrides only), new tests. C new `ai/tool_trust.py`, `Orchestrator._load_tool` (+ the trusted flag on approval payloads), tool routes in `routes/tool_detail.py`, `ToolDetailView.swift`, `ToolManagerView.swift`, `CodeReviewAlert.swift`, `ApprovalAlert.swift` (one label), `schemas/ws_messages.py` + `WSMessage.swift` (one optional field), new tests. Runner: disables generated `close_app` / `capture_screenshot` / `list_recent_emails` once their built-ins land, the tool_health sentence (A) pointing at trust (C), README, todo, LIVING_SPEC | [x] closed 2026-11-11 (#102 #103 #104 #96 `[~] live`; 1774 tests; #105 added, not scheduled) |
 | 19 | A: #106 · B: #105 · C: #107 (user 2026-11-11: "implement the other open todos") | A `events/remote_channel.py`, `tools/send_imessage.py`, `tests/test_remote_channel.py`, new tests · B `MenuBarUI/MenuBarUI/Services/MeetingRecorder.swift`, `Views/MeetingNotesSettingsView.swift`, `Info.plist` (usage text only), `events/meeting_notes.py` only if retry needs it · C new `tools/look_at_screen.py`, new `ai/vision_engine.py`, `config.py`, `user_settings.py`, `providers.py` / `routes/providers.py`, `ai/privacy.py`, `ai/egress_log.py`, `SettingsView.swift` (+ new vision settings view), `tools/__init__.py`, `tools/meta_tool_generator.py` (prompt), `requirements.txt`, `main.py` (engine setup only), new tests. Runner: merge, `ai/taint.py` (look_at_screen = window), README, todo, LIVING_SPEC | [x] closed 2026-11-11 (#105 #106 #107 `[~] live`; 1834 tests; #108 added) |
 | 20 | A: #110 · B: #108 · C: #109 (user 2026-11-11: "implement the open todos … use subagents and complete them at once") | A `ai/orchestrator.py` (reply unwrap only), `events/remote_channel.py`, `tools/send_imessage.py`, `tools/take_screenshot.py`, `tools/look_at_screen.py`, new tests · B `events/meeting_notes.py`, `Services/MeetingRecorder.swift` (daemon-side retry only), new tests · C `ai/egress_log.py`, `Orchestrator._wrap_tool_for_approval` (the forward call only), `ai/tool_trust.py` (`NETWORK_NOTE`), `PrivacyLedgerView.swift`, new tests. A and C both add egress kinds in `ai/egress_log.py` (A: image to phone; C: trusted_tool): additive, runner merges. Runner: `main.py` no extra notification on a kept failure (#108). | [x] closed 2026-11-11 (#108 #109 #110 `[~] live`; 1887 tests) |
+| 21 | A: #112 · B: #111 (user 2026-11-11: "go through the open todos … use subagents to complete them") | A `tools/tool_sandbox.py` (relay + child shim), `tools/meta_tool_generator.py` (prompt), `tools/draft_dry_run.py`, `ai/mcp_client.py` (relay entry), `ai/orchestrator.py` (relayed-call cards), README, new tests · B `tools/look_at_screen.py` (visible-area check), `events/remote_channel.py` `card_text` (skip empty args), the Mac card renderer only if it shows nulls, new tests | [~] in progress |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -729,8 +730,8 @@ Verify:
   it twice → a repair card with the diff → Approve → it runs.
 Deviations:
 
-#112 — Generated tools can call enabled MCP tools (through a daemon relay) [ ]
-Wave: _ (not scheduled) · Agent: _ · Added: 2026-11-11 · Source: user ("can a generated tool access mcp servers?" → "Yes, add it")
+#112 — Generated tools can call enabled MCP tools (through a daemon relay) [~]
+Wave: 21 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user ("can a generated tool access mcp servers?" → "Yes, add it")
 Ask: Let a generated tool use the MCP tools the user switched on (e.g.
 Playwright MCP for the browser), so a browser task done once in chat can
 become a reusable tool.
@@ -769,6 +770,9 @@ DECISIONS (assistant, 2026-11-11; the user can overturn any):
 OPEN (the user decides when scheduled): should the trusted path (finding
 3) be closed, e.g. by giving trusted tools the same relay and making
 `call_tool` refuse calls that did not pass the gate?
+USER DECISION (2026-11-11): NO, leave it. Trusted tools (#104) may keep
+calling `McpManager.call_tool` directly; the relay and its checks are for
+sandboxed tools. (Offered: close it by giving trusted tools the relay.)
 Files:
 ⚬ OWNED: `tools/tool_sandbox.py` (relay + child shim module),
   `tools/meta_tool_generator.py` (prompt lists enabled MCP tools with
@@ -1608,8 +1612,8 @@ Deviations:
 
 ---
 
-#111 — BUG: screenshots refused when a never-watch window is open but fully covered [ ]
-Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-20: "show me my screen" from the phone)
+#111 — BUG: screenshots refused when a never-watch window is open but fully covered [~]
+Wave: 21 (slot B) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-20: "show me my screen" from the phone)
 Ask: From the phone, "show me my screen" → the card said "Passwords (on
 the never-watch list) has a window on screen; nothing was captured", while
 the visible screen showed only Messages and Mail.
