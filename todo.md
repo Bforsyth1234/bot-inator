@@ -888,6 +888,17 @@ Results (subagent, wave 21 slot A, 2026-11-11):
   redaction in `_untrusted` → 1; pause cap removed → 1.
 ⚬ For the runner: LIVING_SPEC §1/§6 row (sandbox relay for MCP; not in this
   slot's file list).
+⚬ Follow-up (user, 2026-11-11, "Yes, use the relay"): a TRUSTED tool (#104)
+  that uses `call_mcp` now goes through the same relay instead of being
+  refused. `tools/mcp.py` `in_process_relay` (a contextvar hook, stdlib
+  only); `Orchestrator._load_tool` records the literal names for an
+  in-process tool; the approval wrapper sets the hook around a trusted
+  call to `relay_mcp_call` (same checks, cards, ledger row, taint). The
+  earlier answer stands: a trusted tool may still call
+  `McpManager.call_tool` directly through its own code.
+  Tests: `test_mcp_relay.py` 22 (+3, one replaced). Non-vacuity: no hook in
+  `call_mcp` → 2 fail; no wiring at the gate → 1 fails; no names at load →
+  1 fails. Full suite 1926.
 Deviations:
 ⚬ Child-side module is a new file `tools/mcp.py` (not inside
   `tool_sandbox.py`): it must import inside the child, where `tools` is a
