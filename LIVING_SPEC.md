@@ -11,6 +11,29 @@ wherever it can. It observes system events, reasons about them with an
 LLM, and proposes tools and actions that the user approves or rejects
 from a MenuBar UI. No background action without consent.
 
+**Standing rules (amendment to "no background action without consent",
+user decision 2026-11-10, item #78).** Consent is given per action, on an
+approval card, or by a standing rule. A standing rule is the only way a
+side-effecting action may run without a card, and only within these
+limits:
+
+1. The user creates it. The app may offer a rule only after the user has
+   approved the same tool for the same kind of trigger at least 5 times
+   with no edits and no denials. A model can never create, change or
+   enable a rule.
+2. It is narrow: one trigger kind, one tool, one fixed argument pattern.
+3. It can never cover: sending or drafting messages or email,
+   `generate_custom_tool`, generated tools, `run_shortcut`, deleting
+   anything, or any action that uses the network.
+4. It runs without a model: matching and arguments are deterministic, so
+   text in a file, email or web page cannot trigger or steer it.
+5. The user can see and revoke it: every rule is listed in Settings with
+   on/off and delete; every automatic run posts a notification with Undo
+   and is logged; a rule that is undone twice switches itself off.
+
+Everything outside these limits still needs an approval card. Until #78
+is built, no standing rules exist and every side-effecting call is gated.
+
 **Guiding question.** For every event, or window of events, the LLM asks:
 *"How could I possibly help the user here?"* That question is always
 asked. It is never gated on repetition or on a fixed list of event kinds.
