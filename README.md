@@ -49,7 +49,46 @@ The two talk over a WebSocket (`/ws/stream`) plus a small HTTP API. See
 
 ## Quick start
 
-### 1. Start the daemon
+```bash
+git clone https://github.com/Bforsyth1234/bot-inator.git
+cd bot-inator
+./install.sh
+./run.sh
+```
+
+`install.sh` checks for macOS 14+, Apple Silicon, Python 3.11+ and the
+Xcode command line tools (it names anything missing), sets up the daemon's
+Python environment and builds the menu bar app. It is safe to run again.
+
+`run.sh` starts the daemon in that terminal (Ctrl-C stops it) and opens
+the app once the daemon answers. With the default local provider the first
+start downloads the models (about 12.7 GB); `run.sh` lists them first. It
+adds no login item: run it again after a restart.
+
+### Pick a model provider
+
+Click the brain icon → **Settings…** (⌘,):
+
+- **Local (MLX)**: everything stays on your Mac. Default.
+- **Groq (cloud)**: faster and stronger models. Paste your API key, click
+  **Save**, then **Restart Daemon**. With Groq, event summaries, chat and
+  tool drafts are sent to Groq.
+
+Settings are saved to `~/.bot-inator/settings.json` (readable only by you).
+They override `.env`, and variables exported in the daemon's shell override
+both.
+
+| Engine | Local default | Groq default |
+|---|---|---|
+| Main (agent loop, idea detection) | Hermes-3-Llama-3.1-8B-4bit | `openai/gpt-oss-120b` |
+| Analysis (event summaries) | Qwen2.5-1.5B-Instruct-4bit | `openai/gpt-oss-20b` |
+| Drafting (writing new tools) | Qwen2.5-Coder-14B-Instruct-4bit | `openai/gpt-oss-120b` |
+
+## Manual build
+
+What `install.sh` and `run.sh` do, step by step.
+
+### Start the daemon
 
 ```bash
 cd agent-daemon
@@ -79,7 +118,7 @@ For `curl`:
 curl -H "Authorization: Bearer $(cat ~/.bot-inator/token)" http://127.0.0.1:8000/api/tools
 ```
 
-### 2. Build and launch the menu bar app
+### Build and launch the menu bar app
 
 There is no Xcode project in the repo; build it straight from the sources:
 
@@ -98,25 +137,6 @@ open build/MenuBarUI.app
 
 A brain icon appears in the menu bar. It connects to the daemon on its own
 and reconnects if the daemon restarts.
-
-### 3. Pick a model provider
-
-Click the brain icon → **Settings…** (⌘,):
-
-- **Local (MLX)**: everything stays on your Mac. Default.
-- **Groq (cloud)**: faster and stronger models. Paste your API key, click
-  **Save**, then **Restart Daemon**. With Groq, event summaries, chat and
-  tool drafts are sent to Groq.
-
-Settings are saved to `~/.bot-inator/settings.json` (readable only by you).
-They override `.env`, and variables exported in the daemon's shell override
-both.
-
-| Engine | Local default | Groq default |
-|---|---|---|
-| Main (agent loop, idea detection) | Hermes-3-Llama-3.1-8B-4bit | `openai/gpt-oss-120b` |
-| Analysis (event summaries) | Qwen2.5-1.5B-Instruct-4bit | `openai/gpt-oss-20b` |
-| Drafting (writing new tools) | Qwen2.5-Coder-14B-Instruct-4bit | `openai/gpt-oss-120b` |
 
 ## macOS permissions
 
