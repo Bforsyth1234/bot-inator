@@ -31,6 +31,8 @@ struct EgressRow: Codable, Identifiable, Equatable {
         case "sandboxed_tool": return "Tool \(tool ?? "")"
         // #109: a generated tool the user trusted, run inside bot-inator.
         case "trusted_tool": return "Trusted tool \(tool ?? "")"
+        // #110: a screenshot sent to the user's own phone.
+        case "imessage_image": return "Screenshot sent to your phone (iMessage)"
         case "open_url": return "Opened in browser"
         case "model_download": return "Model download \(model ?? "")"
         case "imessage": return "iMessage to you"
