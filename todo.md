@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #102
+Next ID: #103
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -793,6 +793,77 @@ Verify:
 ⚬ Live: open a document in Pages or a thread in Slack → quick ask
   "summarize what I'm looking at" → a summary of that window. Focus a
   password field → nothing is read.
+Deviations:
+
+---
+
+#102 — Built-in quit_app and take_screenshot (generated versions can't work in the sandbox) [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-17 build: "it denied that too")
+Ask: The user asked the app to close Spotify, and later to take a
+screenshot. Each time the agent wrote a tool (`close_app`,
+`capture_screenshot` in `tools/generated/`) that the user approved, and
+each failed. The user asked whether to stop sandboxing; the assistant
+recommended keeping it (invariant 7b, the README's promise, injection via
+mail/pages) and adding daemon-side built-ins, the same pattern as the
+`open` proxy (#53).
+Findings (assistant, 2026-11-11, reproduced on this Mac):
+1. QUIT: macOS refuses the `quit` Apple Event from ANY process under
+   `sandbox-exec`, even with a profile of only `(allow default)`:
+   `-10004` "A privilege violation occurred". `get name` to the same app
+   works; outside the sandbox `quit` works. Reproduced with Chess under
+   three profiles (plain, `deny lsopen`, the appleevent deny list). Not a
+   TCC problem: Mail failed the same way with Automation → Mail granted.
+   Daemon log 10:49 (Spotify) and 10:53 (Mail).
+2. SCREENSHOT: by design. `ALLOWED_EXECUTABLES` in `tools/tool_sandbox.py`
+   is osascript, shortcuts, mdfind (+ Python and the shims), so
+   `/usr/sbin/screencapture` gets `[Errno 1] Operation not permitted`.
+   Adding it to the list would let any generated tool capture the screen
+   silently, and a network-allowed one could send it off the Mac.
+3. `ai/tool_health` classified both as "not repairable (sandbox /
+   permission)", so no repair was offered. Correct, but the user only saw
+   the raw error.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. KEEP THE SANDBOX. No new executables in `ALLOWED_EXECUTABLES`, no
+   `quit` exception (there's no profile rule that allows it).
+2. TWO BUILT-INS, run in the daemon, approval-gated (not in
+   `READ_ONLY_TOOL_NAMES`), callable from generated tools through the
+   existing built-in path:
+   ⚬ `quit_app(app_name)`: resolve the name to a running app
+     (`NSRunningApplication`), polite `terminate()` (the app still asks
+     to save unsaved work); refuse a name that isn't running, and refuse
+     the daemon's own process, Finder, loginwindow and the menu bar app.
+     Card shows the app's name and icon/bundle id.
+   ⚬ `take_screenshot(path="")`: `/usr/sbin/screencapture -x` to
+     `~/Desktop/Screenshot <date>.png` by default (a given path must be
+     under the home folder and not in the #53 write-denied list). Card
+     says "captures everything visible on screen". Needs Screen Recording
+     for the daemon's responsible process (existing Permissions row); on
+     a blank or denied capture, say so and point to that row.
+3. REMOVE the generated `close_app` and `capture_screenshot` (move to
+   `tools/generated/disabled/` via the tool manager, so the nested repo
+   keeps their history).
+4. STEER THE DRAFTER: the drafting prompt (`tools/meta_tool_generator.py`)
+   lists what the sandbox can't do (quit apps, run executables outside
+   the allow list, open URLs/apps except through `open`) and names the
+   built-ins to call instead, so the agent stops writing tools that can't
+   work. When `tool_health` says "not repairable (sandbox)", the chat
+   reply names the reason in one line.
+Files:
+⚬ OWNED: new tools/quit_app.py, new tools/take_screenshot.py,
+  tools/__init__.py (register), tools/meta_tool_generator.py (prompt),
+  new tests/test_quit_app.py, new tests/test_take_screenshot.py.
+⚬ EDITED (additive): ai/tool_health.py or ai/orchestrator.py (the
+  one-line reason), ApprovalAlert.swift only if the card needs a field.
+Verify:
+⚬ Tests with `subprocess` / `NSRunningApplication` mocked: quit refuses
+  a non-running name and the protected apps; screenshot refuses a path
+  outside home or in `~/Library`; both are approval-gated (not read-only).
+  Non-vacuity per rule 5.
+⚬ A test that the drafting prompt names `quit_app` and `take_screenshot`.
+⚬ Live: "quit Spotify" in Chat → one `quit_app` card → Approve → Spotify
+  quits (with a document app: its save prompt appears). "take a
+  screenshot" → one `take_screenshot` card → Approve → PNG on the Desktop.
+  Neither request drafts a new tool.
 Deviations:
 
 ### Privacy
