@@ -198,6 +198,12 @@ tools are not loaded. `AGENT_TOOL_SANDBOX=0` turns the sandbox off and
 runs them in the daemon process as before. A tool run in the daemon (trusted, or sandbox off) gets privacy-ledger
 rows for the hosts its Python code connected to, best effort, not a boundary.
 
+A sandboxed tool can call the MCP tools you switched on with
+`from tools.mcp import call_mcp`. The daemon runs the call for it, only for
+a tool name written literally in the reviewed code and enabled at the
+moment of the call; an MCP tool you did not mark "runs without asking" shows
+its own approval card. The tool never sees the server config or the token.
+
 ## Configuration
 
 Everything else is set in `agent-daemon/.env`. See

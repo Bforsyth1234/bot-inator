@@ -1713,6 +1713,53 @@ class Orchestrator:
             error = f"installed but failed to load; moved to quarantine/: {reason}"
         return {"status": "error", "tool_name": name, "error": error}
 
+    def relay_mcp_call(
+        self, tool_name: str, name: str, arguments: dict[str, Any],
+        *, allowed: frozenset[str],
+    ) -> str:
+        """#112: run MCP tool ``name`` for the sandboxed generated tool
+        ``tool_name`` (called from the sandbox relay's thread, mid-call).
+
+        The gate lives in :meth:`McpManager.relay_call`; this supplies its
+        card (decision 5: an MCP tool the user did not mark "runs without
+        asking" gets its own card) and marks the turn with the result (#81).
+        """
+        from tools.tool_sandbox import McpRelayRefused
+
+        mcp = getattr(self, "mcp_manager", None)
+        if mcp is None:
+            raise McpRelayRefused("no MCP servers are set up")
+        server = mcp.server_of(name)
+
+        def ask(mcp_name: str, args: dict[str, Any]) -> Optional[dict[str, Any]]:
+            coro = self._request_approval(
+                event_id=getattr(self, "_current_event_id", "evt_unknown"),
+                tool_name=mcp_name,
+                tool_args={"args": [], "kwargs": args},
+                reasoning=(
+                    f"The generated tool {tool_name!r} wants to call {mcp_name} "
+                    f"(a tool from the MCP server {server!r})"
+                ),
+            )
+            remote = getattr(self, "remote_channel", None)
+            wait_s = max(
+                float(self.approval_timeout),
+                float(getattr(remote, "timeout_s", 0.0) or 0.0),
+            ) + 15
+            approved, edited = asyncio.run_coroutine_threadsafe(
+                coro, self.event_bus.loop
+            ).result(timeout=wait_s)
+            return Orchestrator._apply_edits(edited, [], args)[1] if approved else None
+
+        text = mcp.relay_call(name, arguments, allowed=allowed, ask=ask)
+        shield = getattr(self, "_taint", None)
+        if shield is not None:
+            try:
+                shield.mark_read(name, text, is_mcp=True, server=server)
+            except Exception:
+                logger.exception("taint.mark_read failed")
+        return text
+
     @staticmethod
     def _apply_edits(
         edited: dict[str, Any] | None,
