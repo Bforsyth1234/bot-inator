@@ -34,6 +34,52 @@ enum MeetingAuthStatus: String, Codable, Hashable {
     case authorized
 }
 
+/// #99: asking for Microphone / Speech Recognition from a click in
+/// Settings, not only from "Take notes". macOS lists an app under Privacy &
+/// Security only after the app itself has asked, so opening the pane alone
+/// left nothing to turn on.
+enum MeetingPermissionKind: String, CaseIterable {
+    case microphone
+    case speechRecognition = "speech_recognition"
+
+    var settingsURL: URL {
+        let pane = self == .microphone ? "Privacy_Microphone" : "Privacy_SpeechRecognition"
+        return URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")!
+    }
+}
+
+extension Notification.Name {
+    /// Posted after a Settings click changed (or tried to change) a meeting
+    /// permission, so the recorder re-reports its status to the daemon.
+    static let meetingPermissionsChanged = Notification.Name("meetingPermissionsChanged")
+}
+
+@MainActor
+enum MeetingPermissions {
+    static func status(_ kind: MeetingPermissionKind) -> MeetingAuthStatus {
+        kind == .microphone ? MeetingRecorder.microphoneStatus() : MeetingRecorder.speechStatus()
+    }
+
+    /// Not asked yet → the macOS prompt. Said no (or restricted) → open the
+    /// pane, where the app is now listed. Returns the status afterwards.
+    @discardableResult
+    static func request(_ kind: MeetingPermissionKind) async -> MeetingAuthStatus {
+        switch status(kind) {
+        case .notDetermined:
+            NSApp.activate(ignoringOtherApps: true)
+            _ = kind == .microphone
+                ? await MeetingRecorder.requestMicrophone()
+                : await MeetingRecorder.requestSpeech()
+        case .denied, .restricted:
+            NSWorkspace.shared.open(kind.settingsURL)
+        case .authorized:
+            break
+        }
+        NotificationCenter.default.post(name: .meetingPermissionsChanged, object: nil)
+        return status(kind)
+    }
+}
+
 enum MeetingRecordStateKind: String, Codable, Hashable {
     case idle, started, stopped, failed, declined
 }
@@ -230,8 +276,16 @@ final class MeetingRecorder: ObservableObject {
     private var expiryTask: Task<Void, Never>?
     private lazy var panel = MeetingRecorderPanelController(recorder: self)
 
+    private var permissionsObserver: NSObjectProtocol?
+
     init() {
         MeetingFiles.purgeLeftoverAudio()
+        // #99: a Settings click asked for a permission; tell the daemon.
+        permissionsObserver = NotificationCenter.default.addObserver(
+            forName: .meetingPermissionsChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reportIdle() }
+        }
     }
 
     var isRecording: Bool {
@@ -272,11 +326,11 @@ final class MeetingRecorder: ObservableObject {
     }
 
     /// Only after a click: may show the macOS prompt.
-    private static func requestMicrophone() async -> Bool {
+    static func requestMicrophone() async -> Bool {
         await AVCaptureDevice.requestAccess(for: .audio)
     }
 
-    private static func requestSpeech() async -> Bool {
+    static func requestSpeech() async -> Bool {
         await withCheckedContinuation { cont in
             SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0 == .authorized) }
         }

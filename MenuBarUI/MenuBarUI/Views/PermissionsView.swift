@@ -81,6 +81,16 @@ final class PermissionsViewModel: ObservableObject {
     func request(_ row: PermissionRow) async {
         pending = row.id
         defer { pending = nil }
+        // #99: only the app can ask for these; the daemon could only open
+        // System Settings, where an app that never asked isn't listed.
+        if let kind = MeetingPermissionKind(rawValue: row.id) {
+            let after = await MeetingPermissions.request(kind)
+            messages[row.id] = Self.describe(after)
+            // The recorder reports the new status over the WebSocket.
+            try? await Task.sleep(for: .milliseconds(500))
+            await refresh()
+            return
+        }
         do {
             var request = try DaemonAuth.request(
                 baseURL.appendingPathComponent("api/permissions/\(row.id)/request"),
@@ -99,6 +109,15 @@ final class PermissionsViewModel: ObservableObject {
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private static func describe(_ status: MeetingAuthStatus) -> String {
+        switch status {
+        case .authorized: return "granted"
+        case .notDetermined: return "not asked yet"
+        case .denied, .restricted:
+            return "turned off: switch on MenuBarUI in the System Settings pane that just opened"
         }
     }
 
@@ -188,6 +207,10 @@ struct PermissionsView: View {
     }
 
     private func buttonTitle(_ row: PermissionRow) -> String {
+        // #99: the app asks for these itself (a real prompt the first time).
+        if MeetingPermissionKind(rawValue: row.id) != nil {
+            return row.status == "denied" ? "Open Settings" : "Request"
+        }
         switch row.requestKind {
         case "settings": return "Open Settings"
         case "instructions": return "How?"

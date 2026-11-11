@@ -112,6 +112,7 @@ struct MeetingNotesSettingsView: View {
             }
 
             Toggle("Include the other side of the call (system audio)", isOn: $systemAudio)
+            MeetingPermissionButtons()
             Text("System audio needs Screen Recording for bot-inator; without it only your microphone is recorded.")
                 .appFont(.secondary).foregroundStyle(.secondary)
 
@@ -144,6 +145,48 @@ struct MeetingNotesSettingsView: View {
         if viewModel.isLocked(field) {
             Text("Set by \(env) in the daemon's shell; unset it there to change it here.")
                 .appFont(.secondary).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// #99: ask for Microphone and Speech Recognition here, before the first
+/// meeting, so the app shows up in System Settings to be turned on.
+struct MeetingPermissionButtons: View {
+    @State private var statuses: [MeetingPermissionKind: MeetingAuthStatus] = [:]
+
+    var body: some View {
+        ForEach(MeetingPermissionKind.allCases, id: \.self) { kind in
+            HStack {
+                Circle()
+                    .fill(statuses[kind] == .authorized ? Color.green : Color.gray)
+                    .frame(width: 8, height: 8)
+                Text(kind == .microphone ? "Microphone" : "Speech Recognition")
+                Text(label(statuses[kind])).appFont(.secondary).foregroundStyle(.secondary)
+                Spacer()
+                if statuses[kind] != .authorized {
+                    Button(statuses[kind] == .notDetermined ? "Allow…" : "Open Settings") {
+                        Task { statuses[kind] = await MeetingPermissions.request(kind) }
+                    }
+                }
+            }
+        }
+        .onAppear(perform: refresh)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refresh()
+        }
+    }
+
+    private func refresh() {
+        for kind in MeetingPermissionKind.allCases { statuses[kind] = MeetingPermissions.status(kind) }
+    }
+
+    private func label(_ status: MeetingAuthStatus?) -> String {
+        switch status {
+        case .authorized: return "allowed"
+        case .notDetermined: return "not asked yet"
+        case .denied: return "turned off"
+        case .restricted: return "restricted"
+        case nil: return ""
         }
     }
 }
