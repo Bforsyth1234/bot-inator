@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #107
+Next ID: #108
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -1116,6 +1116,59 @@ sandbox" → Approve → it works (for `close_app`: Spotify quits). Then edit th
 file (one character) → reload → badge gone, detail switch off, card has no
 label. Also: draft a new tool with the review checkbox ticked → after
 install the badge shows.
+
+---
+
+#107 — Vision: "look at my screen" with a local vision model [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user ("can the app view the screen?" → "add vision to todo")
+Ask: The app can read screen TEXT (front window #89, browser tab #59,
+window titles) and, with #102, save a screenshot, but no model ever looks
+at an image: Groq's gpt-oss and the local Qwen/Hermes text models are
+text-only. Let the user ask about what's on screen ("what does this chart
+say?", "what's wrong with this layout?", text inside an image).
+Today (2026-11-11, this Mac): MLX vision models already cached:
+`mlx-community/Qwen3-VL-2B-Instruct-4bit` and `…-4B-Instruct-4bit` (the
+plain `Qwen/Qwen3-VL-*` and `Qwen2.5-VL-7B` folders are near-empty
+stubs). `mlx-vlm` is NOT installed in the daemon venv. Screen Recording
+and Accessibility are granted to the daemon's responsible process.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. ONE BUILT-IN, `look_at_screen(question, target="front_window")`:
+   capture (front window by default, `screen` for the whole display) with
+   `screencapture` in the daemon (not the sandbox, #102), ask a vision
+   model the question about the image, return the answer as text, delete
+   the image. Approval-gated like `take_screenshot` (the card says what
+   will be captured: window title or "the whole screen"), so nothing is
+   looked at without a click. No continuous or background capture.
+2. LOCAL BY DEFAULT: a fourth engine role, `vision`, default
+   `mlx-community/Qwen3-VL-4B-Instruct-4bit` via `mlx-vlm` (2B as the
+   small-Mac choice, tie into #93's memory check), loaded lazily on first
+   use, not at start. Add `mlx-vlm` to requirements only if it resolves
+   with the current pins (mlx-lm ≥0.32, transformers 5.x, #27 PR).
+3. CLOUD ONLY WITH THE SAME OPT-IN AS PERSONAL TEXT: a screenshot holds
+   mail, messages and more, so sending it to a cloud vision model (a #97
+   provider with an image-capable model) requires
+   `AGENT_CLOUD_PERSONAL_TEXT=1` (#31/#52) AND a vision model chosen in
+   Settings; otherwise local, or refuse with the reason. Every cloud
+   image is a privacy-ledger row (#82) with its size.
+4. SKIP SENSITIVE WINDOWS like #89: refuse to capture when 1Password /
+   a password field / a secure-input app is frontmost, and say so.
+5. The drafter prompt (#102 decision 4) names `look_at_screen`, so the
+   agent doesn't write capture tools.
+Files: new tools/look_at_screen.py, new ai/vision_engine.py (or an mlx-vlm
+path in ai/mlx_engine.py), config.py / user_settings.py (vision role),
+providers (#97) for an image-capable cloud model, SettingsView (vision
+model picker), tools/__init__.py, tools/meta_tool_generator.py (prompt),
+requirements.txt, tests.
+Verify:
+⚬ Tests with capture and model mocked: approval-gated; image deleted after
+  success and failure; cloud refused without the opt-in; ledger row when
+  sent; sensitive front app refused. Non-vacuity per rule 5.
+⚬ Measure on this Mac: load time and memory of the 4B model, seconds per
+  answer for one window screenshot.
+⚬ Live: open a chart in Numbers or a web page → Chat "what does the chart
+  in this window show?" → one card naming the window → Approve → a
+  correct description; no PNG left on disk.
+Deviations:
 
 ### Privacy
 
