@@ -77,3 +77,53 @@ def test_mail_prompt_redacts_subject_for_cloud_main(monkeypatch: pytest.MonkeyPa
     assert "biopsy" not in prompt
     assert f'Subject: "{privacy.PLACEHOLDER}"' in prompt
     assert "message_id=449710" in prompt
+
+
+# ---- reply drafts (#70) ------------------------------------------------------
+
+def _reply_idea_event() -> ContextEvent:
+    from ai.idea_sources import NextStepSuggester
+
+    mail = ContextEvent(event_type="mail_received", metadata={
+        "sender": "Sam <sam@other.org>", "subject": "Can you send me the report?",
+        "date": "2026-11-10T09:00:00", "mailbox": "INBOX", "message_id": 42,
+    })
+    return ContextEvent(event_type="pattern_detected",
+                        metadata=NextStepSuggester.reply_idea(mail))
+
+
+def test_reply_idea_prompt_calls_draft_email_with_the_message_id(local_main) -> None:
+    prompt = Orchestrator._build_pattern_prompt(_reply_idea_event())
+    assert "`draft_email`" in prompt and "read_email" in prompt
+    assert "reply_to_message_id: 42" in prompt
+    assert "Can you send me the report?" in prompt
+    assert "generate_custom_tool` tool exactly once" not in prompt
+
+
+def test_reply_idea_prompt_redacts_subject_for_cloud_main(monkeypatch) -> None:
+    monkeypatch.setattr(privacy, "should_redact", lambda role: role == "main")
+    prompt = Orchestrator._build_pattern_prompt(_reply_idea_event())
+    assert "send me the report" not in prompt
+    assert "reply_to_message_id: 42" in prompt
+
+
+def test_read_mail_fields_reads_headers_and_thread(monkeypatch, tmp_path) -> None:
+    from ai.idea_sources import read_mail_fields
+
+    raw = (
+        "From: Sam <sam@other.org>\r\nTo: Me <me@example.com>\r\nCc: kim@other.org\r\n"
+        "Delivered-To: me@example.com\r\nSubject: Re: Report\r\n"
+        "Message-ID: <m2@other.org>\r\nIn-Reply-To: <m1@other.org>\r\n"
+        "References: <m0@other.org> <m1@other.org>\r\n\r\n"
+        "Can you send it?\r\n\r\nOn Mon, Me wrote:\r\n> here\r\n"
+    ).encode()
+    folder = tmp_path / "V10" / "acct" / "INBOX.mbox" / "Messages"
+    folder.mkdir(parents=True)
+    (folder / "42.emlx").write_bytes(f"{len(raw)}\n".encode() + raw + b"<?xml?><plist/>")
+    monkeypatch.setenv("AGENT_MAIL_ROOT", str(tmp_path))
+    fields = read_mail_fields(42)
+    assert fields["to"] == "Me <me@example.com>" and fields["cc"] == "kim@other.org"
+    assert fields["thread_id"] == "<m0@other.org>"
+    assert fields["delivered_to"] == ["me@example.com"]
+    assert fields["body"].startswith("Can you send it?")
+    assert read_mail_fields(99) is None

@@ -34,6 +34,10 @@ ALLOWED_KEYS = frozenset({
     # (default "08:00"). Read live by events.daily_brief; no restart.
     "AGENT_DAILY_BRIEF",
     "AGENT_DAILY_BRIEF_TIME",
+    # Meeting prep (#71): "1"/"0" (default on) and whole minutes before the
+    # meeting, 1..10 (default 10). Read live by events.meeting_prep.
+    "AGENT_MEETING_PREP",
+    "AGENT_MEETING_PREP_MINUTES",
 })
 PROVIDERS = ("local", "groq")
 

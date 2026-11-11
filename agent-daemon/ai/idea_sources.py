@@ -24,6 +24,15 @@ the built-in (which asks for approval) instead of generating a tool.
 Cooldowns survive restarts through :class:`IdeaState`
 (``~/.bot-inator/idea_state.json``), and ideas resembling one the user
 declined are dropped via the shared ``IdeaFeedback`` store (todo #32).
+
+Reply drafts (todo #70): a received email that directly asks the user
+something becomes a built-in ``draft_email`` idea with
+``reply_to_message_id``. Deterministic checks (:mod:`ai.needs_reply`) on
+the message's own headers and first lines, then one judge call
+(:data:`NEEDS_REPLY_JUDGE_SYSTEM_PROMPT`); anything unclear drops the
+offer. One offer per thread and per sender (cooldowns in ``IdeaState``).
+When a cloud engine would see the email with personal text off, there is
+no offer and one ``info`` notice says why.
 """
 
 from __future__ import annotations
@@ -35,11 +44,14 @@ import logging
 import re
 import time
 from pathlib import Path, PurePath
-from typing import Any, Awaitable, Callable, Optional, Protocol
+from typing import Any, Awaitable, Callable, Iterable, Optional, Protocol
 
+from ai import needs_reply as reply_checks
+from ai import privacy
 from ai.pattern_recognizer import PatternRecognizer
 from ai.privacy import redact_event, redacted_event
 from events.event_bus import ContextEvent, EventBus
+from schemas.ws_messages import NOTICE_EVENT_TYPE, NoticePayload
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +129,16 @@ FOLLOW_UPS: dict[str, str] = {
         "reminder with the built-in create_reminder tool (title from the "
         "request, due from the deadline); it asks the user for approval."
     ),
+    "mail_needs_reply": (
+        "Read the email with the built-in read_email tool, then call the "
+        "built-in draft_email tool with reply_to_message_id set to the "
+        "email's message_id, to set to the sender's address, subject empty, "
+        "and a short, polite body in the user's voice that answers the "
+        "question or request. Do not invent facts the user has not given: "
+        "put a bracketed placeholder such as [date] where one is needed. "
+        "draft_email only opens an unsent draft for the user to review; "
+        "never say the email was sent."
+    ),
 }
 
 # Kinds a built-in tool handles directly: kind -> (idea name, built-in tool).
@@ -129,7 +151,26 @@ BUILTIN_FOLLOW_UPS: dict[str, tuple[str, str]] = {
     "mail_invite": ("add_email_invite_to_calendar", "create_event"),
     "mail_shipping": ("open_email_tracking_page", "open_url"),
     "mail_deadline": ("remind_email_deadline", "create_reminder"),
+    "mail_needs_reply": ("draft_email_reply", "draft_email"),
 }
+
+# Judge for #70: does this email ask the user for a reply? Read by
+# NextStepSuggester(reply_judge=...); the runner builds the evaluator with
+# this system prompt (main.py).
+NEEDS_REPLY_JUDGE_SYSTEM_PROMPT = (
+    "You decide whether an email needs a personal reply from the user. "
+    "Answer yes only when the sender, a real person, directly asks the "
+    "user a question or asks them to do, confirm, decide or send something, "
+    "and a short written reply is the natural next step. Answer no for "
+    "newsletters, marketing, receipts, automated notifications, FYI or "
+    "thank-you notes, mail that only informs, rhetorical questions, and "
+    "anything you are unsure about.\n\n"
+    "Reply with exactly one JSON object and nothing else:\n"
+    '{"needs_reply": true or false, "reason": "<one short sentence>"}'
+)
+
+# Debug notice when personal text may not reach a cloud engine (#70 / #31).
+NEEDS_REPLY_NOTICE_ID = "needs_reply:personal_text_off"
 
 CHAT_GAP_SYSTEM_PROMPT = (
     "You review a chat turn where a macOS assistant could not do what the "
@@ -305,6 +346,81 @@ def parse_suggestion(raw: str) -> Optional[dict[str, Any]]:
     return PatternRecognizer._parse(text)
 
 
+# ---- reply drafts (#70) ------------------------------------------------------
+
+ReadMessage = Callable[[int], Optional[dict[str, Any]]]
+
+# Extra addresses of the user, comma-separated (the delivery headers of the
+# message itself are used too; see read_mail_fields).
+USER_EMAILS_ENV = "AGENT_USER_EMAILS"
+_VERDICT_TRUE_RE = re.compile(r'"needs_reply"\s*:\s*true\b', re.IGNORECASE)
+_VERDICT_FALSE_RE = re.compile(r'"needs_reply"\s*:\s*false\b', re.IGNORECASE)
+_VERDICT_REASON_RE = re.compile(r'"reason"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_MSGID_RE = re.compile(r"<[^<>\s]+>")
+
+
+def parse_reply_verdict(raw: str) -> tuple[bool, str]:
+    """``(needs_reply, reason)`` from a judge reply. Anything that is not a
+    clear, single yes is a no (invariant 7d)."""
+    text = raw or ""
+    yes = bool(_VERDICT_TRUE_RE.search(text))
+    if not yes:
+        bare = text.strip().strip(".!").strip().lower()
+        yes = bare in {"yes", "true"}
+    if yes and _VERDICT_FALSE_RE.search(text):
+        return False, "contradictory verdict"
+    m = _VERDICT_REASON_RE.search(text)
+    return yes, (m.group(1) if m else "")[:200]
+
+
+def read_mail_fields(message_id: int) -> Optional[dict[str, Any]]:
+    """To, Cc, delivery addresses, thread id and body of a received email.
+
+    Local and read-only: the same ``.emlx`` file ``read_email`` reads.
+    ``None`` when the file can't be found or parsed. Blocking (walks the
+    Mail folder): call it off the event loop.
+    """
+    # Lazy: ``tools`` imports ``ai`` (circular at module load).
+    from tools.read_email import find_emlx, mail_root, message_body, parse_emlx
+
+    try:
+        path = find_emlx(int(message_id), mail_root())
+        if path is None:
+            return None
+        msg = parse_emlx(path.read_bytes())
+        body = message_body(msg)
+    except Exception:
+        logger.info("reply check could not read message %s", message_id, exc_info=True)
+        return None
+
+    def header(name: str) -> str:
+        return " ".join(str(v) for v in (msg.get_all(name) or []))
+
+    refs = _MSGID_RE.findall(header("References"))
+    in_reply = _MSGID_RE.findall(header("In-Reply-To"))
+    own = _MSGID_RE.findall(header("Message-ID"))
+    thread = (refs or in_reply or own or [""])[0]
+    delivered = reply_checks.extract_addresses(
+        [header("Delivered-To"), header("X-Original-To"), header("Envelope-To")]
+    )
+    return {
+        "to": header("To"), "cc": header("Cc"), "body": body[:4000],
+        "thread_id": thread, "delivered_to": delivered,
+    }
+
+
+def _env_user_addresses() -> list[str]:
+    import os
+
+    return reply_checks.extract_addresses(
+        [a for a in os.environ.get(USER_EMAILS_ENV, "").split(",") if a.strip()]
+    )
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 class _CooldownSource:
     """Shared plumbing: persisted per-key cooldowns, feedback, publishing."""
 
@@ -382,12 +498,32 @@ class NextStepSuggester(_CooldownSource):
         publish: Optional[Publish] = None,
         state: Optional[IdeaState] = None,
         feedback: Optional[FeedbackStore] = None,
+        reply_judge: Optional[Evaluate] = None,
+        read_message: Optional[ReadMessage] = None,
+        user_addresses: Iterable[str] = (),
     ) -> None:
         super().__init__(
             event_bus=event_bus, evaluate=evaluate,
             cooldown_seconds=cooldown_seconds, publish=publish,
             state=state, feedback=feedback,
         )
+        # Reply drafts (#70) are off until a judge is wired in (main.py).
+        self._reply_judge = reply_judge
+        self._read_message: ReadMessage = read_message or read_mail_fields
+        self._user_addresses = tuple(user_addresses)
+        # Thread / sender keys with a reply check in flight: two mails of
+        # one thread in the same poll make one offer, not two.
+        self._reply_inflight: set[str] = set()
+        self._reply_notice_sent = False
+
+    # One offer per thread for two weeks, and per sender for half a day.
+    REPLY_THREAD_COOLDOWN = 14 * 24 * 3600.0
+    REPLY_SENDER_COOLDOWN = 12 * 3600.0
+    # Each message is checked once (the judge is not asked twice).
+    REPLY_MESSAGE_COOLDOWN = 7 * 24 * 3600.0
+    # Kinds a reply offer may replace; other built-in mail kinds (invites,
+    # shipping) keep their own card.
+    REPLY_CAN_REPLACE: frozenset[Optional[str]] = frozenset({None, "mail_deadline"})
 
     @staticmethod
     def classify(event: ContextEvent) -> Optional[str]:
@@ -490,18 +626,18 @@ class NextStepSuggester(_CooldownSource):
         if event.event_type == "pattern_detected":
             return None
         kind = self.classify(event)
+        if self._reply_candidate(event, kind):
+            # The reply check reads the message and asks the judge; when it
+            # says no, the built-in card the mail would have had (a
+            # deadline reminder) is offered instead, so one email still
+            # makes at most one card.
+            return asyncio.create_task(self._offer_reply(event, kind), name="next-step-reply")
         if kind is None:
             return None
         if kind in BUILTIN_FOLLOW_UPS:
-            # A specific action on a specific event: cool down per event,
-            # not per kind, so a second invite the same day is not lost.
-            key = self._instance_key(event, kind)
-            if self._cooling(key):
+            idea = self._claim_builtin(event, kind)
+            if idea is None:
                 return None
-            idea = self.builtin_idea(event, kind)
-            if self._rejected(idea):
-                return None
-            self._start_cooldown(key)
             return asyncio.create_task(self._publish_idea(idea), name="next-step")
         if self._cooling(kind):
             return None
@@ -514,6 +650,181 @@ class NextStepSuggester(_CooldownSource):
             ),
             name="next-step",
         )
+
+
+    def _claim_builtin(self, event: ContextEvent, kind: str) -> Optional[dict[str, Any]]:
+        """The built-in idea for ``kind``, with its cooldown started; ``None``
+        when cooling down or declined before."""
+        # A specific action on a specific event: cool down per event,
+        # not per kind, so a second invite the same day is not lost.
+        key = self._instance_key(event, kind)
+        if self._cooling(key):
+            return None
+        idea = self.builtin_idea(event, kind)
+        if self._rejected(idea):
+            return None
+        self._start_cooldown(key)
+        return idea
+
+    # ---- reply drafts (#70) ----------------------------------------------
+
+    @staticmethod
+    def _sender_key(sender: str) -> str:
+        addrs = reply_checks.extract_addresses(sender)
+        return "reply_sender:" + _digest(addrs[0] if addrs else sender.strip().lower())
+
+    @staticmethod
+    def _thread_key(event: ContextEvent, fields: dict[str, Any]) -> str:
+        meta = event.metadata or {}
+        ident = str(fields.get("thread_id") or "")
+        if not ident:
+            # No Message-ID headers: the subject without Re:/Fwd: plus the
+            # sender stands in for the thread.
+            subject = reply_checks.strip_subject_prefix(str(meta.get("subject") or "")).lower()
+            ident = f"{subject}|{reply_checks.extract_addresses(str(meta.get('sender') or ''))}"
+        return "reply_thread:" + _digest(ident)
+
+    def _reply_candidate(self, event: ContextEvent, kind: Optional[str]) -> bool:
+        """Cheap, synchronous checks before the reply check is scheduled."""
+        if self._reply_judge is None or event.event_type != "mail_received":
+            return False
+        if kind not in self.REPLY_CAN_REPLACE:
+            return False
+        meta = event.metadata or {}
+        if meta.get("bulk") or _SKIP_MAILBOXES.search(str(meta.get("mailbox") or "")):
+            return False
+        try:
+            mid = int(meta.get("message_id") or 0)
+        except (TypeError, ValueError):
+            return False
+        sender = str(meta.get("sender") or "")
+        if mid <= 0 or not reply_checks.extract_addresses(sender):
+            return False
+        if reply_checks.is_automated_sender(sender):
+            return False
+        sender_key = self._sender_key(sender)
+        if sender_key in self._reply_inflight or self._cooling(sender_key):
+            return False
+        message_key = self._instance_key(event, "mail_needs_reply")
+        if self._cooling(message_key):
+            return False
+        if self._rejected(self.builtin_idea(event, "mail_needs_reply")):
+            return False
+        self.state.start(self.source_name, message_key, self.REPLY_MESSAGE_COOLDOWN)
+        return True
+
+    def _redacted_for_cloud(self) -> bool:
+        """True when a cloud engine (the judge's or the drafter's) may not
+        see email text (#31/#52): the reply could only be written from a
+        placeholder."""
+        try:
+            return privacy.should_redact("detection") or privacy.should_redact("main")
+        except Exception:
+            logger.exception("reply check: privacy lookup failed")
+            return True
+
+    async def _say_reply_skipped(self) -> None:
+        """Explain once why there are no reply offers (Debug / notices)."""
+        if self._reply_notice_sent:
+            return
+        self._reply_notice_sent = True
+        notice = NoticePayload(
+            id=NEEDS_REPLY_NOTICE_ID,
+            level="info",
+            title="Reply drafts are off for cloud engines",
+            body=(
+                "An email asked you something, but no reply draft was offered: "
+                "a cloud engine would write it, and email text stays on this Mac. "
+                "Allow cloud models to see email and message text in Settings, "
+                "or use a local engine, to get reply drafts."
+            ),
+        )
+        try:
+            await self._publish(ContextEvent(
+                event_type=NOTICE_EVENT_TYPE, metadata={"notice": notice.model_dump()},
+            ))
+        except Exception:
+            logger.exception("reply check: failed to publish the notice")
+
+    @classmethod
+    def reply_idea(cls, event: ContextEvent, reason: str = "") -> dict[str, Any]:
+        """The built-in ``draft_email`` idea for a reply to ``event``."""
+        meta = event.metadata or {}
+        mid = int(meta.get("message_id") or 0)
+        idea = cls.builtin_idea(event, "mail_needs_reply")
+        suffix = f"\nreply_to_message_id: {mid}"
+        idea["event_details"] += suffix
+        idea["event_details_redacted"] += suffix
+        idea["expected_logic"] += suffix
+        idea["reply_to_message_id"] = mid
+        if reason:
+            idea["judge_reason"] = reason
+        return idea
+
+    async def _offer_reply(self, event: ContextEvent, fallback: Optional[str]) -> None:
+        meta = event.metadata or {}
+        sender = str(meta.get("sender") or "")
+        sender_key = self._sender_key(sender)
+        claimed = [sender_key]
+        self._reply_inflight.add(sender_key)
+        published = False
+        try:
+            published = await self._check_and_offer_reply(event, sender, sender_key, claimed)
+        except Exception:
+            logger.exception("reply check failed")
+        finally:
+            self._reply_inflight.difference_update(claimed)
+        if not published and fallback is not None:
+            idea = self._claim_builtin(event, fallback)
+            if idea is not None:
+                await self._publish_idea(idea)
+
+    async def _check_and_offer_reply(
+        self, event: ContextEvent, sender: str, sender_key: str, claimed: list[str],
+    ) -> bool:
+        meta = event.metadata or {}
+        mid = int(meta.get("message_id") or 0)
+        fields = await asyncio.to_thread(self._read_message, mid)
+        if not fields:
+            return False
+        user = [*self._user_addresses, *_env_user_addresses(), *(fields.get("delivered_to") or ())]
+        check = reply_checks.needs_reply(
+            sender=sender, to=fields.get("to"), cc=fields.get("cc"),
+            subject=str(meta.get("subject") or ""), body=str(fields.get("body") or ""),
+            user_addresses=user, bulk=bool(meta.get("bulk")),
+        )
+        if not check:
+            logger.info("reply check %s: no (%s)", mid, check.reason)
+            return False
+        thread_key = self._thread_key(event, fields)
+        if thread_key in self._reply_inflight or self._cooling(thread_key):
+            logger.info("reply check %s: thread already offered", mid)
+            return False
+        self._reply_inflight.add(thread_key)
+        claimed.append(thread_key)
+        if self._redacted_for_cloud():
+            logger.info("reply check %s: skipped, personal text may not reach a cloud engine", mid)
+            await self._say_reply_skipped()
+            return False
+        lines = reply_checks.first_lines(str(fields.get("body") or ""), 15)
+        prompt = (
+            f"From: {sender}\n"
+            f"Subject: {str(meta.get('subject') or '')[:200]}\n"
+            "First lines of the email (quoted history removed):\n"
+            + "\n".join(lines)[:1500]
+        )
+        try:
+            yes, reason = parse_reply_verdict(await self._reply_judge(prompt))  # type: ignore[misc]
+        except Exception:
+            logger.exception("reply judge failed")
+            return False
+        if not yes:
+            logger.info("reply check %s: judge said no (%s)", mid, reason)
+            return False
+        self.state.start(self.source_name, thread_key, self.REPLY_THREAD_COOLDOWN)
+        self.state.start(self.source_name, sender_key, self.REPLY_SENDER_COOLDOWN)
+        await self._publish_idea(self.reply_idea(event, reason))
+        return True
 
 
 class ChatGapDetector(_CooldownSource):

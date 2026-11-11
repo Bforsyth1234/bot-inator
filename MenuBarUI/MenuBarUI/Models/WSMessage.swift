@@ -235,10 +235,46 @@ struct CodeApprovalResponsePayload: Codable, Hashable {
 struct UserMessagePayload: Codable, Hashable {
     let messageId: String
     let text: String
+    /// What the user was looking at (#74 quick-ask). Nil from the Chat
+    /// window; omitted from the JSON when nil, so older daemons are fine.
+    let context: ChatContextPayload?
+
+    init(messageId: String, text: String, context: ChatContextPayload? = nil) {
+        self.messageId = messageId
+        self.text = text
+        self.context = context
+    }
 
     enum CodingKeys: String, CodingKey {
         case messageId = "message_id"
         case text
+        case context
+    }
+}
+
+/// Quick-ask context (#74): front app, window title, and the selected text
+/// or clipboard only when the user chose to include it. The daemon puts it
+/// in that one turn's prompt; it is not stored.
+struct ChatContextPayload: Codable, Hashable {
+    var frontApp: String? = nil
+    var windowTitle: String? = nil
+    var selection: String? = nil
+    var selectionSource: SelectionSource? = nil
+
+    enum SelectionSource: String, Codable, Hashable {
+        case selection
+        case clipboard
+    }
+
+    var isEmpty: Bool {
+        frontApp == nil && windowTitle == nil && selection == nil
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case frontApp = "front_app"
+        case windowTitle = "window_title"
+        case selection
+        case selectionSource = "selection_source"
     }
 }
 

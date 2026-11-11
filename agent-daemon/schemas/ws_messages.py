@@ -224,6 +224,26 @@ class CommandPayload(BaseModel):
     action: CommandAction
 
 
+SelectionSource = Literal["selection", "clipboard"]
+
+
+class ChatContextPayload(BaseModel):
+    """What the user was looking at when they opened quick-ask (#74).
+
+    Every field is optional. ``selection`` is text the user chose to
+    include for this one message (the app's selected text via
+    Accessibility, or the clipboard when the user picked "use what's on
+    the clipboard"); ``selection_source`` says which. The daemon renders
+    it into that turn's prompt only (:mod:`ai.chat_context`); it is not
+    stored in memory.
+    """
+
+    front_app: str | None = None
+    window_title: str | None = None
+    selection: str | None = None
+    selection_source: SelectionSource | None = None
+
+
 class UserMessagePayload(BaseModel):
     """Client→server chat message typed by the user in the chat window.
 
@@ -231,10 +251,14 @@ class UserMessagePayload(BaseModel):
     ``event_id`` on every ``thought`` frame the daemon emits while handling
     the turn, so the chat UI can group the agent's streamed reasoning
     under the originating user bubble.
+
+    ``context`` (#74) is set by the quick-ask panel; absent from the Chat
+    window and older clients.
     """
 
     message_id: str
     text: str
+    context: ChatContextPayload | None = None
 
 
 # ---------------------------------------------------------------------------

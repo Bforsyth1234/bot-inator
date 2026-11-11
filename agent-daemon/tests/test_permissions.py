@@ -42,6 +42,7 @@ def no_prompts(monkeypatch, tmp_path):
     monkeypatch.setattr(P, "_cg_request_screen_capture", boom)
     monkeypatch.setattr(P, "_cg_preflight_screen_capture", lambda: False)
     monkeypatch.setattr(P, "_read_defaults", lambda *_a: None)
+    monkeypatch.setattr(P, "_ax_is_process_trusted", lambda: False)
     monkeypatch.setattr(P, "MESSAGES_DB", tmp_path / "missing.db")
     monkeypatch.setattr(P, "MAIL_DIR", tmp_path / "missing-mail")
     monkeypatch.setattr(P, "CHROME_DIR", tmp_path / "no-chrome")
@@ -179,6 +180,50 @@ def test_calendars_unknown_until_menu_bar_app_reports() -> None:
         assert P._row(P.get("calendars"))["status"] == P.GRANTED
     finally:
         P.set_external_check("calendars", None)
+
+
+# ── Accessibility (#74 quick-ask) ────────────────────────────────────────
+
+def test_accessibility_row_is_listed() -> None:
+    perm = P.get("accessibility")
+    assert perm is not None and perm.name == "Accessibility"
+    assert perm.request_kind == "settings"
+    assert any("QuickAsk" in u for u in perm.used_by)
+    assert "accessibility" in [r["id"] for r in P.check_all()]
+
+
+@pytest.mark.parametrize("value,status", [(True, P.GRANTED), (False, P.DENIED),
+                                          (None, P.UNKNOWN)])
+def test_accessibility_mapping(monkeypatch, value, status) -> None:
+    monkeypatch.setattr(P, "_ax_is_process_trusted", lambda: value)
+    assert P._row(P.get("accessibility"))["status"] == status
+
+
+def test_accessibility_check_error_is_unknown(monkeypatch) -> None:
+    def boom() -> bool:
+        raise OSError("no ApplicationServices")
+    monkeypatch.setattr(P, "_ax_is_process_trusted", boom)
+    assert P.check_accessibility()["status"] == P.UNKNOWN
+
+
+def test_accessibility_menu_bar_app_report_wins(monkeypatch) -> None:
+    monkeypatch.setattr(P, "_ax_is_process_trusted", lambda: False)
+    P.set_external_check("accessibility", lambda: P._result(P.GRANTED))
+    try:
+        assert P.check_accessibility()["status"] == P.GRANTED
+    finally:
+        P.set_external_check("accessibility", None)
+    assert P.check_accessibility()["status"] == P.DENIED
+
+
+def test_request_accessibility_opens_pane(monkeypatch) -> None:
+    opened = []
+    monkeypatch.setattr(P, "_open_url", opened.append)
+    monkeypatch.setattr(P, "_ax_is_process_trusted", lambda: False)
+    out = P.request("accessibility")
+    assert out["action"] == "opened_settings"
+    assert opened == [P.SETTINGS_URLS["accessibility"]]
+    assert out["permission"]["status"] == P.DENIED
 
 
 def test_bad_status_is_reported_unknown(monkeypatch) -> None:

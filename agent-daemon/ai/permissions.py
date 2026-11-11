@@ -18,6 +18,10 @@ CHECKS NEVER PROMPT. ``check_all()`` must not put a macOS dialog on screen:
   ``defaults``). No JavaScript is ever run in the user's tabs.
 * Calendars: provided by the menu bar app via EventKit (#60); ``unknown``
   until #60 calls :func:`set_external_check`.
+* Accessibility (#74, quick-ask reads the selected text): ``AXIsProcessTrusted``
+  through ``ctypes`` on ApplicationServices (never prompts; the prompting
+  variant ``AXIsProcessTrustedWithOptions`` is never called). The menu bar
+  app may supply its own status with :func:`set_external_check`.
 
 Only :func:`request` (an explicit ``POST /api/permissions/<id>/request``,
 i.e. a user click) may prompt or open System Settings.
@@ -54,6 +58,7 @@ SETTINGS_URLS = {
     "screen_recording": _PANE + "Privacy_ScreenCapture",
     "automation": _PANE + "Privacy_Automation",
     "calendars": _PANE + "Privacy_Calendars",
+    "accessibility": _PANE + "Privacy_Accessibility",
 }
 
 CheckResult = dict[str, str]  # {"status": ..., "detail": ...}
@@ -146,6 +151,24 @@ def _read_defaults(domain: str, key: str) -> Optional[str]:
     proc = subprocess.run(["/usr/bin/defaults", "read", domain, key],
                           capture_output=True, text=True, timeout=5, check=False)
     return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+_APPSERVICES = ("/System/Library/Frameworks/ApplicationServices.framework/"
+                "ApplicationServices")
+
+
+def _ax_is_process_trusted() -> Optional[bool]:
+    """``AXIsProcessTrusted()`` (never prompts); None when unavailable."""
+    try:
+        lib = ctypes.CDLL(_APPSERVICES)
+    except OSError:
+        return None
+    fn = getattr(lib, "AXIsProcessTrusted", None)
+    if fn is None:
+        return None
+    fn.argtypes = []
+    fn.restype = ctypes.c_bool
+    return bool(fn())
 
 
 # ---- checks -------------------------------------------------------------------
@@ -269,6 +292,23 @@ def check_calendars() -> CheckResult:
     return fn()
 
 
+def check_accessibility() -> CheckResult:
+    """Accessibility for quick-ask's selected text (#74). The menu bar app
+    reads the selection, so its own report wins when it supplies one."""
+    fn = _external_checks.get("accessibility")
+    if fn is not None:
+        return fn()
+    try:
+        ok = _ax_is_process_trusted()
+    except Exception as exc:
+        return _result(UNKNOWN, f"can't check: {exc}")
+    if ok is None:
+        return _result(UNKNOWN, "AXIsProcessTrusted unavailable")
+    # Like Screen Recording, macOS doesn't say whether it was ever asked.
+    return _result(GRANTED) if ok else _result(
+        DENIED, "not granted; quick-ask offers the clipboard instead")
+
+
 # ---- requests (only on an explicit user click) --------------------------------
 
 def _opened(url: str, detail: str = "") -> dict[str, Any]:
@@ -310,6 +350,15 @@ def request_calendars() -> dict[str, Any]:
         return fn()
     return _opened(SETTINGS_URLS["calendars"],
                    "Calendar access moves to the menu bar app (#60)")
+
+
+def request_accessibility() -> dict[str, Any]:
+    fn = _external_requests.get("accessibility")
+    if fn is not None:
+        return fn()
+    return _opened(SETTINGS_URLS["accessibility"],
+                   "turn on the menu bar app (and the process below) "
+                   "in Accessibility")
 
 
 # ---- the table ---------------------------------------------------------------
@@ -359,6 +408,14 @@ PERMISSIONS: list[Permission] = [
                  "tools/create_event.py", "events/calendar_watcher.py"),
         check=lambda: check_calendars(),
         request=lambda: request_calendars(), request_kind="settings",
+    ),
+    Permission(
+        id="accessibility", name="Accessibility",
+        why=("Read the text you selected when you open quick-ask (⌥Space); "
+             "without it quick-ask offers the clipboard instead."),
+        used_by=("MenuBarUI/Views/QuickAskPanel.swift",),
+        check=lambda: check_accessibility(),
+        request=lambda: request_accessibility(), request_kind="settings",
     ),
     _automation("automation_reminders", "Reminders", "com.apple.reminders",
                 "List and create reminders (AGENT_REMINDERS_BACKEND=applescript).",
