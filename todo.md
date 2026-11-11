@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #111
+Next ID: #112
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -1538,6 +1538,46 @@ Verify:
   unsent reply draft.
 Deviations:
 
+
+---
+
+#111 — BUG: screenshots refused when a never-watch window is open but fully covered [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-20: "show me my screen" from the phone)
+Ask: From the phone, "show me my screen" → the card said "Passwords (on
+the never-watch list) has a window on screen; nothing was captured", while
+the visible screen showed only Messages and Mail.
+Findings (assistant, 2026-11-11, `CGWindowListCopyWindowInfo` on this
+Mac): Passwords had one window, 900×530 at (510, 297), reported
+`kCGWindowIsOnscreen = True`, but completely behind Messages and Mail.
+"On screen" in Quartz means "in the current Space and not minimized", not
+"visible"; a whole-screen capture would not have contained any of it. The
+check (`tools/look_at_screen.py` `resolve`, `NEVER_WATCH_ON_SCREEN`, used
+by `take_screenshot` (#102/#110) and `look_at_screen` (#107)) refuses on
+any such window.
+Also seen: the phone card showed `path: null` for an argument the model
+left empty.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. REFUSE ONLY WHEN SOME OF IT IS VISIBLE. Walk the on-screen list front to
+   back (Quartz returns it in z-order), subtract every opaque window above
+   (layer ≥ the never-watch window's, alpha 1, not the desktop) from the
+   never-watch window's rectangle; refuse if any area is left (a sliver
+   counts). Treat windows with alpha < 1 as see-through (they don't cover).
+   When the list can't be read, refuse as today.
+2. Same rule for both tools and both targets ("screen" and "front_window":
+   the front window is visible by definition, so the front-app check is
+   unchanged).
+3. CARDS hide arguments whose value is null or empty (phone and Mac).
+Files: tools/look_at_screen.py (`resolve` + a small visible-area helper),
+events/remote_channel.py `card_text` (skip empty args), the Mac card
+renderer only if it shows nulls too, tests.
+Verify:
+⚬ Tests on fixture window lists: fully covered → allowed; 1 px showing →
+  refused; covered only by a translucent window → refused; minimized →
+  allowed; list unreadable → refused. `card_text` drops `path: null`.
+  Non-vacuity per rule 5.
+⚬ Live: Passwords open behind other windows → "show me my screen" → the
+  screenshot arrives; drag Passwords partly into view → refused.
+Deviations:
 
 ---
 
