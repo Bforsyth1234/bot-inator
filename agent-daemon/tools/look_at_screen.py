@@ -351,7 +351,10 @@ def card_note(question: str = "", target: str = "front_window", *args: Any, **kw
     note = f"Captures {what} once and asks {r.describe()}"
     if question.strip():
         note += f": “{question.strip()[:200]}”"
-    note += ". The image is deleted afterwards."
+    if _phone_turn():
+        note += ". It also sends the screenshot to your phone (#110)."
+    else:
+        note += ". The image is deleted afterwards."
     if r.kind == "cloud":
         note += " The screenshot leaves this Mac."
     else:
@@ -364,6 +367,36 @@ def card_note(question: str = "", target: str = "front_window", *args: Any, **kw
             gb = f" (about {size / 1e9:.1f} GB)" if size else ""
             note += f" First use downloads the model{gb} from Hugging Face."
     return note
+
+
+def _phone_turn() -> bool:
+    try:
+        from events import remote_channel
+
+        return remote_channel.phone_turn_active()
+    except Exception:
+        return False
+
+
+def _keep_for_phone(path: Path) -> bool:
+    """#110: in a phone turn, copy the (already scaled) capture into the
+    remote channel's capture folder for the reply. The temp copy is still
+    deleted."""
+    if not _phone_turn():
+        return False
+    from events import remote_channel
+
+    dest = remote_channel.new_capture_path()
+    try:
+        shutil.copyfile(path, dest)
+    except OSError:
+        logger.warning("look_at_screen: capture not kept for the phone", exc_info=True)
+        remote_channel._delete(dest)
+        return False
+    if remote_channel.add_capture(dest):
+        return True
+    remote_channel._delete(dest)
+    return False
 
 
 def _capture(window: Optional[Window], folder: Path) -> Path:
@@ -407,6 +440,7 @@ def look_at_screen_impl(question: str, target: str = "front_window") -> dict[str
             path = _capture(window, folder)
             vision_engine.prepare_image(path)
             reply = vision_engine.answer(path, question, what=what, r=r)
+            sent = _keep_for_phone(path)
         except vision_engine.VisionError as exc:
             return {"status": "error", "error": str(exc), "captured": what}
         except Exception as exc:
@@ -418,6 +452,8 @@ def look_at_screen_impl(question: str, target: str = "front_window") -> dict[str
     answer, redacted = _redact_answer(reply["answer"])
     result: dict[str, Any] = {"status": "ok", "answer": answer, "captured": what,
                               "engine": reply["engine"]}
+    if sent:
+        result["sent_to_phone"] = True
     if redacted:
         result["note"] = CLOUD_NOTE
     if _screen_recording_granted() is False:

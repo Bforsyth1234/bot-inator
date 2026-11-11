@@ -42,6 +42,34 @@ def osascript_send(handle: str, body: str, timeout: float = 10) -> None:
                    capture_output=True, text=True, timeout=timeout)
 
 
+# #110: the file variant. The path arrives as ``argv`` too; the script
+# holds no data. ``POSIX file`` is made outside the Messages tell block.
+_FILE_SCRIPT_LINES: tuple[str, ...] = (
+    "on run argv",
+    "set theFile to POSIX file (item 2 of argv)",
+    'tell application "Messages"',
+    "set targetService to 1st service whose service type = iMessage",
+    "set targetBuddy to buddy (item 1 of argv) of targetService",
+    "send theFile to targetBuddy",
+    "end tell",
+    "end run",
+)
+
+
+def osascript_file_argv(handle: str, path: str) -> list[str]:
+    """The ``osascript`` command line that sends the file at ``path`` to ``handle``."""
+    argv = ["osascript"]
+    for line in _FILE_SCRIPT_LINES:
+        argv += ["-e", line]
+    return argv + ["--", str(handle), str(path)]
+
+
+def osascript_send_file(handle: str, path: str, timeout: float = 20) -> None:
+    """Send the file at ``path`` to ``handle`` through Messages. Raises on failure."""
+    subprocess.run(osascript_file_argv(handle, path), check=True,
+                   capture_output=True, text=True, timeout=timeout)
+
+
 @tool
 def send_imessage(target_number: str, message: str) -> dict[str, Any]:
     """Send an iMessage to the given phone number or Apple ID.

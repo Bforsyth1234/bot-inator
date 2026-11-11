@@ -75,6 +75,10 @@ KINDS = frozenset({
 })
 PERSONAL_SENT = "sent"
 PERSONAL_REPLACED = "replaced"
+# #110: a screenshot the iPhone remote sent to the own Messages thread
+# (bytes_out is the image's size).
+KIND_IMESSAGE_IMAGE = "imessage_image"
+KINDS = KINDS | {KIND_IMESSAGE_IMAGE}
 
 NOTHING_TODAY = "Nothing left this Mac today"
 LIMIT_NOTE = (

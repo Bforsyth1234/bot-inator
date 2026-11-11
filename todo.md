@@ -2056,7 +2056,7 @@ in the thread with ’ / → intact. Not done by the agent.
 
 ---
 
-#110 — iPhone remote: send the screenshot itself to the phone, and stop raw JSON replies [~]
+#110 — iPhone remote: send the screenshot itself to the phone, and stop raw JSON replies [~] live
 Wave: 20 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-19: "I want to see my laptop screen")
 Ask: From the phone the user asked for a screenshot, approved "a", and got
 back raw JSON (`{"name": "final_answer", "arguments": {"answer": "I
@@ -2104,7 +2104,81 @@ Verify:
 ⚬ Live: from the phone, "show me my screen" → card "Takes a screenshot and
   sends it to your phone" → "yes a" → the screenshot arrives in the
   thread, and the reply is plain text.
+Results (wave 20 slot A, 2026-11-11):
+1. UNWRAP: `ai/orchestrator.unwrap_answer_blob` turns a reply that is a
+   `final_answer` / `answer` call written as JSON (arguments as an object
+   or a JSON string, OpenAI `{"function": …}` shape, a ```json fence,
+   nested) into its `answer` string; anything else is unchanged. Applied
+   in `_text_answer` (both re-asks: "Empty reply…" and "Bare 'Done.'…"),
+   to a plain-text reply before it is wrapped as `final_answer`, to a
+   `final_answer` call whose answer is itself a blob, and to the chat
+   turn's final reply in `_handle_user_message` (Mac chat and phone alike).
+2. ATTACH: phone turns are marked in `events/remote_channel`
+   (`begin_phone_turn` where `_turn_from_phone` is set, `end_phone_turn`
+   in the `_handle_event` finally that resets it; the only orchestrator
+   hook). In a phone turn `take_screenshot` captures into
+   `~/Pictures/bot-inator phone/` (0700; `new_capture_path`), scales to
+   1600 px (`vision_engine.prepare_image`), and queues it with
+   `add_capture`, which takes only a regular, non-symlink file directly in
+   that folder; a model path is never queued. `look_at_screen` copies its
+   (already scaled) capture there too. `RemoteChannel.send_reply` sends the
+   text, then each capture with the new #106-style helper
+   `tools/send_imessage.osascript_file_argv` / `osascript_send_file`
+   (`POSIX file (item 2 of argv)`; the script holds no data), to the
+   configured handle only, inside the hourly limit. A sent file is deleted
+   5 min later (Messages uploads in the background); unsent ones at turn
+   end; strays older than 15 min at the next capture. The attachment's
+   echo row (text U+FFFC) is not read as a command.
+3. CONSENT/PRIVACY: the phone-turn card says "Takes a screenshot and sends
+   it to your phone." (", and saves it to <path>" when a path was given);
+   one ledger row per image, kind `imessage_image` (new in
+   `ai/egress_log.KINDS`, additive line after `PERSONAL_REPLACED`),
+   `bytes_out` = file size. The Desktop copy is made only when the model
+   passed a `path` (the user asked to save one).
+4. SENSITIVE: a phone-turn screenshot first runs `look_at_screen.resolve
+   ("screen")` (#107 decision 4); a refusal is shown on the card and the
+   tool returns `refused: …` without capturing.
+Tests: new `tests/test_phone_screenshot.py` (25): the exact logged string
+→ plain answer; 5 other blob shapes; 6 non-blobs unchanged; the Groq
+re-ask / plain-text / nested final_answer paths; the turn reply reaching
+`send_reply` unwrapped; a phone turn sends text then the file (argv ends
+`-- <handle> <path>`, the script text holds neither; image ≤ 1600 px; one
+`imessage_image` row with the file's size; no Desktop file); a given path
+keeps the Desktop copy; a Mac turn sends nothing and queues nothing;
+sensitive window refused before capture (and on the card); the card text;
+a path outside the folder, a `..` path and a symlink are refused, and a
+direct `_send_file` of an outside file neither sends nor deletes it; no
+queueing outside a phone turn; the U+FFFC echo row; `look_at_screen`
+keeps its capture only in a phone turn; a real `osascript` echo script
+returns a path with ’ " → and spaces byte for byte. Full suite: 1859
+passed (1834 + 25). `osacompile` of the real file-send script succeeds
+(compiled only, never run, nothing sent).
+Non-vacuity: unwrap made identity → 9 fail; no `begin_phone_turn` hook
+→ 2 fail; no capture-folder check → 1; no ledger row → 1; no sensitive
+refusal → 1; old card note → 2; no attachment send → 2; no scaling → 1;
+U+FFFC row read as text → 1. (The outside-path test also caught a real
+bug during the build: `_send_file` deleted a refused file; it now never
+touches a file outside the folder.)
+RUNNER: `PrivacyLedgerView.swift` (slot C's file) should label
+`imessage_image` (e.g. "Screenshot to your phone"); until then the row
+shows the raw kind.
 Deviations:
+1. The capture folder is `~/Pictures/bot-inator phone/`, not a temp
+   folder: Messages is widely reported not to deliver AppleScript
+   attachments from /tmp or other temp locations (not verified here; the
+   live check will tell). Files are short-lived (see Results 2).
+2. "The user asked to save one" is read as "the model passed a `path`":
+   with no path the screenshot only goes to the phone. A spoken "save it"
+   without a path is not detected.
+3. The sensitive-window check runs only for phone-turn screenshots; a Mac
+   turn's `take_screenshot` is unchanged (#102), to avoid a regression in
+   the Mac flow.
+Live check: needs a daemon restart on this code, remote on. From the
+phone: "show me my screen" → card "Takes a screenshot and sends it to your
+phone." → "yes a" → a plain-text reply, then the screenshot in the same
+thread; a row "imessage_image" in the privacy ledger; nothing new on the
+Desktop. Also check that the image actually arrives (the attachment
+location is the open question). Not done by the agent.
 
 ---
 
