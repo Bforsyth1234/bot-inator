@@ -231,7 +231,8 @@ def test_password_manager_as_the_target_window_is_refused(screen, model) -> None
 
 
 def test_whole_screen_refused_while_a_password_manager_is_visible(screen, model) -> None:
-    screen.windows = [OWN, NUMBERS, {**NUMBERS, "id": 44, "pid": 400,
+    # #111: partly out from under Numbers, so some of it is visible.
+    screen.windows = [OWN, NUMBERS, {**NUMBERS, "id": 44, "pid": 400, "x": 1100,
                                      "owner": "1Password", "title": "Vault"}]
     result = las.look_at_screen_impl("what?", "screen")
     assert result["status"] == "error" and "has a window on screen" in result["error"]

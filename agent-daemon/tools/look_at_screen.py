@@ -19,8 +19,10 @@ One built-in, ``look_at_screen(question, target="front_window")``:
 4. Never looks (decision 4, #89's skip list): while secure input is on (a
    password field has focus, or an app holds secure input), while a
    never-watch app (#87: 1Password, Keychain Access, …) is in front or is
-   the target, for "screen" while any never-watch app has a window on
-   screen, at a private browser window, or at a Chrome / Safari tab on the
+   the target, for "screen" while some part of a never-watch app's window
+   is visible (#111: a window fully covered by opaque windows in front of
+   it doesn't count; an unreadable window list refuses), at a private
+   browser window, or at a Chrome / Safari tab on the
    #58 sensitive-site list. bot-inator's own windows are skipped: "front
    window" is the first window of another app, so asking from the chat
    panel looks at the window behind it.
@@ -78,6 +80,11 @@ NOT_USER_TURN = (
 SECURE_INPUT = "a password field or another secure-input app has focus; nothing was captured"
 NEVER_WATCH = "{app} is on the never-watch list; nothing was captured"
 NEVER_WATCH_ON_SCREEN = "{app} (on the never-watch list) has a window on screen; nothing was captured"
+WINDOW_LIST_UNREADABLE = "the list of windows on screen could not be read; nothing was captured"
+# #111: windows at this level and above (the Dock, the menu bar, status
+# items, the Window Server's overlays) are mostly see-through: they never
+# count as covering a never-watch window.
+COVER_LAYER_LIMIT = 20  # kCGDockWindowLevel
 PRIVATE_WINDOW = "the window is a private browsing window; nothing was captured"
 SENSITIVE_SITE = "the browser tab is on the sensitive-site list (banks, password managers, sign-in pages); nothing was captured"
 NO_WINDOW = "no window of another app is on screen"
@@ -154,16 +161,23 @@ def _bundle_id_for_pid(pid: int) -> str:
         return ""
 
 
-def _window_list() -> list[dict[str, Any]]:
-    """On-screen windows, front to back (``CGWindowListCopyWindowInfo``)."""
+def _window_list() -> Optional[list[dict[str, Any]]]:
+    """On-screen windows, front to back (``CGWindowListCopyWindowInfo``
+    returns them in z-order). ``None`` when the list can't be read.
+
+    "On screen" in Quartz means "in the current Space and not minimized",
+    not "visible": a window entirely behind others is listed too (#111).
+    """
     try:
         import Quartz  # type: ignore
 
         opts = (Quartz.kCGWindowListOptionOnScreenOnly
                 | Quartz.kCGWindowListExcludeDesktopElements)
-        info = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []
+        info = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
     except Exception:
-        return []
+        return None
+    if info is None:
+        return None
     out = []
     for w in info:
         bounds = w.get("kCGWindowBounds") or {}
@@ -174,6 +188,8 @@ def _window_list() -> list[dict[str, Any]]:
             "title": str(w.get("kCGWindowName") or ""),
             "layer": int(w.get("kCGWindowLayer") or 0),
             "alpha": float(w.get("kCGWindowAlpha") or 0.0),
+            "x": float(bounds.get("X") or 0),
+            "y": float(bounds.get("Y") or 0),
             "width": float(bounds.get("Width") or 0),
             "height": float(bounds.get("Height") or 0),
         })
@@ -217,20 +233,80 @@ def _is_own(bundle_id: str, pid: int) -> bool:
     return bundle_id.lower().startswith(OWN_BUNDLE_PREFIX) or pid == os.getpid()
 
 
-def _app_windows() -> list[Window]:
+def _is_app_window(w: dict[str, Any]) -> bool:
+    return (w["layer"] == 0 and w["alpha"] > 0
+            and min(w["width"], w["height"]) >= MIN_WINDOW_SIDE)
+
+
+def _app_windows(raw: Optional[list[dict[str, Any]]] = None) -> list[Window]:
     """Normal (layer 0), visible app windows, front to back, bundle ids filled."""
+    return [w for _, w in _indexed_app_windows(_window_list() if raw is None else raw)]
+
+
+def _indexed_app_windows(raw: Optional[list[dict[str, Any]]]) -> list[tuple[int, Window]]:
+    """``(index in raw, window)`` for each app window of ``raw``."""
     bundles: dict[int, str] = {}
     out = []
-    for w in _window_list():
-        if w["layer"] != 0 or w["alpha"] <= 0:
-            continue
-        if min(w["width"], w["height"]) < MIN_WINDOW_SIDE:
+    for i, w in enumerate(raw or []):
+        if not _is_app_window(w):
             continue
         pid = w["pid"]
         if pid not in bundles:
             bundles[pid] = _bundle_id_for_pid(pid)
-        out.append(Window(w["id"], pid, w["owner"], bundles[pid], w["title"]))
+        out.append((i, Window(w["id"], pid, w["owner"], bundles[pid], w["title"])))
     return out
+
+
+# ---- visible area (#111) -------------------------------------------------------
+
+Rect = tuple[float, float, float, float]  # x0, y0, x1, y1
+
+
+def _rect(w: dict[str, Any]) -> Rect:
+    x, y = float(w.get("x") or 0), float(w.get("y") or 0)
+    return x, y, x + float(w.get("width") or 0), y + float(w.get("height") or 0)
+
+
+def _subtract(r: Rect, cut: Rect) -> list[Rect]:
+    """The parts of ``r`` outside ``cut`` (at most four rectangles)."""
+    ax0, ay0, ax1, ay1 = r
+    bx0, by0, bx1, by1 = cut
+    if bx0 >= ax1 or bx1 <= ax0 or by0 >= ay1 or by1 <= ay0:
+        return [r]
+    out = []
+    if by0 > ay0:
+        out.append((ax0, ay0, ax1, by0))           # above the cut
+    if by1 < ay1:
+        out.append((ax0, by1, ax1, ay1))           # below the cut
+    my0, my1 = max(ay0, by0), min(ay1, by1)
+    if bx0 > ax0:
+        out.append((ax0, my0, bx0, my1))           # left of the cut
+    if bx1 < ax1:
+        out.append((bx1, my0, ax1, my1))           # right of the cut
+    return [p for p in out if p[2] > p[0] and p[3] > p[1]]
+
+
+def _covers(w: dict[str, Any], under: dict[str, Any]) -> bool:
+    """Whether ``w`` (in front of ``under``) hides what is behind it: opaque
+    (alpha 1), at ``under``'s layer or above, and a real window, not the
+    Dock, the menu bar or an overlay (layer >= :data:`COVER_LAYER_LIMIT`)."""
+    return (w["alpha"] >= 1.0 and under["layer"] <= w["layer"] < COVER_LAYER_LIMIT
+            and w["width"] > 0 and w["height"] > 0)
+
+
+def visible_parts(raw: list[dict[str, Any]], index: int) -> list[Rect]:
+    """What is left of ``raw[index]`` after every covering window in front
+    of it (``raw[:index]``, the list is front to back) is subtracted. Empty
+    means fully covered; any area left, a sliver too, means visible."""
+    under = raw[index]
+    parts = [_rect(under)]
+    for w in raw[:index]:
+        if not parts:
+            break
+        if _covers(w, under):
+            cut = _rect(w)
+            parts = [p for part in parts for p in _subtract(part, cut)]
+    return parts
 
 
 def _front_window(windows: list[Window]) -> Optional[Window]:
@@ -268,15 +344,20 @@ def resolve(target: str) -> tuple[Optional[Window], str]:
     bundle, name = _frontmost_app()
     if (bundle or name) and _never_watched(bundle, name):
         raise Refused(NEVER_WATCH.format(app=name or bundle))
-    windows = _app_windows()
+    raw = _window_list()
+    if not raw:
+        # Unreadable (or, on a real Mac, impossibly empty: the menu bar is
+        # always listed). When in doubt, don't look (#111 decision 1).
+        raise Refused(WINDOW_LIST_UNREADABLE)
+    indexed = _indexed_app_windows(raw)
     if target == "screen":
-        for w in windows:
-            if _never_watched(w.bundle_id, w.app):
+        for i, w in indexed:
+            if _never_watched(w.bundle_id, w.app) and visible_parts(raw, i):
                 raise Refused(NEVER_WATCH_ON_SCREEN.format(app=w.app or w.bundle_id))
             if any(m in w.title.lower() for m in PRIVATE_TITLE_MARKERS):
                 raise Refused(PRIVATE_WINDOW)
         return None, "the whole screen"
-    front = _front_window(windows)
+    front = _front_window([w for _, w in indexed])
     if front is None:
         raise Refused(NO_WINDOW)
     _check_window(front)
