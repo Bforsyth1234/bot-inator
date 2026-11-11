@@ -1,12 +1,32 @@
 # bot-inator
 
 A local-first macOS agent that watches what you do and offers to help.
+Nothing runs without your approval.
 
-It notices activity on your Mac (app switches, new files in Downloads,
-incoming iMessages), asks an LLM *"how could I help here?"*, and proposes
-actions or brand-new tools it writes itself. **Nothing runs without your
-approval**: every action and every line of generated code goes through a
-menu bar prompt first.
+<!-- #91: a 30–60 s demo (a PDF lands in Downloads → card → Approve → it is
+moved) goes here as docs/demo.gif or .mp4, recorded with no personal text
+on screen. -->
+
+It notices activity on your Mac (new files in Downloads, incoming mail and
+iMessages, upcoming meetings, app switches), asks an LLM *"how could I help
+here?"*, and offers an action, or a small tool it writes itself, as a card
+in the menu bar.
+
+What you can check for yourself, in this repo:
+
+- **Every action is a card.** Tools that change something (move a file,
+  create a reminder or event, draft an email) ask first; only read-only
+  tools skip the card. See `READ_ONLY_TOOL_NAMES` in
+  `agent-daemon/tools/__init__.py`.
+- **Generated tools are reviewed, then sandboxed.** You read the full
+  source before a tool is installed, and each call runs in a short-lived
+  child under macOS `sandbox-exec`
+  ([How generated tools run](#how-generated-tools-run)).
+- **Local by default.** Models run on your Mac with MLX. A cloud provider
+  is opt-in, and email and message text stay on the Mac unless you also
+  allow them to leave. Settings → Privacy ledger lists what left today.
+
+MIT licensed ([LICENSE](LICENSE)).
 
 ## How it fits together
 
