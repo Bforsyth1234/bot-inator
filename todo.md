@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #104
+Next ID: #105
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -102,7 +102,7 @@ API auth → sandbox for installed tools → live checks.
 | 15 | A: #83 · B: #81 · C: #82 · D: #87 · E: #88 · F: #90 | A new `ai/action_journal.py`, `routes/actions.py`, `ActionHistoryView.swift`, `tools/notes.py`, `tools/calendar_access.py`, `CalendarBridge.swift`, `ApprovalPresenter.swift`, `ApprovalAlert.swift`, `schemas/ws_messages.py`, `WSMessage.swift` (sole owner of the schema files this wave) · B new `ai/taint.py` · C new `ai/egress_log.py`, `routes/egress.py`, `PrivacyLedgerView.swift` · D new `ai/delivery.py`, `routes/delivery.py`, `OfferInboxView.swift`, `events/mac_listeners.py`, `events/clipboard_watcher.py`, `tools/read_active_tab.py` · E new `ai/watches.py`, `routes/watches.py`, `WatchesView.swift` · F new `ai/tool_health.py`, `routes/tool_health.py`, `tools/meta_tool_generator.py`, `CodeReviewAlert.swift`, `ToolDetailView.swift` (+ each slot's tests). B/D/F report their schema + card fields; the runner adds them at close. Runner: `ai/orchestrator.py`, `main.py`, `ai/groq_engine.py`, `ai/mlx_engine.py`, `ai/mcp_client.py`, `tools/tool_sandbox.py`, `tools/open_url.py`, `ai/idea_outcomes.py`, `user_settings.py`, Swift app/settings/debug views, LIVING_SPEC | [x] closed 2026-11-10 (all `[~] live`) |
 | 16 | A: #78 · B: #89 · C: #84 · D: #86 · E: #85 (A–C accepted 2026-11-10) | A new `ai/standing_rules.py`, `routes/rules.py`, `RulesView.swift` · B new `Services/ScreenTextBridge.swift`, `tools/read_front_window.py`, `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift` · C new `ai/demonstration.py`, `DemonstrationPanel.swift`, `Services/HotKey.swift` · D new `Services/MeetingRecorder.swift`, `events/meeting_notes.py`, `MeetingNotesSettingsView.swift`, `Info.plist`, `ai/permissions.py` · E new `events/remote_channel.py`, `RemoteSettingsView.swift`, `events/imessage_watcher.py`. Runner: orchestrator approval path, `main.py`, `tools/__init__.py`, `ai/privacy.py`, `requirements.txt`, Settings, LIVING_SPEC §1 | [x] closed 2026-11-11 (all `[~] live`) |
 | 17 | runner: #98 #99 #100 #101 #91 #92 #96 (prep) · subagent: #97 #93 (#94 #95 deleted by the user 2026-11-11) | runner `ai/permissions.py`, `PanelPlacement.swift`, `DemonstrationPanel.swift`, `MeetingRecorder.swift`, `PermissionsView.swift`, `MeetingNotesSettingsView.swift`, `MenuBarUIApp.swift` footer, `LICENSE`, `README.md`, `install.sh`, `run.sh`, `scripts/release/`, `docs/releasing.md` · subagent (worktree) providers, first run, `SettingsView.swift`, `docs/providers.md` | [x] closed 2026-11-11 (all `[~] live`; #96 signing prep only; 1678 tests) |
-| 18 | A: #102 · B: #96 (the rest: daemon in the app, login switch, update notice) | A new `tools/quit_app.py`, new `tools/take_screenshot.py`, `tools/__init__.py`, `tools/meta_tool_generator.py` (prompt only), `ai/tool_health.py`, new tests · B `scripts/release/`, `docs/releasing.md`, new `Services/DaemonLauncher.swift`, `MenuBarUIApp.swift` (AppDelegate launch/stop only), `SettingsView.swift` (+ new settings view), `Info.plist`, `config.py` / `user_settings.py` (writable-path overrides only), new tests. Runner: disables generated `close_app` / `capture_screenshot`, README, todo, LIVING_SPEC | [~] in progress (user 2026-11-11: "organize the open todos and build them with subagents") |
+| 18 | A: #102 #103 · B: #96 (the rest: daemon in the app, login switch, update notice) · C: #104 | A new `tools/quit_app.py`, new `tools/take_screenshot.py`, `tools/__init__.py`, `tools/meta_tool_generator.py` (prompt only), `ai/tool_health.py`, new tests · B `scripts/release/`, `docs/releasing.md`, new `Services/DaemonLauncher.swift`, `MenuBarUIApp.swift` (AppDelegate launch/stop only), `SettingsView.swift` (+ new settings view), `Info.plist`, `config.py` / `user_settings.py` (writable-path overrides only), new tests. C new `ai/tool_trust.py`, `Orchestrator._load_tool` (+ the trusted flag on approval payloads), tool routes in `routes/tool_detail.py`, `ToolDetailView.swift`, `ToolManagerView.swift`, `CodeReviewAlert.swift`, `ApprovalAlert.swift` (one label), `schemas/ws_messages.py` + `WSMessage.swift` (one optional field), new tests. Runner: disables generated `close_app` / `capture_screenshot` / `list_recent_emails` once their built-ins land, the tool_health sentence (A) pointing at trust (C), README, todo, LIVING_SPEC | [~] in progress (user 2026-11-11: "organize the open todos and build them with subagents") |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -901,6 +901,53 @@ Verify:
   a clear error. Non-vacuity per rule 5.
 ⚬ Live: "what are my last 5 emails?" in Chat → no new tool drafted, no
   card (read-only), five senders/subjects listed.
+Deviations:
+
+---
+
+#104 — Per-tool trust: run a reviewed generated tool outside the sandbox [~]
+Wave: 18 (slot C) · Agent: subagent · Added: 2026-11-11 · Source: user ("i really think the sandbox is holding the app back"; chose A, "build A and add it to wave 18")
+Ask: Some useful generated tools can never work sandboxed: macOS refuses
+`quit` (#102) and Mail message data (#103) to ANY `sandbox-exec` process,
+whatever the profile. Let the user choose, per tool, to run a tool they
+reviewed outside the sandbox, instead of only waiting for built-ins.
+Options offered 2026-11-11: A per-tool trust (chosen), B
+`AGENT_TOOL_SANDBOX=0` for everything (exists, not recommended), C keep
+it strict and only add built-ins.
+DECISIONS (assistant, 2026-11-11, from option A as offered; the user can
+overturn any):
+1. SANDBOX STAYS THE DEFAULT. A tool runs outside it only when the user
+   marked it trusted. Invariant 7b holds: reviewed code, plus an explicit
+   per-tool choice.
+2. ONLY THE USER SETS IT, from the app: Tool Manager → tool detail
+   ("Run outside the sandbox" toggle with a confirm sheet that says what
+   the sandbox was blocking: home-folder writes in ~/Library/~/.ssh/
+   ~/.bot-inator, the API token and memory, Terminal/Finder Apple Events,
+   other executables, network unless imported), and an off-by-default
+   checkbox on the code review card. No tool, chat command, rule (#78) or
+   watch (#88) can set it; the HTTP route needs the app's token like every
+   other route (#27).
+3. TIED TO THE CODE: stored as tool name + SHA-256 of its source in
+   `~/.bot-inator/tool_trust.json` (0600). Any change to the file (edit,
+   repair #90, reinstall) clears trust; the tool loads sandboxed again.
+4. EVERY CALL STILL ASKS (7a unchanged). The approval card for a trusted
+   tool says "Runs outside the sandbox". Tool Manager shows a badge.
+5. Loading: `Orchestrator._load_tool` imports a trusted tool in-process
+   (the existing `AGENT_TOOL_SANDBOX=0` path) and sandboxes the rest. When
+   a tool fails with a sandbox reason (`ai/tool_health`: "not repairable
+   (sandbox)"), the user is told they can trust it in Tool Manager.
+6. Network from a trusted tool is not seen by the privacy ledger (#82);
+   the confirm sheet says so when the tool imports a network module.
+Files: see the wave 18 row (slot C).
+Verify:
+⚬ Tests: untrusted → sandboxed proxy; trusted (matching hash) →
+  in-process; source changed → sandboxed again and trust dropped; the
+  route refuses without the token; no tool / rule / watch path can write
+  the trust file; the approval payload carries the "outside the sandbox"
+  flag. Non-vacuity per rule 5.
+⚬ Live: Tool Manager → `close_app` → Run outside the sandbox → confirm →
+  "quit Spotify" → card says "Runs outside the sandbox" → Approve →
+  Spotify quits. Edit the file → it's sandboxed again.
 Deviations:
 
 ### Privacy
