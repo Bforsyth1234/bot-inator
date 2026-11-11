@@ -352,6 +352,8 @@ struct SettingsView: View {
             Section("Appearance") {
                 TextSizePicker()
             }
+            // #96: bundled daemon, start at login, new-version check.
+            AppLifecycleSettingsView()
 
             Section("Inference provider") {
                 Picker("Provider", selection: $viewModel.provider) {

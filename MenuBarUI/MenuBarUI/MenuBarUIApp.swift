@@ -149,6 +149,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // #96: the release app starts its bundled daemon unless one already
+        // answers on 8000 (./run.sh); a dev build has none and skips this.
+        DaemonLauncher.shared.start()
+        // #96: the new-version check, only when turned on in Settings.
+        UpdateChecker.shared.startIfEnabled()
         ws.connect()
         approvalPresenter.attach(to: ws)
         // The daemon sends a status frame whenever Pause, held offers or the
@@ -176,6 +181,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         _ = MeetingRecorder.shared
         // #93: the engine choice on a fresh install (no settings.json yet).
         FirstRunWindowController.shared.showIfPending()
+    }
+
+    /// #96: stop the daemon this app started (nothing if it didn't start one).
+    func applicationWillTerminate(_ notification: Notification) {
+        DaemonLauncher.shared.stop()
     }
 
     // MARK: Cmd-Tab / Dock while a window is open
