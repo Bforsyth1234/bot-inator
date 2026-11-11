@@ -102,6 +102,7 @@ API auth → sandbox for installed tools → live checks.
 | 15 | A: #83 · B: #81 · C: #82 · D: #87 · E: #88 · F: #90 | A new `ai/action_journal.py`, `routes/actions.py`, `ActionHistoryView.swift`, `tools/notes.py`, `tools/calendar_access.py`, `CalendarBridge.swift`, `ApprovalPresenter.swift`, `ApprovalAlert.swift`, `schemas/ws_messages.py`, `WSMessage.swift` (sole owner of the schema files this wave) · B new `ai/taint.py` · C new `ai/egress_log.py`, `routes/egress.py`, `PrivacyLedgerView.swift` · D new `ai/delivery.py`, `routes/delivery.py`, `OfferInboxView.swift`, `events/mac_listeners.py`, `events/clipboard_watcher.py`, `tools/read_active_tab.py` · E new `ai/watches.py`, `routes/watches.py`, `WatchesView.swift` · F new `ai/tool_health.py`, `routes/tool_health.py`, `tools/meta_tool_generator.py`, `CodeReviewAlert.swift`, `ToolDetailView.swift` (+ each slot's tests). B/D/F report their schema + card fields; the runner adds them at close. Runner: `ai/orchestrator.py`, `main.py`, `ai/groq_engine.py`, `ai/mlx_engine.py`, `ai/mcp_client.py`, `tools/tool_sandbox.py`, `tools/open_url.py`, `ai/idea_outcomes.py`, `user_settings.py`, Swift app/settings/debug views, LIVING_SPEC | [x] closed 2026-11-10 (all `[~] live`) |
 | 16 | A: #78 · B: #89 · C: #84 · D: #86 · E: #85 (A–C accepted 2026-11-10) | A new `ai/standing_rules.py`, `routes/rules.py`, `RulesView.swift` · B new `Services/ScreenTextBridge.swift`, `tools/read_front_window.py`, `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift` · C new `ai/demonstration.py`, `DemonstrationPanel.swift`, `Services/HotKey.swift` · D new `Services/MeetingRecorder.swift`, `events/meeting_notes.py`, `MeetingNotesSettingsView.swift`, `Info.plist`, `ai/permissions.py` · E new `events/remote_channel.py`, `RemoteSettingsView.swift`, `events/imessage_watcher.py`. Runner: orchestrator approval path, `main.py`, `tools/__init__.py`, `ai/privacy.py`, `requirements.txt`, Settings, LIVING_SPEC §1 | [x] closed 2026-11-11 (all `[~] live`) |
 | 17 | runner: #98 #99 #100 #101 #91 #92 #96 (prep) · subagent: #97 #93 (#94 #95 deleted by the user 2026-11-11) | runner `ai/permissions.py`, `PanelPlacement.swift`, `DemonstrationPanel.swift`, `MeetingRecorder.swift`, `PermissionsView.swift`, `MeetingNotesSettingsView.swift`, `MenuBarUIApp.swift` footer, `LICENSE`, `README.md`, `install.sh`, `run.sh`, `scripts/release/`, `docs/releasing.md` · subagent (worktree) providers, first run, `SettingsView.swift`, `docs/providers.md` | [x] closed 2026-11-11 (all `[~] live`; #96 signing prep only; 1678 tests) |
+| 18 | A: #102 · B: #96 (the rest: daemon in the app, login switch, update notice) | A new `tools/quit_app.py`, new `tools/take_screenshot.py`, `tools/__init__.py`, `tools/meta_tool_generator.py` (prompt only), `ai/tool_health.py`, new tests · B `scripts/release/`, `docs/releasing.md`, new `Services/DaemonLauncher.swift`, `MenuBarUIApp.swift` (AppDelegate launch/stop only), `SettingsView.swift` (+ new settings view), `Info.plist`, `config.py` / `user_settings.py` (writable-path overrides only), new tests. Runner: disables generated `close_app` / `capture_screenshot`, README, todo, LIVING_SPEC | [~] in progress (user 2026-11-11: "organize the open todos and build them with subagents") |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -797,8 +798,8 @@ Deviations:
 
 ---
 
-#102 — Built-in quit_app and take_screenshot (generated versions can't work in the sandbox) [ ]
-Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-17 build: "it denied that too")
+#102 — Built-in quit_app and take_screenshot (generated versions can't work in the sandbox) [~]
+Wave: 18 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-17 build: "it denied that too")
 Ask: The user asked the app to close Spotify, and later to take a
 screenshot. Each time the agent wrote a tool (`close_app`,
 `capture_screenshot` in `tools/generated/`) that the user approved, and
@@ -1926,7 +1927,7 @@ Results (wave 17, 2026-11-11, commits d328716, 386610e):
 ⚬ Live (user): in a new clone, ./install.sh then ./run.sh → the app opens.
 Deviations:
 
-#96 — A signed, notarized app download for people who do not use a terminal [~] signing prep done
+#96 — A signed, notarized app download for people who do not use a terminal [~] signing prep done; rest in wave 18 (slot B)
 Wave: 17 (prep only; user, 2026-11-11: "Prep, I'll sign"; A answered) · Agent: _ · Added: 2026-11-10 · Source: assistant (get-users review, user: "add all of this to the todo.md")
 Ask: Everything before this reaches developers only. A non-developer
 needs one download that opens without a Gatekeeper warning and starts its
