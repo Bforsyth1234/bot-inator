@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #109
+Next ID: #110
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -1328,6 +1328,103 @@ Verify:
   the main engine to Groq, send one chat → rows with sizes.
 Deviations:
 
+#109 — Privacy ledger: show where a trusted tool connected [ ]
+Wave: _ (not scheduled) · Agent: _ · Added: 2026-11-11 · Source: user ("can we add a todo to add the network use to the privacy ledger? or would that not work?")
+Ask: A generated tool the user trusted (#104) runs in the daemon process
+and leaves no row in the privacy ledger (#82). #104 decision 6 accepted
+that, and the confirm sheet says so (`ai.tool_trust.NETWORK_NOTE`). The
+user wants that network use in the ledger.
+Today (2026-11-11, read from the source): a network-enabled SANDBOXED
+tool gets one row per call from `SandboxedTool.forward`
+(`tools/tool_sandbox.py`): tool name, size of the arguments, no host,
+note "ran with network access; what it sent is not visible to
+bot-inator" (#82 decision 1). A trusted tool is imported by
+`Orchestrator._import_tool_module` and never passes through that proxy,
+so it gets no row at all, whether or not it imports a network module.
+Findings (assistant, 2026-11-11, run on this Mac with the daemon's venv,
+Python 3.14.8, loopback only; a scratch script, not kept in the repo):
+1. A Python audit hook (`sys.addaudithook`) in the same process sees
+   `socket.getaddrinfo` (the host name) and `socket.connect` (IP, port)
+   for a raw socket, `urllib`, `requests` and `httpx`, and
+   `urllib.Request` (URL and body) for `urllib`.
+2. A contextvar set around the call names the tool for every event
+   raised in the calling thread. In a thread the tool starts, the events
+   are still seen but the contextvar is empty
+   (`sys.flags.thread_inherit_context` is 0 on this build).
+3. A program the tool launches shows up only as `subprocess.Popen` with
+   its arguments (`/usr/bin/curl ... <url>`). Its own connections are
+   not seen.
+4. Not tested: `http.client.send` (byte counts; the loopback connect was
+   refused before anything was sent), asyncio, a real remote host, the
+   hook's cost on the daemon (it runs on every audit event).
+5. `EgressLog.stats` says "Nothing left this Mac today" only when the
+   day has zero rows, and counts every row as a request that left.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. BEST EFFORT, AND THE LEDGER SAYS SO. Rows show what Python code in the
+   daemon process connected to while the tool ran. They cannot show what
+   a launched program sent (finding 3), and code written to hide (ctypes,
+   a helper process) can avoid the hook. It is a record for tools the
+   user reviewed, not a boundary: `LIMIT_NOTE` and the trust confirm
+   sheet each get one line that says this.
+2. ONE ROW PER HOST for every non-loopback connection seen during a
+   trusted call, network module imported or not: outside the sandbox
+   "no network unless imported" does not hold. A loopback connection
+   never left the Mac: no row. A call with no connection and no launched
+   program: no row.
+3. HOSTS, NOT CONTENT. Host name (the IP when no name was resolved) and
+   bytes out where `http.client` reports them. URLs and bodies the hook
+   saw are never stored; the kept text is the call's arguments, under the
+   existing keep-text switch (#82 decision 2).
+4. Recording never fails or delays the tool (#82 decision 4): the hook
+   returns at once for events it does not track and when no trusted tool
+   is running, and catches everything (an exception in an audit hook
+   would otherwise surface inside the tool's own call).
+5. No new consent and no new bypass: cards, trust (#104) and the sandbox
+   are unchanged (7a, 7b).
+OPEN (the user decides when this is scheduled): a trusted call that
+launched a program and made no visible connection (finding 3). Either
+(a) one row with no host and the note "ran <executable>; what it sent,
+if anything, is not visible" (executable only, never its arguments), or
+(b) no row, and `LIMIT_NOTE` says launched programs are not covered.
+With (a) as the ledger counts today (finding 5), a tool such as
+`close_app` that runs `osascript` on every call would end "Nothing left
+this Mac today". Assistant's suggestion: (a), with those rows kept out
+of the day's "left this Mac" total.
+Files:
+⚬ OWNED: `ai/egress_log.py` (new kind + hook), new test file.
+⚬ EDITED (additive, earlier wave): `Orchestrator._wrap_tool_for_approval`
+  in `ai/orchestrator.py` (the `original_forward(...)` call),
+  `ai/tool_trust.py` (`NETWORK_NOTE`), `PrivacyLedgerView.swift` (label
+  for the new kind), README "How generated tools run", LIVING_SPEC.
+Approach (to decide when scheduled):
+1. `ai/egress_log.py`: kind `trusted_tool` (also in `KINDS`); a context
+   manager `trusted_tool_run(tool, arguments)` that sets the contextvar,
+   collects the events and writes the rows on exit. The hook is
+   installed once, on first use (an audit hook cannot be removed).
+2. `Orchestrator._wrap_tool_for_approval`: when the tool's name is in
+   `_unsandboxed_tools`, run `original_forward(...)` inside it.
+3. Threads (finding 2). Fallback if they cannot be attributed safely:
+   record calling-thread events only and say so in the note. Do not
+   attribute un-owned events by timing: the daemon's own engine calls
+   and model downloads run in other threads at the same time and
+   already have their own rows.
+4. Not in scope unless the user asks: the same hook inside the sandboxed
+   child (`_CHILD` in `tools/tool_sandbox.py`), so a network-enabled
+   sandboxed tool shows hosts instead of an empty one. That report would
+   come from a process the tool controls.
+Verify:
+⚬ Tests: a trusted fake tool that connects to a non-loopback address
+  (the connect may fail; the event is raised first) → one `trusted_tool`
+  row with the tool's name and host; a loopback connection → no row; no
+  connection and no program → no row; a sandboxed tool and a daemon
+  engine call → no `trusted_tool` row; the hook or the ledger raising
+  does not fail the tool call; the OPEN case as decided. Non-vacuity per
+  rule 5 (take the wrapper out, the first test fails).
+⚬ pytest gate (rule 8); swiftc typecheck for the Swift change.
+⚬ Live: trust a generated tool that fetches a URL, run it, open Settings
+  → Privacy ledger → a row with that tool's name and that host.
+Deviations:
+
 ### Test hygiene
 
 ### Events and listeners
@@ -1884,6 +1981,58 @@ than `tests/test_remote_channel.py` (they cover both callers);
 Live check: needs a daemon restart on this code. Mac idle 1 min → text the
 app "what's on my calendar tomorrow?" from the phone → the answer arrives
 in the thread with ’ / → intact. Not done by the agent.
+
+---
+
+#109 — iPhone remote: send the screenshot itself to the phone, and stop raw JSON replies [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-19: "I want to see my laptop screen")
+Ask: From the phone the user asked for a screenshot, approved "a", and got
+back raw JSON (`{"name": "final_answer", "arguments": {"answer": "I
+captured a screenshot and saved it to your Desktop at/…png"}}`) instead
+of the screen. They want to SEE the laptop screen on the phone.
+Findings (assistant, 2026-11-11, from the daemon log and the code):
+1. RAW JSON (bug, not phone-specific): the model's turn ended empty after
+   the tool result; the re-ask in `ai/orchestrator.py` (~line 2654,
+   "Empty reply after a tool result; re-ask gave …") returned text that
+   was itself a `final_answer` call written as JSON, and it was wrapped
+   again as `final_answer(answer=<that JSON>)`. The same reply would show
+   in the Mac's Chat.
+2. NO IMAGE (tool limit, not a macOS one): `take_screenshot` (#102) only
+   saves a PNG on the Desktop, and the remote channel (#85) only sends
+   text. Messages' AppleScript can send a file to a buddy (`send (POSIX
+   file p) to …`), so attaching the screenshot is possible.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. UNWRAP: when a reply (re-ask or normal) is a JSON object naming
+   `final_answer` / `answer` with `arguments.answer`, use that string;
+   never send or show a tool-call blob as the answer. Test with the exact
+   string from the log.
+2. ATTACH IN PHONE TURNS: when a phone turn's `take_screenshot` (or
+   `look_at_screen`, which can keep its capture for this) produced an
+   image, the remote channel sends it to the OWN handle as an attachment
+   after the text reply, via the #106 argv helper (`on run argv`; the
+   path as an argument). Only the own thread (#85 decision 1), only files
+   the daemon itself just captured (path under the capture dir, never a
+   model-supplied path).
+3. CONSENT AND PRIVACY: the approval card in a phone turn says "Takes a
+   screenshot and sends it to your phone". The image leaves the Mac
+   through iMessage (Apple, end-to-end encrypted, to the user's own
+   account): one privacy-ledger row (#82) per image with its size. The
+   screenshot is captured scaled (≈1600 px, like #107) to keep it small;
+   the Desktop copy is kept only when the user asked to save one.
+4. Sensitive windows refused as in #107 decision 4.
+Files: ai/orchestrator.py (reply unwrap), events/remote_channel.py (send
+file), tools/send_imessage.py (#106 helper: a file variant),
+tools/take_screenshot.py / tools/look_at_screen.py (expose the capture to
+the phone turn), ai/egress_log.py, tests.
+Verify:
+⚬ Tests: the logged JSON string becomes the plain answer; a phone turn
+  with a screenshot sends text then the file (argv carries the path; the
+  script holds no data); a non-phone turn sends nothing; a path outside
+  the capture dir is refused; one ledger row. Non-vacuity per rule 5.
+⚬ Live: from the phone, "show me my screen" → card "Takes a screenshot and
+  sends it to your phone" → "yes a" → the screenshot arrives in the
+  thread, and the reply is plain text.
+Deviations:
 
 ---
 
