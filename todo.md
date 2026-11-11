@@ -1185,8 +1185,8 @@ Deviations:
 
 ---
 
-#98 — BUG: Automation → Messages "Request" does nothing [ ]
-Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-13 build)
+#98 — BUG: Automation → Messages "Request" does nothing [~] live
+Wave: 17 · Agent: runner · Added: 2026-11-11 · Source: user (live run, wave-13 build)
 Ask: "Nothing happens when I request Messages." In Settings → Permissions,
 the Automation → Messages row stays grey after clicking Request and keeps
 saying "open Messages first, then click Request", with Messages open.
@@ -1219,10 +1219,20 @@ Verify:
   Settings → Automation lists Messages under Claude.
 ⚬ Test: the Messages row's bundle id is `com.apple.MobileSMS`;
   non-vacuity: put back `com.apple.iChat` → test fails.
+Results (wave 17, 2026-11-11, commit e4a8649):
+⚬ `automation_messages` targets `com.apple.MobileSMS`. `request_automation`
+  on -600 now runs `open -g -j -b <bundle id>` (`_launch_hidden`), waits
+  1.5 s and asks once more; still -600 → "couldn't start <app>; open it,
+  then click Request".
+⚬ Tests: `tests/test_permissions.py` +3 (50 pass). Non-vacuity: back to
+  `com.apple.iChat` → 1 fails; drop launch-and-retry → 1 fails.
+⚬ Live (user): Settings → Permissions → Automation → Messages → Request
+  (Messages closed is fine now) → macOS "control Messages" prompt → Allow
+  → green. Same for System Events after quitting it.
 Deviations:
 
-#99 — bot-inator never appears in System Settings → Microphone [ ]
-Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-13 build)
+#99 — bot-inator never appears in System Settings → Microphone [~] live
+Wave: 17 · Agent: runner · Added: 2026-11-11 · Source: user (live run, wave-13 build)
 Ask: "Nothing shows up to select" for voice: bot-inator (MenuBarUI) is not
 listed in Privacy & Security → Microphone, so there is nothing to turn on,
 and meeting notes (#86) can't record.
@@ -1250,6 +1260,19 @@ Verify:
   macOS prompt → Allow → bot-inator listed and on in Microphone; same for
   Speech Recognition; then "Take notes" records without a prompt.
 ⚬ swiftc build; pytest gate if permissions.py changes.
+Results (wave 17, 2026-11-11, commit 794fd58):
+⚬ Confirmed cause: the daemon's Microphone / Speech rows have
+  `request_kind="settings"` and no app hook registered, so Request only
+  opened the pane; the app had never called `requestAccess`.
+⚬ New `MeetingPermissions.request(kind)` in `MeetingRecorder.swift`: not
+  asked → macOS prompt; denied/restricted → opens the pane; posts
+  `.meetingPermissionsChanged`, and the recorder re-reports to the daemon.
+  Used by the Permissions rows (button "Request"; handled in the app) and
+  new "Allow…" rows in Settings → Meeting notes.
+⚬ swiftc build clean. No unit test (no Swift test target in the repo).
+⚬ Live (user): rebuild → Settings → Meeting notes → Microphone "Allow…" →
+  prompt → Allow → MenuBarUI listed and on in System Settings →
+  Microphone; same for Speech Recognition.
 Deviations:
 
 ---
@@ -1328,8 +1351,8 @@ Deviations:
 
 ---
 
-#100 — BUG: popped-out window is missing the bottom button bar [ ]
-Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-13 build)
+#100 — BUG: popped-out window is missing the bottom button bar [~] live
+Wave: 17 · Agent: runner · Added: 2026-11-11 · Source: user (live run, wave-13 build)
 Ask: "When you pop out the window the buttons at the bottom are missing."
 The window opened with "Open in window" (⇧⌘B) shows the Thoughts / Inbox /
 Debug tabs with only Pause and Quit at the bottom (ThoughtStreamView's own
@@ -1359,12 +1382,19 @@ Verify:
   every tab; each opens its window; resizing the window never hides them.
   The menu bar popover looks unchanged.
 ⚬ swiftc build.
+Results (wave 17, 2026-11-11, commit 0db1a37):
+⚬ New `PanelFooter(watchMe:showOpenInWindow:)` in `MenuBarUIApp.swift`
+  holds the ledger line, Watch me + meeting notes, Pause, Chat, Settings,
+  Manage Tools; `RootPopoverView` and `ActivityWindowView` both use it (the
+  window hides "Open in window"; its `watchMe` is wired from the scene).
+  ThoughtStreamView's own Pause/Quit footer is unchanged (Quit lives there).
+⚬ swiftc build clean.
 Deviations:
 
 ---
 
-#101 — BUG: Watch me and meeting-notes panels open off the right edge of the screen [ ]
-Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-13 build)
+#101 — BUG: Watch me and meeting-notes panels open off the right edge of the screen [~] live
+Wave: 17 · Agent: runner · Added: 2026-11-11 · Source: user (live run, wave-13 build)
 Ask: "Nothing happens when I record besides the icon changing." (⌃⌥⌘R /
 Watch me…, #84.) Also, same day: "Nothing happens when I click record
 meetings" (Take notes now, #86): the meeting panel was still at x=1712
@@ -1405,6 +1435,14 @@ Verify:
   stays on screen. Take notes now → the meeting panel is fully visible.
   Repeat with a second display to the right, and with the mouse on it.
 ⚬ swiftc build; `CGWindowList` bounds inside the screen frame.
+Results (wave 17, 2026-11-11, commit 000f06c):
+⚬ New `Services/PanelPlacement.swift`: sizes the panel from its content
+  (`layoutSubtreeIfNeeded` + `fittingSize`), places it top-right, clamps
+  it inside `visibleFrame`, and re-clamps on every `didResize`. Used by
+  `DemonstrationPanelController` and `MeetingRecorderPanelController`;
+  their old `position(_:)` functions are gone.
+⚬ swiftc build clean. ApprovalPresenter left as is (it already lays out
+  first).
 Deviations:
 
 ### Memory
@@ -1787,7 +1825,7 @@ Generated tools get a minimal env too (`tools/tool_sandbox.py`).
 
 ### Getting users (launch)
 
-#91 — Make the GitHub repo say what this is: description, LICENSE, demo at the top of the README [ ]
+#91 — Make the GitHub repo say what this is: description, LICENSE, demo at the top of the README [~] live
 Wave: — (not scheduled; one user decision, A) · Agent: _ · Added: 2026-11-10 · Source: assistant (get-users review, user: "add all of this to the todo.md")
 Ask: A visitor to the repo cannot tell what bot-inator does, has no
 permission to use it, and sees no proof that it works.
@@ -1814,9 +1852,20 @@ Verify:
 ⚬ `gh repo view --json description,licenseInfo,repositoryTopics` shows all
   three set.
 ⚬ The README shows the demo on github.com in a logged-out browser.
+Results (wave 17, 2026-11-11, commit 838d2dd):
+⚬ `LICENSE` (MIT, "Copyright (c) 2026 Brooks Forsyth"). Shows on GitHub
+  once it reaches the default branch.
+⚬ `gh repo edit` run: description = decision 1's sentence (replacing an
+  earlier "Local-first macOS AI agent that proposes help…"), topics
+  ai-agent, local-llm, macos, mlx. Checked with `gh repo view`.
+⚬ README opens with the pitch and three checkable claims (cards +
+  `READ_ONLY_TOOL_NAMES`, review + `sandbox-exec`, local by default + the
+  privacy ledger), each pointing at real code.
+⚬ OPEN (user): the demo recording (decision 2). A comment at the top of
+  the README marks where it goes.
 Deviations:
 
-#92 — One-command install and start [ ]
+#92 — One-command install and start [~] live
 Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: assistant (get-users review, user: "add all of this to the todo.md")
 Ask: Install is 11 commands today (README "Quick start": 5 for the
 daemon, 6 to build and open the app). There is no script or Makefile, and
@@ -1851,9 +1900,22 @@ Verify:
   then stop it), never on 8000 (rule 10). With 8000 busy, `run.sh` exits
   non-zero with the message.
 ⚬ `shellcheck install.sh run.sh` is clean.
+Results (wave 17, 2026-11-11, commits d328716, 386610e):
+⚬ `install.sh`, `run.sh` as decided; README Quick start is clone +
+  `./install.sh` + `./run.sh`, the old steps under "Manual build".
+⚬ Fresh clone (scratch dir): `./install.sh` exit 0 in 2 min 24 s, app
+  passes `codesign --verify`; second run exit 0, `.env` unchanged (same
+  md5), `git status` clean.
+⚬ `run.sh` on port 8765 with `AGENT_DISABLE_LISTENERS=1 AGENT_EAGER_LOAD=0
+  BOT_INATOR_OPEN_APP=0`: `/health` answered, "Daemon is up"; TERM to
+  run.sh → the daemon stopped (port free). With 8000 busy: exit 1, "port
+  8000 is already in use by Python (pid …)".
+⚬ `shellcheck install.sh run.sh` clean (shellcheck 0.11 via brew).
+⚬ Full pytest suite on wave-17: 1614 passed.
+⚬ Live (user): in a new clone, ./install.sh then ./run.sh → the app opens.
 Deviations:
 
-#96 — A signed, notarized app download for people who do not use a terminal [ ]
+#96 — A signed, notarized app download for people who do not use a terminal [~] signing prep done
 Wave: 17 (prep only; user, 2026-11-11: "Prep, I'll sign"; A answered) · Agent: _ · Added: 2026-11-10 · Source: assistant (get-users review, user: "add all of this to the todo.md")
 Ask: Everything before this reaches developers only. A non-developer
 needs one download that opens without a Gatekeeper warning and starts its
@@ -1884,6 +1946,19 @@ Verify:
 ⚬ On a Mac that has never had the repo: download, open, no Gatekeeper
   warning (`spctl --assess` passes), the first-run screen (#93), one
   approved action.
+Results (wave 17 prep, 2026-11-11, commit 931e8bc):
+⚬ `scripts/release/build-release.sh`: builds `dist/bot-inator.app`
+  (VERSION + build number stamped), signs with `--options runtime` and
+  `scripts/release/MenuBarUI.entitlements` (audio-input, calendars; the app
+  sends no Apple Events and uses no Reminders), zips, `notarytool submit
+  --wait`, staples, re-zips, `spctl --assess`, prints SHA-256. Refuses a
+  dirty tree. Without DEVELOPER_ID: unsigned dry run (checked: arm64
+  binary, version 0.2.0-dryrun, CFBundleName bot-inator). shellcheck clean.
+⚬ `docs/releasing.md`: enrol, Developer ID certificate, `notarytool
+  store-credentials`, each-release command, `gh release create`, failures.
+⚬ STILL OPEN: decisions 2–4 (Python + daemon inside the .app, the app
+  starting/stopping it, start at login, update notice). Until then a
+  release still needs ./install.sh and ./run.sh for the daemon.
 Deviations:
 
 ---
