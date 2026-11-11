@@ -1358,7 +1358,7 @@ Deviations:
 
 ---
 
-#105 — BUG: meeting notes fail when Dictation is off, and the recording is deleted [~]
+#105 — BUG: meeting notes fail when Dictation is off, and the recording is deleted [~] live
 Wave: 19 (slot B) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-18 build: "why does this happen")
 Ask: After a meeting recording the app showed "Notes for Meeting failed:
 Siri and Dictation are disabled The recording was deleted."
@@ -1408,7 +1408,95 @@ Verify:
   mlx-whisper installed) → "Retry" and "Delete recording" shown, audio
   still present → install it / switch back → Retry → notes ready, audio
   gone.
+Results (wave 19 slot B, 2026-11-11):
+1. CHECK BEFORE RECORDING. New `MeetingDictationCheck.check()` in
+   `Services/MeetingRecorder.swift` (never prompts) returns `SpeechReadiness`
+   (.ready / .dictationOff / .unavailable / .unknown). With Speech
+   Recognition allowed it runs an on-device recognition of 0.5 s of silence
+   (8 s timeout): kLSRErrorDomain 201 or macOS's "Siri and Dictation are
+   disabled" text → .dictationOff; "no speech" or a result → .ready. It also
+   reads the stored switches (`com.apple.assistant.support` "Dictation
+   Enabled" / "Assistant Enabled", CFPreferences; the app isn't sandboxed),
+   used when the probe can't run (not authorized yet) or gives an odd
+   error. `begin()` runs it after the mic + speech permission steps for the
+   apple engine; .dictationOff/.unavailable → nothing is recorded, panel
+   "Notes for X didn't start" with the message "Turn on Dictation (System
+   Settings → Keyboard → Dictation) or switch to Whisper", buttons Open
+   Dictation Settings (`x-apple.systempreferences:com.apple.preference.keyboard?Dictation`),
+   Cancel, Use Whisper (only when the daemon reports mlx-whisper), Try
+   again; the daemon gets `state: failed` with the message. .unknown never
+   blocks (a failure now keeps the audio). Settings → Meeting notes: new
+   `MeetingDictationRow` under the #99 rows (dot + "on / off / …", Open
+   Settings when off, orange explanation when the engine in use is apple),
+   re-checked when the app becomes active.
+2. KEEP AUDIO ON FAILURE. On a transcription error the files stay in
+   `~/.bot-inator/meetings/audio/` (0600) with a `<id>.failed.json` marker
+   (0600); panel "Notes for X failed" shows the error, "The recording is
+   kept on this Mac (only you can read it) so you can retry. If you don't,
+   it is deleted automatically <date> (24 hours)", and Retry / Delete
+   recording / Later, plus Open Dictation Settings (when that was the
+   error) and Use Whisper (when installed). Retry re-runs on-device
+   transcription (24 h counted from the first failure); Later keeps it in
+   the menu ("Meeting notes failed: X (Retry or delete)…"). Expiry: a
+   10-minute wall-clock check while the app runs, and
+   `purgeLeftoverAudio` at launch now deletes everything EXCEPT audio with
+   a valid marker < 24 h old whose files are inside the audio folder;
+   such a kept failure re-opens its panel at launch. Info.plist
+   NSMicrophoneUsageDescription, the offer panel and Settings text now say
+   a failed one is kept up to 24 hours.
+3. No automatic Whisper fallback; Use Whisper is a button (blocked start:
+   records with engine whisper; failed one: sends the kept audio to the
+   daemon, which deletes it after transcribing, success or not).
+Daemon: unchanged. `MeetingNotes.process` keeps no per-meeting "done"
+state, so a later `meeting_audio_ready` with `transcript_path` for the same
+meeting id still publishes the one card. The app no longer sends an
+`error` audioReady on an on-device failure (the panel is the UI; the
+daemon's `_recording`/stop timer are already cleared by `state: stopped`),
+so the daemon's "Meeting notes: <error>" notification no longer duplicates
+the panel.
+Verify (done here):
+⚬ `xcrun swiftc -O -parse-as-library -target arm64-apple-macos14` full
+  build to a scratch path: 0 errors.
+⚬ Scratch Swift harness compiled from the file's own MeetingFiles /
+  FailedRecording / MeetingDictationCheck code (audio dir redirected to a
+  scratch HOME): 15/15 pass: marker 0600; purge keeps only the < 24 h
+  failure with its marker, deletes crash leftovers, a 25 h failure, audio
+  without a marker and a marker pointing outside the folder (the outside
+  file is untouched); Delete recording empties the folder; kLSRErrorDomain
+  201 / the macOS text = off, "No speech detected" ≠ off; only off /
+  unavailable block. Non-vacuity: with the old purge (delete everything)
+  "fresh audio kept" and "fresh marker kept" fail.
+⚬ On this Mac (macOS 26.6.2, Dictation currently ON): the stored switch
+  reads `Dictation Enabled = true` (matches System Settings),
+  `Assistant Enabled` absent; `supportsOnDeviceRecognition` true; no prompt
+  shown. The scratch binary has no Speech Recognition grant (status
+  not_determined) and asking would prompt, so check() returned .unknown
+  there and the silent-buffer probe itself did not run.
+⚬ Daemon, with a temporary test (not committed): error frame then a
+  transcript for the same meeting → one card; transcript with no earlier
+  error frame → one card.
 Deviations:
+⚬ `startManual` (menu "Take meeting notes now") used engine "apple"
+  always, so "switch to Whisper" did nothing for menu recordings; it now
+  asks the daemon (`GET /api/meeting-notes`, `engine_in_use`) and falls
+  back to apple when the daemon can't be reached.
+⚬ No `error` audioReady is sent on an on-device failure (see Daemon).
+⚬ A Whisper failure in the DAEMON still deletes the audio (process()'s
+  `finally`); unchanged, as #105 is about the app's on-device failure and
+  the app never hears about a daemon failure. Follow-up if wanted.
+Unverified: the probe with Dictation OFF (needs the app's Speech grant and
+the user turning Dictation off; not done to avoid changing system
+settings); that the `?Dictation` anchor scrolls to the switch (the URL
+opens Keyboard either way); the panel layout.
+Live check: Dictation off → Take notes → "didn't start" panel, nothing in
+`~/.bot-inator/meetings/audio/`, Open Dictation Settings opens Keyboard.
+Settings → Meeting notes → Dictation row says off. Turn Dictation on →
+Try again → record 1 minute → notes ready, audio folder empty. Force a
+failure (e.g. start with Dictation on, turn it off before Stop) → "failed"
+panel with Retry / Delete recording, audio + marker present → turn it on
+→ Retry → notes ready + card, audio gone. Later → menu row → Delete
+recording → folder empty. Quit/relaunch with a kept failure → panel
+returns.
 
 ### Approvals and UI
 

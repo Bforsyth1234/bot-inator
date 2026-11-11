@@ -19,8 +19,15 @@ import SwiftUI
 //   engine it is transcribed here with SFSpeechRecognizer and
 //   `requiresOnDeviceRecognition = true` (never Apple's servers), the
 //   transcript is written to `~/.bot-inator/meetings/<id>.txt` (0600), and
-//   the audio is deleted, also on every failure. With the `whisper` engine
-//   the daemon transcribes and deletes it.
+//   the audio is deleted. With the `whisper` engine the daemon transcribes
+//   and deletes it.
+// * #105: before an "apple" recording starts, `MeetingDictationCheck` makes
+//   sure macOS will actually recognise speech (it refuses while Siri and
+//   Dictation are both off); if not, nothing is recorded. When on-device
+//   transcription fails anyway, the audio is KEPT (same folder, 0600, with a
+//   `<id>.failed.json` marker) so the user can Retry or Delete it; a kept
+//   recording is deleted after 24 hours (checked while running and by the
+//   purge at launch).
 // * Microphone lines are tagged `[me]`, system-audio lines `[others]`, so the
 //   daemon knows whose "I'll ..." it heard (no speaker identification).
 
@@ -190,6 +197,27 @@ struct MeetingRecorderError: LocalizedError {
 
 // MARK: - Files
 
+/// #105: a recording whose on-device transcription failed. Its audio is kept
+/// (0600, in the audio folder) for a Retry, at most `keepFailedFor`.
+struct FailedRecording: Codable, Equatable, Identifiable {
+    let meetingId: String
+    let title: String
+    let startedAt: String
+    let endedAt: String
+    var stopReason: String?
+    var error: String
+    let failedAt: Date
+    var micPath: String?
+    var systemPath: String?
+
+    var id: String { meetingId }
+    var micURL: URL? { micPath.map { URL(fileURLWithPath: $0) } }
+    var systemURL: URL? { systemPath.map { URL(fileURLWithPath: $0) } }
+    var expiresAt: Date { failedAt.addingTimeInterval(MeetingFiles.keepFailedFor) }
+    /// macOS refused recognition because Siri and Dictation are off.
+    var dictationOff: Bool { MeetingDictationCheck.isDictationOffMessage(error) }
+}
+
 enum MeetingFiles {
     static var notesDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -214,12 +242,55 @@ enum MeetingFiles {
         try? FileManager.default.removeItem(at: url)
     }
 
-    /// Nothing records at launch, so any audio left here is from a crash or
-    /// an undelivered recording: delete it (audio never outlives its use).
-    static func purgeLeftoverAudio() {
+    /// #105: how long a recording whose transcription failed is kept for a
+    /// Retry before it is deleted anyway.
+    static let keepFailedFor: TimeInterval = 24 * 60 * 60
+
+    static func markerURL(_ meetingId: String) -> URL {
+        audioDir.appendingPathComponent("\(meetingId).failed.json")
+    }
+
+    /// Records that `failed`'s audio is kept on purpose (until it expires).
+    static func saveFailed(_ failed: FailedRecording) {
+        guard let data = try? JSONEncoder().encode(failed) else { return }
+        let url = markerURL(failed.meetingId)
+        FileManager.default.createFile(atPath: url.path, contents: data,
+                                       attributes: [.posixPermissions: 0o600])
+        restrict(url)
+    }
+
+    /// Deletes a kept recording: its audio files and its marker.
+    static func deleteFailed(_ failed: FailedRecording) {
+        delete(failed.micURL)
+        delete(failed.systemURL)
+        delete(markerURL(failed.meetingId))
+    }
+
+    /// Nothing records at launch, so audio left here is from a crash, an
+    /// undelivered recording or a failed transcription. Deleted: everything
+    /// except the audio of a failed transcription (#105) that is less than
+    /// 24 hours old and still has its marker. Returns the recordings kept.
+    @discardableResult
+    static func purgeLeftoverAudio(now: Date = Date()) -> [FailedRecording] {
         let items = (try? FileManager.default.contentsOfDirectory(
             at: audioDir, includingPropertiesForKeys: nil)) ?? []
-        for item in items { delete(item) }
+        var kept: [FailedRecording] = []
+        var keepPaths: Set<String> = []
+        for item in items where item.lastPathComponent.hasSuffix(".failed.json") {
+            guard let data = try? Data(contentsOf: item),
+                  let failed = try? JSONDecoder().decode(FailedRecording.self, from: data),
+                  item.lastPathComponent == "\(failed.meetingId).failed.json",
+                  failed.expiresAt > now else { continue }
+            let audio = [failed.micURL, failed.systemURL].compactMap { $0 }
+                .filter { $0.deletingLastPathComponent().standardizedFileURL.path == audioDir.standardizedFileURL.path
+                    && FileManager.default.fileExists(atPath: $0.path) }
+            guard !audio.isEmpty else { continue }
+            kept.append(failed)
+            keepPaths.insert(item.standardizedFileURL.path)
+            for url in audio { keepPaths.insert(url.standardizedFileURL.path) }
+        }
+        for item in items where !keepPaths.contains(item.standardizedFileURL.path) { delete(item) }
+        return kept.sorted { $0.failedAt > $1.failedAt }
     }
 
     static func writeTranscript(_ text: String, meetingId: String) throws -> URL {
@@ -253,17 +324,35 @@ final class MeetingRecorder: ObservableObject {
         let startedAt: Date
     }
 
+    /// #105: "Take notes" was clicked but on-device recognition won't work,
+    /// so nothing was recorded.
+    struct BlockedStart: Equatable {
+        let meetingId: String
+        let title: String
+        let stopAt: Date
+        let message: String
+        let dictationOff: Bool
+        let whisperAvailable: Bool
+    }
+
     enum Phase: Equatable {
         case idle
         case offered(MeetingRecordOfferPayload)
         case starting(String)
+        case blocked(BlockedStart)
         case recording(Session)
         case transcribing(String)
+        case failed(FailedRecording)
         case finished(String)
     }
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var lastError: String?
+    /// #105: failed transcriptions whose audio is kept for a Retry.
+    @Published private(set) var failures: [FailedRecording] = []
+    /// Whether the daemon has mlx-whisper (asked when a Whisper button may show).
+    @Published private(set) var whisperAvailable = false
+    private var expiryLoop: Task<Void, Never>?
 
     /// Set by the WebSocket manager: sends one frame to the daemon.
     var send: ((MeetingRecorderOutgoing) -> Void)?
@@ -279,7 +368,15 @@ final class MeetingRecorder: ObservableObject {
     private var permissionsObserver: NSObjectProtocol?
 
     init() {
-        MeetingFiles.purgeLeftoverAudio()
+        failures = MeetingFiles.purgeLeftoverAudio()
+        if let first = failures.first {
+            // A failed transcription from before a restart: offer Retry again.
+            phase = .failed(first)
+            Task { @MainActor [weak self] in
+                self?.panel.show()
+                self?.watchExpiry()
+            }
+        }
         // #99: a Settings click asked for a permission; tell the daemon.
         permissionsObserver = NotificationCenter.default.addObserver(
             forName: .meetingPermissionsChanged, object: nil, queue: .main
@@ -346,7 +443,7 @@ final class MeetingRecorder: ObservableObject {
     /// Shows the offer. Does NOT start anything.
     func receiveOffer(_ offer: MeetingRecordOfferPayload) {
         switch phase {
-        case .idle, .finished: break
+        case .idle, .finished, .failed, .blocked: break  // a failure stays in the menu
         default: return  // busy: one recording at a time
         }
         lastError = nil
@@ -390,21 +487,23 @@ final class MeetingRecorder: ObservableObject {
     /// "Take notes now" from the menu: no calendar event, stops after 2 h.
     func startManual(title: String = "Meeting", consent: MeetingRecordingConsent) async {
         switch phase {
-        case .idle, .finished, .offered: break
+        case .idle, .finished, .offered, .failed, .blocked: break
         default: return
         }
         expiryTask?.cancel()
         let id = "manual-" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12).lowercased()
         let stopAt = Date().addingTimeInterval(Self.manualMax)
+        // #105: the engine chosen in Settings (it was always "apple" here).
+        let engine = await daemonEngine()
         if !noticeAcknowledged {
             // First recording ever: show the one-time notice; its button starts it.
             phase = .offered(MeetingRecordOfferPayload(
                 meetingId: id, title: title, start: Self.iso(Date()), end: "",
-                stopAt: Self.iso(stopAt), engine: .apple, attendeeCount: 0))
+                stopAt: Self.iso(stopAt), engine: engine, attendeeCount: 0))
             panel.show()
             return
         }
-        await begin(meetingId: id, title: title, stopAt: stopAt, engine: .apple)
+        await begin(meetingId: id, title: title, stopAt: stopAt, engine: engine)
     }
 
     func stopFromClick() async {
@@ -412,8 +511,109 @@ final class MeetingRecorder: ObservableObject {
     }
 
     func dismissPanel() {
-        if case .finished = phase { phase = .idle }
+        switch phase {
+        case .finished, .failed, .blocked: phase = .idle  // a failure stays in `failures`
+        default: break
+        }
         panel.close()
+    }
+
+    // MARK: #105 blocked start / failed transcription
+
+    /// System Settings → Keyboard (Dictation is at the bottom of that pane).
+    func openDictationSettings() {
+        NSWorkspace.shared.open(MeetingDictationCheck.settingsURL)
+    }
+
+    /// "Try again" / "Use Whisper" on a blocked start: needs a new click.
+    func retryStart(_ blocked: BlockedStart, engine: MeetingTranscriptionEngine,
+                    consent: MeetingRecordingConsent) async {
+        guard case .blocked(let current) = phase, current == blocked else { return }
+        await begin(meetingId: blocked.meetingId, title: blocked.title,
+                    stopAt: max(blocked.stopAt, Date().addingTimeInterval(60)), engine: engine)
+    }
+
+    /// The menu's "Retry meeting notes…" row: show a kept failure again.
+    func showFailure(_ failed: FailedRecording) {
+        switch phase {
+        case .idle, .finished, .failed, .blocked, .offered: break
+        default: return
+        }
+        guard failures.contains(where: { $0.meetingId == failed.meetingId }) else { return }
+        expiryTask?.cancel()
+        phase = .failed(failed)
+        panel.show()
+    }
+
+    /// Re-runs on-device transcription on the kept audio.
+    func retryTranscription(_ failed: FailedRecording) async {
+        guard case .failed(let current) = phase, current.meetingId == failed.meetingId else { return }
+        phase = .transcribing(failed.title)
+        panel.show()
+        await transcribeOnDevice(failed: failed)
+    }
+
+    /// Hands the kept audio to the daemon's Whisper, which deletes it after
+    /// transcribing (also when that fails).
+    func retryWithWhisper(_ failed: FailedRecording) {
+        guard case .failed(let current) = phase, current.meetingId == failed.meetingId,
+              whisperAvailable, send != nil, isConnected() else { return }
+        var payload = audioReadyPayload(failed)
+        payload.audioPath = failed.micPath
+        payload.systemAudioPath = failed.systemPath
+        MeetingFiles.delete(MeetingFiles.markerURL(failed.meetingId))
+        forget(failed)
+        send?(.audioReady(payload))
+        phase = .finished("Notes for \(failed.title) are being transcribed with Whisper on this Mac; "
+                          + "the recording is deleted when it finishes.")
+        panel.show()
+    }
+
+    func deleteRecording(_ failed: FailedRecording) {
+        MeetingFiles.deleteFailed(failed)
+        forget(failed)
+        if case .failed(let current) = phase, current.meetingId == failed.meetingId {
+            phase = .finished("The recording of \(failed.title) was deleted.")
+            panel.show()
+        }
+    }
+
+    private func forget(_ failed: FailedRecording) {
+        failures.removeAll { $0.meetingId == failed.meetingId }
+    }
+
+    /// Deletes kept recordings past 24 hours. Checks every 10 minutes while
+    /// any is kept (a wall-clock check, so a sleeping Mac catches up).
+    private func watchExpiry() {
+        guard expiryLoop == nil, !failures.isEmpty else { return }
+        expiryLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 600 * 1_000_000_000)
+                guard let self else { return }
+                let now = Date()
+                for failed in self.failures where failed.expiresAt <= now {
+                    MeetingFiles.deleteFailed(failed)
+                    self.forget(failed)
+                    if case .failed(let current) = self.phase, current.meetingId == failed.meetingId {
+                        self.phase = .idle
+                        self.panel.close()
+                    }
+                }
+                if self.failures.isEmpty { self.expiryLoop = nil; return }
+            }
+        }
+    }
+
+    private func refreshWhisperAvailable() async {
+        guard isConnected() else { whisperAvailable = false; return }
+        whisperAvailable = await MeetingNotesSettingsViewModel.fetchOnce()?.whisperAvailable ?? false
+    }
+
+    /// The engine the daemon would use now; "apple" when it can't be asked.
+    private func daemonEngine() async -> MeetingTranscriptionEngine {
+        guard isConnected(), let settings = await MeetingNotesSettingsViewModel.fetchOnce() else { return .apple }
+        whisperAvailable = settings.whisperAvailable
+        return MeetingTranscriptionEngine(rawValue: settings.engineInUse) ?? .apple
     }
 
     // MARK: Recording
@@ -427,6 +627,21 @@ final class MeetingRecorder: ObservableObject {
         }
         if engine == .apple, !(await Self.requestSpeech()) {
             return fail(meetingId, "Speech Recognition is off for bot-inator, so notes can't be transcribed on this Mac.")
+        }
+        // #105: find out now, not after the meeting, whether macOS will
+        // recognise speech (it refuses while Siri and Dictation are off).
+        if engine == .apple {
+            let readiness = await MeetingDictationCheck.check()
+            if let message = readiness.blockingMessage {
+                await refreshWhisperAvailable()
+                lastError = message
+                phase = .blocked(BlockedStart(
+                    meetingId: meetingId, title: title, stopAt: stopAt, message: message,
+                    dictationOff: readiness == .dictationOff, whisperAvailable: whisperAvailable))
+                report(.failed, meetingId: meetingId, error: message)
+                panel.show()
+                return
+            }
         }
         do {
             try MeetingFiles.ensureDirs()
@@ -485,22 +700,58 @@ final class MeetingRecorder: ObservableObject {
         }
         phase = .transcribing(session.title)
         panel.show()
+        guard micURL != nil || systemURL != nil else {
+            lastError = "Nothing was recorded."
+            phase = .finished("Notes for \(session.title) failed: nothing was recorded.")
+            panel.show()
+            return
+        }
+        await transcribeOnDevice(failed: FailedRecording(
+            meetingId: session.meetingId, title: session.title,
+            startedAt: payload.startedAt ?? "", endedAt: payload.endedAt ?? "", stopReason: reason,
+            error: "", failedAt: Date(), micPath: micURL?.path, systemPath: systemURL?.path))
+    }
+
+    private func audioReadyPayload(_ r: FailedRecording) -> MeetingAudioReadyPayload {
+        MeetingAudioReadyPayload(meetingId: r.meetingId, title: r.title, startedAt: r.startedAt,
+                                 endedAt: r.endedAt, stopReason: r.stopReason)
+    }
+
+    /// Transcribes `recording`'s audio here. Success: transcript saved, audio
+    /// deleted, the daemon told. Failure (#105): the audio is KEPT for a
+    /// Retry or Delete (24 hours at most) and the daemon hears nothing yet,
+    /// so a later successful Retry still produces the one card.
+    private func transcribeOnDevice(failed recording: FailedRecording) async {
+        var payload = audioReadyPayload(recording)
         do {
-            let text = try await MeetingTranscriber.transcribe(sources: [("me", micURL), ("others", systemURL)])
-            payload.transcriptPath = try MeetingFiles.writeTranscript(text, meetingId: session.meetingId).path
+            let text = try await MeetingTranscriber.transcribe(
+                sources: [("me", recording.micURL), ("others", recording.systemURL)])
+            payload.transcriptPath = try MeetingFiles.writeTranscript(text, meetingId: recording.meetingId).path
         } catch {
-            payload.error = error.localizedDescription
+            // The 24 hours run from the first failure, not from each Retry.
+            let earlier = failures.first { $0.meetingId == recording.meetingId }
+            let failed = FailedRecording(
+                meetingId: recording.meetingId, title: recording.title,
+                startedAt: recording.startedAt, endedAt: recording.endedAt,
+                stopReason: recording.stopReason, error: error.localizedDescription,
+                failedAt: earlier?.failedAt ?? Date(),
+                micPath: recording.micPath, systemPath: recording.systemPath)
+            MeetingFiles.saveFailed(failed)
+            forget(failed)
+            failures.insert(failed, at: 0)
+            lastError = failed.error
+            await refreshWhisperAvailable()
+            phase = .failed(failed)
+            panel.show()
+            watchExpiry()
+            return
         }
-        // Audio is deleted once the transcript exists, and on failure.
-        MeetingFiles.delete(micURL)
-        MeetingFiles.delete(systemURL)
+        // Audio is deleted once the transcript exists.
+        MeetingFiles.deleteFailed(recording)
+        forget(recording)
         send?(.audioReady(payload))
-        if let error = payload.error {
-            lastError = error
-            phase = .finished("Notes for \(session.title) failed: \(error) The recording was deleted.")
-        } else {
-            phase = .finished("Notes for \(session.title) are ready; a card with the follow-ups will appear.")
-        }
+        lastError = nil
+        phase = .finished("Notes for \(recording.title) are ready; a card with the follow-ups will appear.")
         panel.show()
     }
 
@@ -649,14 +900,107 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
     }
 }
 
+// MARK: - Dictation check (#105)
+
+/// Whether on-device speech recognition will actually run now.
+enum SpeechReadiness: Equatable {
+    case ready
+    /// macOS refuses recognition: Siri and Dictation are both off.
+    case dictationOff
+    /// No on-device model for this language (or no recognizer at all).
+    case unavailable(String)
+    /// Couldn't tell (not authorized yet, or the probe gave an odd error).
+    case unknown
+
+    static let dictationOffMessage = "On-device speech recognition is refused while Dictation is off. "
+        + "Turn on Dictation (System Settings → Keyboard → Dictation) or switch to Whisper."
+
+    /// Why "Take notes" must not start, or nil when it may.
+    var blockingMessage: String? {
+        switch self {
+        case .ready, .unknown: return nil  // unknown: a failure keeps the audio (#105)
+        case .dictationOff: return Self.dictationOffMessage
+        case .unavailable(let message): return message
+        }
+    }
+}
+
+enum MeetingDictationCheck {
+    /// System Settings → Keyboard, where the Dictation switch is.
+    static let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.keyboard?Dictation")!
+
+    /// macOS's own text for the refusal (kLSRErrorDomain 201 on macOS 14+).
+    static func isDictationOffMessage(_ text: String) -> Bool {
+        let t = text.lowercased()
+        return t.contains("siri and dictation are disabled") || t.contains("dictation is off")
+    }
+
+    static func isDictationOffError(_ error: Error) -> Bool {
+        let e = error as NSError
+        return (e.domain == "kLSRErrorDomain" && e.code == 201) || isDictationOffMessage(e.localizedDescription)
+    }
+
+    /// Siri's and Dictation's switches as System Settings stores them
+    /// (`com.apple.assistant.support`); nil when a key isn't there. Read
+    /// without prompting (the app isn't sandboxed).
+    static func preferenceSwitches() -> (dictation: Bool?, siri: Bool?) {
+        let domain = "com.apple.assistant.support" as CFString
+        func flag(_ key: String) -> Bool? {
+            CFPreferencesAppSynchronize(domain)
+            return CFPreferencesCopyAppValue(key as CFString, domain) as? Bool
+        }
+        return (flag("Dictation Enabled"), flag("Assistant Enabled"))
+    }
+
+    /// Never prompts. With Speech Recognition allowed, the ground truth: a
+    /// tiny on-device recognition of 0.5 s of silence (what failed after the
+    /// meeting fails here in about a second). Otherwise the stored switches.
+    static func check() async -> SpeechReadiness {
+        guard let recognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer() else {
+            return .unavailable("Speech recognition isn't available on this Mac, so nothing can be transcribed here. Switch to Whisper.")
+        }
+        let switches = preferenceSwitches()
+        let switchedOff = switches.dictation == false && switches.siri != true
+        guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
+            return switchedOff ? .dictationOff : .unknown
+        }
+        guard recognizer.supportsOnDeviceRecognition else {
+            return switchedOff ? .dictationOff : .unavailable(
+                "On-device speech recognition isn't available for this language, so nothing would be transcribed. Switch to Whisper.")
+        }
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1),
+              let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8_000) else {
+            return switchedOff ? .dictationOff : .unknown
+        }
+        silence.frameLength = 8_000  // zero-filled
+        do {
+            _ = try await MeetingTranscriber.recognize(silence, with: recognizer, timeout: 8)
+            return .ready
+        } catch {
+            if isDictationOffError(error) { return .dictationOff }
+            NSLog("MeetingRecorder: dictation probe: \(error)")
+            // "No speech detected" is the expected answer to silence.
+            return switchedOff ? .dictationOff : .ready
+        }
+    }
+}
+
 // MARK: - On-device transcription
 
 enum MeetingTranscriber {
     /// Each request gets one minute of audio.
     static let chunkSeconds: Double = 60
 
+    /// Resumes a continuation exactly once (result, error or timeout).
     private final class Once: @unchecked Sendable {
-        var done = false
+        private let lock = NSLock()
+        private var done = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if done { return false }
+            done = true
+            return true
+        }
     }
 
     /// `[label] text` lines in time order. Throws when nothing could be
@@ -664,6 +1008,10 @@ enum MeetingTranscriber {
     static func transcribe(sources: [(String, URL?)]) async throws -> String {
         guard let recognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer(),
               recognizer.supportsOnDeviceRecognition else {
+            let switches = MeetingDictationCheck.preferenceSwitches()
+            if switches.dictation == false && switches.siri != true {
+                throw MeetingRecorderError(SpeechReadiness.dictationOffMessage)
+            }
             throw MeetingRecorderError("On-device speech recognition isn't available for this language, so nothing was transcribed (and nothing was sent anywhere).")
         }
         var pieces: [(Double, Int, String)] = []
@@ -694,8 +1042,8 @@ enum MeetingTranscriber {
         return pieces.sorted { ($0.0, $0.1) < ($1.0, $1.1) }.map(\.2).joined(separator: "\n")
     }
 
-    private static func recognize(_ buffer: AVAudioPCMBuffer,
-                                  with recognizer: SFSpeechRecognizer) async throws -> String {
+    static func recognize(_ buffer: AVAudioPCMBuffer, with recognizer: SFSpeechRecognizer,
+                          timeout: TimeInterval? = nil) async throws -> String {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.requiresOnDeviceRecognition = true  // never Apple's servers
         request.shouldReportPartialResults = false
@@ -704,14 +1052,18 @@ enum MeetingTranscriber {
         request.endAudio()
         let once = Once()
         return try await withCheckedThrowingContinuation { cont in
-            recognizer.recognitionTask(with: request) { result, error in
-                guard !once.done else { return }
+            let task = recognizer.recognitionTask(with: request) { result, error in
                 if let result, result.isFinal {
-                    once.done = true
-                    cont.resume(returning: result.bestTranscription.formattedString)
+                    if once.claim() { cont.resume(returning: result.bestTranscription.formattedString) }
                 } else if let error {
-                    once.done = true
-                    cont.resume(throwing: error)
+                    if once.claim() { cont.resume(throwing: error) }
+                }
+            }
+            if let timeout {
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                    guard once.claim() else { return }
+                    task.cancel()
+                    cont.resume(throwing: MeetingRecorderError("Speech recognition didn't answer."))
                 }
             }
         }
@@ -729,7 +1081,8 @@ struct MeetingRecorderPanelView: View {
             case .offered(let offer):
                 Label("Take notes for \(offer.title)?", systemImage: "waveform")
                     .appFont(.headline)
-                Text("Audio stays on this Mac and is deleted once it is transcribed. "
+                Text("Audio stays on this Mac and is deleted once it is transcribed "
+                     + "(if transcription fails, it is kept up to 24 hours so you can retry). "
                      + "Afterwards you get one card with what you owe; nothing runs until you approve it.")
                     .appFont(.secondary).foregroundStyle(.secondary)
                 if !recorder.noticeAcknowledged {
@@ -764,6 +1117,58 @@ struct MeetingRecorderPanelView: View {
                 HStack {
                     ProgressView().controlSize(.small)
                     Text("Transcribing \(title) on this Mac…").appFont(.body)
+                }
+            case .blocked(let blocked):
+                Label("Notes for \(blocked.title) didn't start", systemImage: "exclamationmark.triangle.fill")
+                    .appFont(.headline)
+                Text(blocked.message).appFont(.body)
+                Text("Nothing was recorded.").appFont(.secondary).foregroundStyle(.secondary)
+                if blocked.dictationOff {
+                    Button("Open Dictation Settings") { recorder.openDictationSettings() }
+                        .buttonStyle(.link)
+                }
+                HStack {
+                    Button("Cancel") { recorder.dismissPanel() }
+                    Spacer()
+                    if blocked.whisperAvailable {
+                        Button("Use Whisper") {
+                            let consent = MeetingRecordingConsent.userClicked()
+                            Task { await recorder.retryStart(blocked, engine: .whisper, consent: consent) }
+                        }
+                    }
+                    Button("Try again") {
+                        let consent = MeetingRecordingConsent.userClicked()
+                        Task { await recorder.retryStart(blocked, engine: .apple, consent: consent) }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            case .failed(let failed):
+                Label("Notes for \(failed.title) failed", systemImage: "exclamationmark.triangle.fill")
+                    .appFont(.headline)
+                Text(failed.error).appFont(.body)
+                if failed.dictationOff, !failed.error.contains("Turn on Dictation") {
+                    Text("Turn on Dictation (System Settings → Keyboard → Dictation), then Retry, or use Whisper.")
+                        .appFont(.secondary)
+                }
+                Text("The recording is kept on this Mac (only you can read it) so you can retry. "
+                     + "If you don't, it is deleted automatically "
+                     + "\(failed.expiresAt.formatted(date: .abbreviated, time: .shortened)) (24 hours).")
+                    .appFont(.secondary).foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    if failed.dictationOff {
+                        Button("Open Dictation Settings") { recorder.openDictationSettings() }
+                    }
+                    if recorder.whisperAvailable {
+                        Button("Use Whisper") { recorder.retryWithWhisper(failed) }
+                    }
+                }
+                .buttonStyle(.link)
+                HStack {
+                    Button("Delete recording", role: .destructive) { recorder.deleteRecording(failed) }
+                    Spacer()
+                    Button("Later") { recorder.dismissPanel() }
+                    Button("Retry") { Task { await recorder.retryTranscription(failed) } }
+                        .keyboardShortcut(.defaultAction)
                 }
             case .finished(let message):
                 Text(message).appFont(.body)
@@ -829,6 +1234,12 @@ struct MeetingRecorderMenuItems: View {
             Button("Take meeting notes now") {
                 let consent = MeetingRecordingConsent.userClicked()
                 Task { await recorder.startManual(consent: consent) }
+            }
+        }
+        // #105: a failed transcription whose recording is kept for a Retry.
+        ForEach(recorder.failures) { failed in
+            Button("Meeting notes failed: \(failed.title) (Retry or delete)…") {
+                recorder.showFailure(failed)
             }
         }
     }
