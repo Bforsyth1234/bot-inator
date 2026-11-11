@@ -5,6 +5,12 @@ import SwiftUI
 /// Presents `ApprovalAlert` in a standalone floating window whenever a new
 /// approval request arrives on the WebSocket. Lives for the full app lifetime
 /// so approvals surface even while the menu-bar popover is closed.
+///
+/// #83: a card the daemon marked `reversible` (the action journal can undo
+/// it) shows as a small panel in the top-right corner that does NOT activate
+/// the app or take keyboard focus: the user clicks it, then Return approves
+/// and Escape denies. Same timeout, same Deny; "Edit…" swaps it for the full
+/// window. Every other card keeps the full, activating window.
 @MainActor
 final class ApprovalPresenter {
     private var cancellables = Set<AnyCancellable>()
@@ -54,7 +60,79 @@ final class ApprovalPresenter {
     }
 
     private func present(_ payload: ApprovalRequestPayload) {
+        if CompactCard.applies(payload) {
+            presentLight(payload)
+        } else {
+            presentFull(payload)
+        }
+    }
+
+    /// #83: the light card. Nothing is sent on Edit: the same request moves
+    /// to the full window, still pending.
+    private func presentLight(_ payload: ApprovalRequestPayload) {
+        dropWindow()
+
+        let content = CompactApprovalCard(payload: payload, onDecision: { [weak self] approved in
+            guard let self, self.presentedId == payload.requestId else { return }
+            self.ws?.sendApprovalResponse(
+                requestId: payload.requestId, approved: approved, userNote: nil, editedArgs: nil
+            )
+            self.closeWindow()
+        }, onEdit: { [weak self] in
+            guard let self, self.presentedId == payload.requestId else { return }
+            self.presentFull(payload)
+        })
+
+        let hosting = NSHostingController(rootView: content.appTextSize())
+        hosting.sizingOptions = [.preferredContentSize]
+        let panel = LightApprovalPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 180),
+            styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
+            backing: .buffered, defer: true
+        )
+        panel.contentViewController = hosting
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.isMovableByWindowBackground = true
+        panel.level = .floating
+        panel.hidesOnDeactivate = false  // the app is never active for it
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // The red X is a Deny, as on the full window (#15).
+        let delegate = WindowCloseHandler { [weak self] in
+            self?.userClosedApproval(requestId: payload.requestId)
+        }
+        panel.delegate = delegate
+        self.windowDelegate = delegate
+        self.window = panel
+
+        Self.placeTopRight(panel)
+        // No NSApp.activate, no makeKey: the front app keeps keyboard focus.
+        panel.orderFrontRegardless()
+    }
+
+    /// Top-right of the screen with the mouse, under the menu bar.
+    private static func placeTopRight(_ panel: NSPanel) {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
+        guard let frame = screen?.visibleFrame else { panel.center(); return }
+        panel.layoutIfNeeded()
+        let size = panel.frame.size
+        panel.setFrameTopLeftPoint(NSPoint(x: frame.maxX - size.width - 16, y: frame.maxY - 12))
+    }
+
+    /// Close the current card window without treating it as the user's Deny.
+    private func dropWindow() {
+        window?.delegate = nil
         window?.close()
+        window = nil
+        windowDelegate = nil
+    }
+
+    private func presentFull(_ payload: ApprovalRequestPayload) {
+        dropWindow()
 
         let content = ApprovalAlert(payload: payload) { [weak self] approved, note, editedArgs in
             guard let self, self.presentedId == payload.requestId else { return }
@@ -182,4 +260,11 @@ private final class WindowCloseHandler: NSObject, NSWindowDelegate {
         onUserClose()
         return true
     }
+}
+
+/// The light approval card's panel (#83): takes keystrokes once clicked,
+/// without activating the app. Escape is a Deny via the card's cancel button.
+private final class LightApprovalPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
 }

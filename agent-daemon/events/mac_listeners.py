@@ -246,6 +246,17 @@ class MacAppListener:
         logger.debug(
             "NSWorkspace activation: app=%s bundle=%s pid=%s", app_name, bundle_id, pid
         )
+        if _never_watched(bundle_id, app_name):
+            # #87: a never-watch app (password managers...) reports nothing.
+            # Cancel a pending switch (focus did not hold) and remember this
+            # key so returning to the previous app is reported again.
+            with self._lock:
+                if self._pending_timer is not None:
+                    self._pending_timer.cancel()
+                self._pending_timer = None
+                self._pending_gen += 1
+                self._last_emitted_key = (bundle_id, pid)
+            return
         event = ContextEvent(
             event_type="app_activated",
             app_name=app_name,
@@ -293,6 +304,15 @@ class MacAppListener:
             self._bus.push_threadsafe(event)
         except Exception:  # pragma: no cover - loop not bound or shutting down
             logger.exception("Failed to push app_activated event")
+
+
+def _never_watched(bundle_id: Any, app_name: Any) -> bool:
+    """#87 never-watch list (``ai.delivery``); imported lazily."""
+    from ai.delivery import is_never_watched
+
+    return is_never_watched(
+        str(bundle_id) if bundle_id else None, str(app_name) if app_name else None
+    )
 
 
 def helper_missing(cmd: Sequence[str]) -> bool:

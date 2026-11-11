@@ -2,13 +2,19 @@
 
 Polls the calendar backend (``tools.calendar_access``) every 60 s and pushes
 ``ContextEvent(event_type="event_starting_soon", metadata={title, start,
-location, url, calendar, video_url})`` for each timed event starting within
-the next 10 minutes. Each occurrence (event id + start) is announced once.
+location, url, calendar, video_url, end, id[, attendees]})`` for each timed
+event starting within the next 10 minutes. Each occurrence (event id + start) is announced once.
 All-day events are skipped.
 
 ``video_url`` is the first Zoom / Google Meet / Microsoft Teams link found in
 the event's url, location or notes ("" if none), so an idea source can offer
 "open the meeting link".
+
+``attendees`` (#80) is the backend's ``[{name, email, is_self}]`` list, for
+``events.meeting_prep``; the key is absent when the backend can't tell (see
+``tools.calendar_access``). Attendee names and addresses are personal data:
+the new keys come after the original six so previews that show only the
+first few metadata items don't pick them up.
 
 The watcher never triggers a permission prompt: it polls only while the
 backend reports ``ready()`` (EventKit already granted; for AppleScript,
@@ -126,8 +132,12 @@ class CalendarWatcher:
                     "url": ev.get("url", ""),
                     "calendar": ev.get("calendar", ""),
                     "video_url": find_video_link(ev),
+                    "end": ev.get("end", ""),
+                    "id": ev.get("id", ""),
                 },
             )
+            if ev.get("attendees") is not None:
+                event.metadata["attendees"] = [dict(p) for p in ev["attendees"]]
             try:
                 self._bus.push_threadsafe(event)
             except Exception:  # pragma: no cover - loop not bound / shutting down

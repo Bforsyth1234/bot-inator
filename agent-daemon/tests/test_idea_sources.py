@@ -44,7 +44,9 @@ def _meeting(video_url: str = "https://zoom.us/j/123456") -> ContextEvent:
     (_file("Zoom.dmg"), "installer_downloaded"),
     (_file("Zoom.dmg", action="renamed"), "installer_downloaded"),
     (_file("Archive.ZIP"), "archive_downloaded"),
-    (_file("statement.pdf"), None),
+    # #76: a document in Downloads is a prepared-offer kind; other PDFs aren't.
+    (_file("statement.pdf"), "document_downloaded"),
+    (_file("paper.pdf"), None),
     (_file("Screenshot 2026-11-08 at 10.00.00.png"), None),
     (_file("Zoom.dmg.crdownload"), None),
     (_file("Zoom.dmg", action="modified"), None),
@@ -288,3 +290,194 @@ def test_builtin_kinds_cool_down_per_event_not_per_kind() -> None:
 def test_tool_kinds_still_call_the_model() -> None:
     published, prompts = _run_next_step([_file("Zoom.dmg")])
     assert len(prompts) == 1 and "builtin_tool" not in published[0].metadata
+
+
+# ---- reply drafts (#70) ------------------------------------------------------
+
+YES = '{"needs_reply": true, "reason": "Sam asks for the report."}'
+NO = '{"needs_reply": false, "reason": "FYI only."}'
+
+
+def _reply_mail(subject: str = "Report", mid: int = 42, sender: str = "Sam <sam@other.org>",
+                bulk: bool = False, mailbox: str = "INBOX") -> ContextEvent:
+    return ContextEvent(event_type="mail_received", metadata={
+        "sender": sender, "subject": subject, "date": "2026-11-10T09:00:00",
+        "mailbox": mailbox, "message_id": mid, "bulk": bulk,
+    })
+
+
+def _fields(body: str = "Can you send me the report by Friday?", to: str = "Me <me@example.com>",
+            cc: str = "", thread: str = "<t1@other.org>") -> dict:
+    return {"to": to, "cc": cc, "body": body, "thread_id": thread, "delivered_to": []}
+
+
+@pytest.fixture
+def local_privacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ai import privacy
+
+    monkeypatch.setattr(privacy, "should_redact", lambda role: False)
+
+
+def _run_reply(events, fields: dict, judge_reply: str = YES, feedback=None, state=None):
+    from ai.idea_sources import IdeaState
+
+    published: list[ContextEvent] = []
+    judged: list[str] = []
+    model_prompts: list[str] = []
+
+    async def judge(text: str) -> str:
+        judged.append(text)
+        return judge_reply
+
+    async def evaluate(text: str) -> str:
+        model_prompts.append(text)
+        return PROPOSAL
+
+    async def publish(ev: ContextEvent) -> None:
+        published.append(ev)
+
+    async def scenario():
+        s = NextStepSuggester(
+            event_bus=EventBus(), evaluate=evaluate, publish=publish,
+            state=state if state is not None else IdeaState(), feedback=feedback,
+            reply_judge=judge, read_message=lambda mid: fields.get(mid),
+            user_addresses=["me@example.com"],
+        )
+        for e in events:  # one at a time: a later mail sees earlier cooldowns
+            task = s.observe(e)
+            if task:
+                await task
+
+    asyncio.run(scenario())
+    return published, judged, model_prompts
+
+
+def test_direct_question_offers_one_reply_draft(local_privacy) -> None:
+    published, judged, model = _run_reply([_reply_mail()], {42: _fields()})
+    assert len(judged) == 1 and model == []
+    assert "Can you send me the report by Friday?" in judged[0]
+    assert len(published) == 1
+    meta = published[0].metadata
+    assert published[0].event_type == "pattern_detected"
+    assert (meta["builtin_tool"], meta["trigger"], meta["source"]) == (
+        "draft_email", "mail_needs_reply", "next_step")
+    assert meta["tool_name"] == "draft_email_reply"
+    assert meta["reply_to_message_id"] == 42
+    assert "reply_to_message_id: 42" in meta["event_details"]
+    assert "draft_email" in meta["description"] and "never say" in meta["description"]
+
+
+@pytest.mark.parametrize("event,fields", [
+    (_reply_mail(bulk=True), _fields()),                                   # newsletter
+    (_reply_mail(sender="News <newsletter@shop.com>"), _fields()),         # automated sender
+    (_reply_mail(), _fields(to="team@other.org", cc="me@example.com")),    # CC-only
+    (_reply_mail(sender="Me <me@example.com>"), _fields()),                # the user's own mail
+    (_reply_mail(), _fields(body="Here is the report. Thanks!")),          # no question
+    (_reply_mail(mailbox="Junk"), _fields()),
+])
+def test_no_reply_offer_for_non_questions(local_privacy, event, fields) -> None:
+    published, judged, _ = _run_reply([event], {42: fields})
+    assert published == [] and judged == []
+
+
+def test_judge_no_drops_the_offer(local_privacy) -> None:
+    published, judged, _ = _run_reply([_reply_mail()], {42: _fields()}, judge_reply=NO)
+    assert len(judged) == 1 and published == []
+
+
+@pytest.mark.parametrize("reply", ["maybe", "", '{"needs_reply": "yes"}',
+                                   '{"needs_reply": true} {"needs_reply": false}'])
+def test_unclear_judge_reply_is_a_no(local_privacy, reply) -> None:
+    published, _, _ = _run_reply([_reply_mail()], {42: _fields()}, judge_reply=reply)
+    assert published == []
+
+
+def test_second_mail_in_thread_inside_cooldown_is_skipped(local_privacy) -> None:
+    second = _reply_mail(subject="Re: Report", mid=43, sender="Kim <kim@other.org>")
+    published, judged, _ = _run_reply(
+        [_reply_mail(), second],
+        {42: _fields(), 43: _fields(body="Also, could you add Q3?")},
+    )
+    assert [p.metadata["reply_to_message_id"] for p in published] == [42]
+    assert len(judged) == 1
+
+
+def test_same_sender_inside_cooldown_is_skipped(local_privacy) -> None:
+    other_thread = _reply_mail(subject="Lunch?", mid=43)
+    published, judged, _ = _run_reply(
+        [_reply_mail(), other_thread],
+        {42: _fields(), 43: _fields(body="Lunch tomorrow?", thread="<t2@other.org>")},
+    )
+    assert [p.metadata["reply_to_message_id"] for p in published] == [42]
+
+
+def test_other_sender_other_thread_gets_its_own_offer(local_privacy) -> None:
+    other = _reply_mail(subject="Lunch?", mid=43, sender="Kim <kim@other.org>")
+    published, _, _ = _run_reply(
+        [_reply_mail(), other],
+        {42: _fields(), 43: _fields(body="Lunch tomorrow?", thread="<t2@other.org>")},
+    )
+    assert [p.metadata["reply_to_message_id"] for p in published] == [42, 43]
+
+
+def test_thread_cooldown_survives_restart(local_privacy, tmp_path) -> None:
+    from ai.idea_sources import IdeaState
+
+    path = tmp_path / "idea_state.json"
+    _run_reply([_reply_mail()], {42: _fields()}, state=IdeaState(path))
+    later = _reply_mail(subject="Re: Report", mid=50, sender="Kim <kim@other.org>")
+    published, judged, _ = _run_reply([later], {50: _fields()}, state=IdeaState(path))
+    assert published == [] and judged == []
+
+
+def test_declined_reply_idea_is_remembered(local_privacy) -> None:
+    from ai.open_help import IdeaFeedback
+
+    feedback = IdeaFeedback()
+    published, _, _ = _run_reply([_reply_mail()], {42: _fields()}, feedback=feedback)
+    meta = published[0].metadata
+    feedback.record(meta["tool_name"], meta["description"], approved=False)
+    other = _reply_mail(subject="Lunch?", mid=43, sender="Kim <kim@other.org>")
+    published, judged, _ = _run_reply(
+        [other], {43: _fields(thread="<t2@other.org>")}, feedback=feedback)
+    assert published == [] and judged == []
+
+
+def test_cloud_engine_with_personal_text_off_skips_and_says_why(monkeypatch) -> None:
+    from ai import privacy
+    from ai.idea_sources import NEEDS_REPLY_NOTICE_ID
+    from schemas.ws_messages import NOTICE_EVENT_TYPE
+
+    monkeypatch.setattr(privacy, "should_redact", lambda role: role == "main")
+    published, judged, _ = _run_reply(
+        [_reply_mail(), _reply_mail(mid=43, sender="Kim <kim@other.org>")],
+        {42: _fields(), 43: _fields(thread="<t2@other.org>")},
+    )
+    assert judged == []
+    assert [p.event_type for p in published] == [NOTICE_EVENT_TYPE]  # once
+    notice = published[0].metadata["notice"]
+    assert notice["id"] == NEEDS_REPLY_NOTICE_ID and notice["level"] == "info"
+    assert "cloud" in notice["body"]
+
+
+def test_deadline_mail_gets_the_reply_instead_of_the_reminder(local_privacy) -> None:
+    event = _reply_mail(subject="Can you send me the report by Friday?")
+    assert NextStepSuggester.classify(event) == "mail_deadline"
+    published, _, _ = _run_reply([event], {42: _fields()})
+    assert [p.metadata["builtin_tool"] for p in published] == ["draft_email"]
+
+
+def test_deadline_mail_keeps_the_reminder_when_no_reply_is_needed(local_privacy) -> None:
+    event = _reply_mail(subject="Please sign the lease by Friday")
+    published, _, _ = _run_reply([event], {42: _fields()}, judge_reply=NO)
+    assert [p.metadata["builtin_tool"] for p in published] == ["create_reminder"]
+
+
+def test_reply_rule_is_off_without_a_judge(local_privacy) -> None:
+    published, prompts = _run_next_step([_reply_mail()])
+    assert published == [] and prompts == []
+
+
+def test_unreadable_message_drops_the_offer(local_privacy) -> None:
+    published, judged, _ = _run_reply([_reply_mail()], {})
+    assert published == [] and judged == []

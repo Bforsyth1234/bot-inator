@@ -33,8 +33,16 @@ from ai.privacy import personal_text_allowed
 from ai.mlx_engine import MLXEngine
 from ai.orchestrator import Orchestrator
 from ai.pattern_recognizer import PatternRecognizer, make_detection_evaluator
+from ai import activity_store, egress_log
+from ai.idea_outcomes import (
+    DecisionLog,
+    OutcomeStore,
+    default_decisions_path,
+    default_outcomes_path,
+)
 from ai.idea_sources import (
     CHAT_GAP_SYSTEM_PROMPT,
+    NEEDS_REPLY_JUDGE_SYSTEM_PROMPT,
     NEXT_STEP_SYSTEM_PROMPT,
     ChatGapDetector,
     IdeaState,
@@ -51,12 +59,14 @@ from ai.open_help import (
 # boots cleanly when ``settings.provider == "local"`` and the optional
 # Groq dependency tree is missing.
 from config import GROQ_DEFAULT_MODELS, settings
+import providers
 from ai.idea_match import DeclinedIdeaMatcher, make_sync_judge
 from ai.friction import (
     FRICTION_JUDGE_SYSTEM_PROMPT,
     FRICTION_SYSTEM_PROMPT,
     FrictionDetector,
 )
+from ai.routine_ideas import RoutineIdeaSource
 from ai.setup_scan import (
     SETUP_JUDGE_SYSTEM_PROMPT,
     SETUP_SCAN_SYSTEM_PROMPT,
@@ -70,6 +80,7 @@ from events.file_watcher import FileWatcher
 from events.imessage_watcher import IMessageWatcher
 from events.mac_listeners import MacAppListener
 from events.mail_watcher import MailWatcher
+from events.meeting_prep import MeetingPrepScheduler
 from schemas.ws_messages import (
     ApprovalResponse,
     CalendarRequest,
@@ -78,6 +89,19 @@ from schemas.ws_messages import (
     CalendarStatus,
     CodeApprovalResponse,
     Command,
+    DemonstrationDraft,
+    DemonstrationTrace,
+    DemonstrationTracePayload,
+    MeetingAudioReady,
+    MeetingRecordOffer,
+    MeetingRecordOfferPayload,
+    MeetingRecordState,
+    MeetingRecordStop,
+    MeetingRecordStopPayload,
+    ScreenTextRequest,
+    ScreenTextRequestPayload,
+    ScreenTextResponse,
+    ScreenTextStatus,
     Status,
     StatusPayload,
     UserMessage,
@@ -85,6 +109,9 @@ from schemas.ws_messages import (
 )
 from tools import AVAILABLE_TOOLS
 from tools import calendar_access
+# #89: the module (``tools.read_front_window`` stays the module, see
+# tools/__init__.py), for its WS bridge to the menu bar app.
+from tools import read_front_window as screen_text
 from tools.meta_tool_generator import set_meta_tool_context
 
 logging.basicConfig(
@@ -112,8 +139,9 @@ def _build_engines() -> tuple[Any, Any, Any]:
     Each engine's provider is :meth:`settings.engine_provider` for its
     role: ``AGENT_PROVIDER_<ROLE>`` when set, else ``AGENT_PROVIDER``
     (#26), so e.g. local main + analysis with Groq drafting is allowed.
-    ``"groq"`` builds a :class:`~ai.groq_engine.GroqEngine` on that role's
-    Groq model; ``"local"`` an :class:`MLXEngine` on its MLX model. Each
+    Any preset (``"groq"``, ``"openai"``, ...) builds an
+    :class:`~ai.groq_engine.OpenAICompatibleEngine` on that role's model
+    (#97); ``"local"`` an :class:`MLXEngine` on its MLX model. Each
     engine is isolated so they can run on different model ids without
     sharing state. Unknown provider names resolve to ``"local"`` with a
     warning (see :func:`config.normalize_provider`) so a typo can neither
@@ -124,20 +152,20 @@ def _build_engines() -> tuple[Any, Any, Any]:
         "analysis": settings.analysis_model_path,
         "drafting": settings.drafting_model_path,
     }
-    groq_models = {
-        "main": settings.groq_main_model,
-        "analysis": settings.groq_analysis_model,
-        "drafting": settings.groq_drafting_model,
-    }
+    from ai import first_run  # noqa: WPS433
+
+    if first_run.is_pending():
+        # #93: nothing loads or downloads until the user picks an engine.
+        logger.info("First run not answered yet: no engine loaded")
+        pending = [first_run.PendingEngine(r) for r in ("main", "analysis", "drafting")]
+        return pending[0], pending[1], pending[2]
     engines: list[Any] = []
     for role in ("main", "analysis", "drafting"):
-        if settings.engine_provider(role) == "groq":
-            from ai.groq_engine import GroqEngine  # noqa: WPS433
-            engines.append(GroqEngine(
-                groq_models[role],
-                api_key=settings.groq_api_key,
-                api_base=settings.groq_api_base,
-            ))
+        provider = settings.engine_provider(role)
+        if provider != "local":
+            # Every non-local provider is an OpenAI-compatible preset (#97).
+            from ai.groq_engine import build_engine  # noqa: WPS433
+            engines.append(build_engine(settings, provider, role))
         else:
             engines.append(MLXEngine(local_models[role]))
     return engines[0], engines[1], engines[2]
@@ -193,7 +221,9 @@ async def lifespan(app: FastAPI):
     # For the Groq provider eager-loading is essentially free — it just
     # constructs the OpenAI client and validates the API key — but we
     # still skip it under ``AGENT_EAGER_LOAD=0`` for symmetry with tests.
-    if os.environ.get("AGENT_EAGER_LOAD", "1") != "0":
+    from ai.first_run import PendingEngine  # noqa: WPS433
+
+    if os.environ.get("AGENT_EAGER_LOAD", "1") != "0" and not isinstance(engine, PendingEngine):
         logger.info(
             "Eager-loading %s models: main=%s analysis=%s drafting=%s",
             settings.engine_providers(),
@@ -267,6 +297,17 @@ async def lifespan(app: FastAPI):
     # instances on the same file would overwrite each other.
     idea_feedback = IdeaFeedback(settings.idea_feedback_path)
     idea_state = IdeaState(settings.idea_feedback_path.with_name("idea_state.json"))
+    # #76: next-step cards for documents and mail invites / deadlines
+    # arrive filled in. Read-only preparation, one detection-engine call.
+    from ai.prepared_offers import Preparer  # noqa: WPS433
+
+    preparer = Preparer(
+        evaluate=make_detection_evaluator(
+            detection_engine,
+            system_prompt="Extract facts; reply with one JSON object only.",
+        ),
+        role="detection",
+    )
     idea_sources = [
         NextStepSuggester(
             event_bus=bus,
@@ -275,6 +316,12 @@ async def lifespan(app: FastAPI):
             ),
             state=idea_state,
             feedback=idea_feedback,
+            # #70: reply drafts for mail that asks the user something.
+            reply_judge=make_detection_evaluator(
+                detection_engine, max_tokens=JUDGE_MAX_TOKENS,
+                system_prompt=NEEDS_REPLY_JUDGE_SYSTEM_PROMPT,
+            ),
+            preparer=preparer,
         ),
         ChatGapDetector(
             event_bus=bus,
@@ -316,6 +363,66 @@ async def lifespan(app: FastAPI):
         feedback=idea_feedback,
         records_feedback=not settings.open_help_enabled,
     ))
+    # #71: ``event_starting_soon`` -> one read-only ``meeting_prep`` event.
+    # An idea source (the orchestrator calls its observe) and a listener
+    # (stopped at shutdown). It only reacts to calendar_watcher events, so
+    # it is harmless without listeners.
+    try:
+        meeting_prep = MeetingPrepScheduler(bus)
+        meeting_prep.start()
+        listeners.append(meeting_prep)
+        listener_names.append("meeting_prep")
+        idea_sources.append(meeting_prep)
+    except Exception:
+        logger.exception("Failed to start meeting_prep")
+    # #86: offers to take meeting notes (the app records, only on a click)
+    # and turns a finished recording into one prepared-offer card. The
+    # transcript's summary uses LOCAL engines only (never a cloud one).
+    app.state.meeting_notes = None
+    try:
+        from events.meeting_notes import MeetingNotes  # noqa: WPS433
+
+        meeting_notes = MeetingNotes(bus, evaluators=[
+            (role, make_detection_evaluator(
+                eng, system_prompt="Summarize; reply with one JSON object only."))
+            for role, eng in (("main", engine), ("analysis", analysis_engine),
+                              ("drafting", drafting_engine))
+            if eng is not None
+        ])
+        meeting_notes.start()
+        listeners.append(meeting_notes)
+        listener_names.append("meeting_notes")
+        idea_sources.append(meeting_notes)
+        app.state.meeting_notes = meeting_notes
+    except Exception:
+        logger.exception("Failed to start meeting_notes")
+    # #79: what happens to each suggestion, and every card decision.
+    idea_outcomes = OutcomeStore(_store_path("AGENT_IDEA_OUTCOMES_PATH", default_outcomes_path()))
+    approval_decisions = DecisionLog(
+        _store_path("AGENT_APPROVAL_DECISIONS_PATH", default_decisions_path())
+    )
+    # #88: the user's own "watch for X, offer Y" rules: an idea source (the
+    # orchestrator calls its observe) and a listener (time watches tick).
+    from ai import watches as watches_mod  # noqa: WPS433
+
+    watch_store = watches_mod.WatchStore()
+    try:
+        watch_source = watches_mod.WatchSource(bus, watch_store, decisions=approval_decisions)
+        watch_source.start()
+        listeners.append(watch_source)
+        listener_names.append("watches")
+        idea_sources.append(watch_source)
+    except Exception:
+        logger.exception("Failed to start watches")
+    app.state.watches = watch_store
+    app.state.watch_compiler = watches_mod.Compiler(
+        make_detection_evaluator(detection_engine, system_prompt=watches_mod.COMPILE_SYSTEM_PROMPT),
+        role="detection",
+    )
+    # Rarely-kept judged sources get a higher judge bar and a longer cooldown.
+    for source in idea_sources:
+        if isinstance(source, (OpenHelpSuggester, FrictionDetector)):
+            source.outcomes = idea_outcomes
     orchestrator = Orchestrator(
         engine=engine,
         event_bus=bus,
@@ -329,6 +436,87 @@ async def lifespan(app: FastAPI):
     orchestrator.declined_matcher = DeclinedIdeaMatcher(
         idea_feedback, judge=make_sync_judge(detection_engine),
     )
+    orchestrator.idea_outcomes = idea_outcomes
+    orchestrator.approval_decisions = approval_decisions
+    # #83: every approved side-effecting call, with Undo where it can.
+    from ai import action_journal  # noqa: WPS433
+
+    app.state.action_journal = action_journal.ActionJournal(
+        _store_path("AGENT_ACTIONS_DB", action_journal.default_path()), outcomes=idea_outcomes,
+    )
+    orchestrator.action_journal = app.state.action_journal
+    # #90: generated-tool health; repeated failures offer a repair.
+    from ai import tool_health  # noqa: WPS433
+
+    app.state.tool_health = tool_health.ToolHealthLog(
+        _store_path("AGENT_TOOL_HEALTH_PATH", tool_health.default_path()), state=idea_state,
+    )
+    orchestrator.tool_health = app.state.tool_health
+    # #87: hold offers at bad moments, the daily cap, the Inbox and a real
+    # Pause (listeners keep running).
+    from ai.delivery import Delivery, default_held_path, default_settings  # noqa: WPS433
+
+    def _broadcast_status() -> None:
+        try:
+            orchestrator._schedule(orchestrator._send(_status_frame()))
+        except Exception:
+            logger.exception("status broadcast after a delivery change failed")
+
+    delivery = Delivery(
+        default_held_path(), settings=default_settings(), outcomes=idea_outcomes,
+        gate=_delivery_gate(), on_change=_broadcast_status,
+    )
+    orchestrator.delivery = delivery
+    app.state.delivery = delivery
+    # #78: standing rules ("always do this"): offers after 5 clean
+    # approvals, runs without a card (journaled, Undo), never while paused.
+    from ai import standing_rules as standing_rules_mod  # noqa: WPS433
+
+    standing_rules = standing_rules_mod.StandingRules(
+        standing_rules_mod.default_path(),
+        paused=lambda: bool(orchestrator.delivery is not None and orchestrator.delivery.paused),
+        classify=NextStepSuggester.classify,
+        watch_lookup=watch_store.get,
+    )
+    orchestrator.standing_rules = standing_rules
+    orchestrator.watch_lookup = watch_store.get
+    app.state.action_journal.add_undo_listener(standing_rules.on_undo)
+    app.state.standing_rules = standing_rules
+
+    # #84 "Watch me": a recording takes events first (Orchestrator._handle_event).
+    from ai.demonstration import DemonstrationController  # noqa: WPS433
+
+    async def _send_demo_trace(payload: dict[str, Any]) -> None:
+        await orchestrator._send(DemonstrationTrace(
+            seq=orchestrator._next_seq(), timestamp=_now_iso(),
+            payload=DemonstrationTracePayload(**payload),
+        ))
+
+    demonstration = DemonstrationController(
+        publish=bus.push, send=_send_demo_trace,
+        shortcuts=lambda: _shortcut_names_or_none(),
+    )
+    orchestrator.demonstration = demonstration
+    app.state.demonstration = demonstration
+
+    # #85 iPhone remote (off by default, 7c): the own Messages thread can
+    # ask, and answer a mirrored card with "yes <code>".
+    from events.remote_channel import RemoteChannel  # noqa: WPS433
+
+    remote = RemoteChannel(bus, paused=lambda: bool(delivery.paused))
+    remote.attach_orchestrator(orchestrator, asyncio.get_running_loop())
+    orchestrator.remote_channel = remote
+    app.state.remote_channel = remote
+    if _listeners_enabled():
+        try:
+            remote.start()
+            listeners.append(remote)
+            listener_names.append("remote_channel")
+        except Exception:
+            logger.exception("Failed to start the remote channel")
+
+    # #89: read_front_window answers only in a turn the user started.
+    screen_text.set_turn_kind_provider(lambda: getattr(orchestrator, "_turn_kind", ""))
     set_meta_tool_context(
         orchestrator=orchestrator,
         engine=engine,
@@ -339,7 +527,29 @@ async def lifespan(app: FastAPI):
         orchestrator.load_dynamic_tools()
     except Exception:
         logger.exception("load_dynamic_tools at startup failed")
+    # #69: other apps' local MCP servers (stdio). Tools stay off until the
+    # user enables them in Tool Manager, and stay gated unless marked.
+    from ai.mcp_client import McpManager, attach_to_orchestrator  # noqa: WPS433
+
+    mcp_manager = McpManager()
+    try:
+        attach_to_orchestrator(mcp_manager, orchestrator)
+        await asyncio.to_thread(mcp_manager.start, 20)
+    except Exception:
+        logger.exception("MCP manager failed to start")
+    app.state.mcp_manager = mcp_manager
     await orchestrator.start()
+    delivery_task = asyncio.create_task(delivery.run_release_loop(bus), name="delivery-release")
+
+    # #75: once a day, mine the activity history for routines and offer
+    # one through the idea pipeline (source "routine").
+    routine_ideas: Optional[RoutineIdeaSource] = None
+    if _listeners_enabled() and os.environ.get("AGENT_ROUTINE_IDEAS", "1") != "0":
+        routine_ideas = RoutineIdeaSource(
+            event_bus=bus, state=idea_state, feedback=idea_feedback,
+            shortcuts=_shortcut_names_or_none,
+        )
+        routine_ideas.start()
 
     setup_scanner: Optional[SetupScanner] = None
     if _listeners_enabled() and os.environ.get("AGENT_SETUP_SCAN", "1") != "0":
@@ -366,17 +576,37 @@ async def lifespan(app: FastAPI):
     app.state.memory = memory
     app.state.orchestrator = orchestrator
     app.state.idea_feedback = idea_feedback
+    app.state.idea_outcomes = idea_outcomes
+    app.state.approval_decisions = approval_decisions
     app.state.pattern_recognizer = pattern_recognizer
     app.state.listeners = listeners
     # #65: the run-now route uses the scheduler when it is running.
     app.state.daily_brief = next(
         (l for l in listeners if isinstance(l, DailyBriefScheduler)), None
     )
+    # #73 / #77: offers after the scheduled brief share the idea cooldowns
+    # and the declined-idea store.
+    if app.state.daily_brief is not None:
+        app.state.daily_brief.attach_ideas(idea_state, idea_feedback)
     app.state.listener_names = listener_names
 
     try:
         yield
     finally:
+        delivery_task.cancel()
+        try:
+            await delivery_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        if routine_ideas is not None:
+            try:
+                await routine_ideas.stop()
+            except Exception:
+                logger.exception("Error stopping routine ideas")
+        try:
+            await asyncio.to_thread(app.state.mcp_manager.stop)
+        except Exception:
+            logger.exception("Error stopping MCP servers")
         if setup_scanner is not None:
             try:
                 await setup_scanner.stop()
@@ -392,7 +622,12 @@ async def lifespan(app: FastAPI):
             memory.close()
         except Exception:
             logger.exception("Error closing memory")
+        try:
+            app.state.action_journal.close()
+        except Exception:
+            logger.exception("Error closing the action journal")
         set_default_memory(None)
+        screen_text.set_turn_kind_provider(None)
         try:
             import tools.meta_tool_generator as _mg  # noqa: WPS433
             _mg._ORCHESTRATOR = None  # type: ignore[attr-defined]
@@ -408,20 +643,84 @@ app = FastAPI(title="agent-daemon", version="0.1.0", lifespan=lifespan)
 app.add_middleware(AuthMiddleware)
 # Wave 8 routers (todo rule 12): declined ideas (#56), permissions (#59),
 # tool detail (#61). The app-wide AuthMiddleware covers them.
+from routes import activity as activity_routes  # noqa: E402
 from routes import daily_brief as daily_brief_routes  # noqa: E402
 from routes import ideas as ideas_routes  # noqa: E402
+from routes import mcp as mcp_routes  # noqa: E402
+from routes import meeting_prep as meeting_prep_routes  # noqa: E402
+from routes import outcomes as outcomes_routes  # noqa: E402
 from routes import permissions as permissions_routes  # noqa: E402
+from routes import preferences as preferences_routes  # noqa: E402
+from routes import providers as providers_routes  # noqa: E402
 from routes.tool_detail import router as tool_detail_router  # noqa: E402
 
 app.include_router(daily_brief_routes.router)
 app.include_router(ideas_routes.router)
 app.include_router(permissions_routes.router)
 app.include_router(tool_detail_router)
+# Wave 13: outcomes (#79), activity history (#75), meeting prep (#71),
+# MCP servers (#69).
+app.include_router(outcomes_routes.router)
+app.include_router(activity_routes.router)
+app.include_router(meeting_prep_routes.router)
+app.include_router(mcp_routes.router)
+# Wave 14 (#72): learned preferences.
+app.include_router(preferences_routes.router)
+# Wave 15: History + Undo (#83), privacy ledger (#82), delivery / Inbox /
+# Pause (#87), watches (#88), tool health + repair (#90).
+from routes import actions as actions_routes  # noqa: E402
+from routes import delivery as delivery_routes  # noqa: E402
+from routes import egress as egress_routes  # noqa: E402
+from routes import tool_health as tool_health_routes  # noqa: E402
+from routes import watches as watch_routes  # noqa: E402
+
+app.include_router(actions_routes.router)
+app.include_router(egress_routes.router)
+app.include_router(delivery_routes.router)
+app.include_router(watch_routes.router)
+app.include_router(tool_health_routes.router)
+# Wave 16: standing rules (#78), iPhone remote (#85), meeting notes (#86).
+from routes import meeting_notes as meeting_notes_routes  # noqa: E402
+from routes import remote as remote_routes  # noqa: E402
+from routes import rules as rules_routes  # noqa: E402
+
+app.include_router(rules_routes.router)
+app.include_router(remote_routes.router)
+app.include_router(meeting_notes_routes.router)
+# #97: provider presets (List models, Test).
+app.include_router(providers_routes.router)
+# #93: first-run engine choice.
+from routes import first_run as first_run_routes  # noqa: E402
+
+app.include_router(first_run_routes.router)
 
 
 def _next_seq() -> int:
     app.state.seq += 1
     return app.state.seq
+
+
+def _delivery_gate() -> Any:
+    """#87's busy checks; ``AGENT_DELIVERY_BUSY_CHECKS=0`` (tests) turns off
+    the calendar / screen-share / typing checks (Pause still works)."""
+    if os.environ.get("AGENT_DELIVERY_BUSY_CHECKS", "1").strip() != "0":
+        return None
+    from ai.delivery import BusyGate  # noqa: WPS433
+
+    return BusyGate(calendar=lambda now: [], processes=set, seconds_since_key=lambda: 1e9)
+
+
+def _store_path(env_key: str, default: Path) -> Path:
+    """``env_key`` overrides a ``~/.bot-inator`` store path (tests)."""
+    override = os.environ.get(env_key, "").strip()
+    return Path(override).expanduser() if override else default
+
+
+def _shortcut_names_or_none() -> list[str]:
+    """The user's Shortcut names for routine mapping ([] on any failure)."""
+    from tools.shortcuts import _shortcut_names  # noqa: WPS433
+
+    return _shortcut_names()
 
 
 async def _calendar_reader_if_granted() -> list[Any]:
@@ -497,11 +796,16 @@ async def list_tools() -> list[dict[str, Any]]:
             continue
         seen.add(name)
         is_generated = name in getattr(orchestrator, "_dynamic_tool_names", set())
-        rows.append({
+        row = {
             "name": name,
             "description": _description_for_tool(tool_obj),
             "is_generated": is_generated,
-        })
+        }
+        mcp = getattr(orchestrator, "mcp_manager", None)
+        if mcp is not None and mcp.is_mcp_tool(name):
+            # #69: another app's tool, managed in the MCP servers section.
+            row["kind"] = "mcp"
+        rows.append(row)
 
     generated_dir = settings.generated_tools_dir
     if generated_dir.exists():
@@ -569,7 +873,7 @@ class SettingsUpdate(BaseModel):
 
     ``groq_api_key``: omit or ``null`` keeps the saved key, ``""`` clears it.
     ``provider_<role>``: ``""`` (or ``"default"``) means "same as
-    ``provider``"; otherwise ``"local"`` or ``"groq"``.
+    ``provider``"; otherwise ``"local"`` or a preset id (#97).
     """
 
     provider: Optional[str] = None
@@ -582,6 +886,23 @@ class SettingsUpdate(BaseModel):
     groq_drafting_model: Optional[str] = None
     # Let cloud engines see email and message text (#52). Applies at once.
     cloud_personal_text: Optional[bool] = None
+    # #97: per-preset key, base URL and models, keyed by preset id. Groq's
+    # entries are the same settings as the ``groq_*`` fields above.
+    preset_settings: Optional[dict[str, "PresetUpdate"]] = None
+
+
+class PresetUpdate(BaseModel):
+    """One preset's fields in ``PUT /api/settings``. ``None`` keeps the
+    saved value, ``""`` clears it (back to the preset default)."""
+
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    main_model: Optional[str] = None
+    analysis_model: Optional[str] = None
+    drafting_model: Optional[str] = None
+
+
+SettingsUpdate.model_rebuild()
 
 
 # Settings-file key for ``cloud_personal_text`` (same name as the env var).
@@ -635,6 +956,85 @@ def _key_hint(key: str) -> str:
     return f"…{key[-4:]}" if len(key) >= 8 else ""
 
 
+def _preset_fields(preset: providers.Preset) -> tuple[tuple[str, str], ...]:
+    """(field in ``PresetUpdate``, env/settings-file key) for ``preset``."""
+    return (
+        ("api_key", preset.key_env()),
+        ("api_base", preset.base_env()),
+        *((f"{role}_model", preset.model_env(role)) for role in _ENGINE_ROLES),
+    )
+
+
+def _preset_values(
+    preset: providers.Preset, overlay: Optional[dict[str, str]] = None
+) -> dict[str, str]:
+    """The values ``preset`` gets on the next start (blank → its default).
+
+    Precedence: shell export, then ``overlay`` (unsaved updates), then the
+    settings file, then this process's environment (``.env``)."""
+    saved_file = user_settings.read()
+    overlay = overlay or {}
+    out: dict[str, str] = {}
+    for field_name, env_key in _preset_fields(preset):
+        if env_key in user_settings.shell_exported:
+            value = os.environ.get(env_key, "")
+        elif env_key in overlay:
+            value = overlay[env_key]
+        elif env_key in saved_file:
+            value = saved_file[env_key]
+        else:
+            value = os.environ.get(env_key, "")
+        if not value and field_name == "api_base":
+            value = preset.api_base
+        if not value and field_name.endswith("_model"):
+            value = preset.default_models.get(field_name[: -len("_model")], "")
+        out[field_name] = value
+    return out
+
+
+def _preset_problem(preset: providers.Preset, values: dict[str, str], roles: set[str]) -> str:
+    """Why ``preset`` can't run ``roles`` with ``values``; ``""`` if it can."""
+    if preset.key_required and not values["api_key"]:
+        if preset.id == "groq":
+            return "a Groq API key is required for Groq"
+        return f"{preset.label} needs an API key"
+    if not values["api_base"]:
+        return f"{preset.label} needs a base URL"
+    for role in sorted(roles):
+        if not values[f"{role}_model"]:
+            return f"{preset.label} needs a {role} model: pick one in Settings"
+    return ""
+
+
+def _presets_view(saved_engines: dict[str, str]) -> list[dict[str, Any]]:
+    """Every preset as the Settings picker shows it. Never a full key."""
+    out = []
+    for preset in providers.PRESETS.values():
+        values = _preset_values(preset)
+        roles = {r for r, p in saved_engines.items() if p == preset.id}
+        out.append({
+            "id": preset.id,
+            "label": preset.label,
+            "tested": preset.tested,
+            "docs_url": preset.docs_url,
+            "key_required": preset.key_required,
+            "key_set": bool(values["api_key"]),
+            "key_hint": _key_hint(values["api_key"]),
+            "api_base": values["api_base"],
+            "default_api_base": preset.api_base,
+            "cloud": not providers.is_loopback_url(values["api_base"]),
+            "models": {r: values[f"{r}_model"] for r in _ENGINE_ROLES},
+            "default_models": dict(preset.default_models),
+            "in_use": sorted(roles),
+            "problem": _preset_problem(preset, values, roles) if roles else "",
+            "locked_fields": [
+                f for f, k in _preset_fields(preset)
+                if k in user_settings.shell_exported
+            ],
+        })
+    return out
+
+
 def _settings_view() -> dict[str, Any]:
     """What the Settings window shows. Never returns the full API key.
 
@@ -672,6 +1072,7 @@ def _settings_view() -> dict[str, Any]:
         "groq_main_model": saved["groq_main_model"],
         "groq_analysis_model": saved["groq_analysis_model"],
         "groq_drafting_model": saved["groq_drafting_model"],
+        "presets": _presets_view(saved_engines),
         # Read live by ai.privacy, so it is not part of restart_required.
         "cloud_personal_text": personal_text_allowed(),
         "restart_required": saved != running,
@@ -750,14 +1151,47 @@ async def put_settings(body: SettingsUpdate) -> dict[str, Any]:
             return current[env_key]
         return _running_value(field_name)
 
+    for preset_id, fields in (body.preset_settings or {}).items():
+        preset = providers.PRESETS.get(preset_id)
+        if preset is None:
+            raise HTTPException(status_code=400, detail=f"unknown provider {preset_id!r}")
+        for field_name, env_key in _preset_fields(preset):
+            value = getattr(fields, field_name)
+            if value is None:
+                continue
+            value = value.strip()
+            if field_name == "api_base" and value:
+                if not value.startswith(("http://", "https://")):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{preset.label} base URL must start with http:// or https://",
+                    )
+                if value.rstrip("/") == preset.api_base.rstrip("/"):
+                    value = ""
+            if field_name.endswith("_model") and value == preset.default_models.get(
+                field_name[: -len("_model")]
+            ):
+                value = ""  # don't pin a default, as for Groq below
+            updates[env_key] = value
+
+    # Refuse to save an engine that could not start: a preset in use with
+    # no key, base URL or model for its role (#97; Groq since #26).
     next_values = {f: _next(f, k) for f, k in _SETTING_FIELDS}
-    if (
-        "groq" in _effective_providers(next_values).values()
-        and not next_values["groq_api_key"]
-    ):
-        raise HTTPException(
-            status_code=400, detail="a Groq API key is required for Groq"
-        )
+    next_engines = _effective_providers(next_values)
+    for preset_id in sorted(set(next_engines.values()) - {"local"}):
+        preset = providers.PRESETS[preset_id]
+        values = _preset_values(preset, updates)
+        if preset_id == "groq":
+            values["api_key"] = next_values["groq_api_key"]
+            for role in _ENGINE_ROLES:
+                values[f"{role}_model"] = (
+                    next_values[f"groq_{role}_model"]
+                    or GROQ_DEFAULT_MODELS[f"GROQ_{role.upper()}_MODEL"]
+                )
+        roles = {r for r, p in next_engines.items() if p == preset_id}
+        problem = _preset_problem(preset, values, roles)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
     try:
         await asyncio.to_thread(user_settings.write, updates)
     except (OSError, ValueError) as exc:
@@ -817,6 +1251,17 @@ def _commit_tool_paths(generated_dir: Path, rel_paths: list[str], message: str) 
         logger.exception("git commit of %s failed", rel_paths)
 
 
+def _record_outcome(state: Any, method: str, tool_name: str) -> None:
+    """#79: a generated tool was disabled or deleted (best effort)."""
+    store = getattr(state, "idea_outcomes", None)
+    if store is None:
+        return
+    try:
+        getattr(store, method)(tool_name)
+    except Exception:
+        logger.exception("idea_outcomes.%s failed", method)
+
+
 @app.delete("/api/tools/{tool_name}")
 async def delete_tool(tool_name: str) -> dict[str, Any]:
     """Uninstall an agent-authored tool. Refuses to touch built-ins.
@@ -847,6 +1292,7 @@ async def delete_tool(tool_name: str) -> dict[str, Any]:
     _commit_tool_paths(
         generated_dir, present, f"Removed generated tool: {tool_name}"
     )
+    _record_outcome(app.state, "record_deleted", tool_name)
     if not unloaded:
         # A disabled or quarantined copy: unload sent no tools_changed (#29).
         orchestrator.notify_tools_changed("deleted", [tool_name])
@@ -880,6 +1326,7 @@ async def disable_tool(tool_name: str) -> dict[str, Any]:
         [f"disabled/{tool_name}.py", f"{tool_name}.py"],
         f"Disabled generated tool: {tool_name}",
     )
+    _record_outcome(app.state, "record_disabled", tool_name)
     return {"status": "ok", "tool_name": tool_name, "unloaded": unloaded}
 
 
@@ -935,16 +1382,18 @@ async def _handle_command(app: FastAPI, msg: Command) -> None:
     action = msg.payload.action
     logger.info("Received command: %s", action)
     if action == "pause_listeners":
-        for listener in app.state.listeners:
-            try:
-                listener.stop()
-            except Exception:
-                logger.exception("Failed to pause listener")
-        app.state.listeners = []
-        app.state.listener_names = []
-        app.state.mac_listener = None
+        # #87: a real Pause. Listeners keep running (Resume needs no
+        # restart); the delivery gate holds agent work and drops the rest.
+        duration = getattr(msg.payload, "duration", None) or "indefinite"
+        try:
+            app.state.delivery.pause(duration)
+        except Exception:
+            logger.exception("Failed to pause")
     elif action == "resume_listeners":
-        logger.info("resume_listeners requested; no-op in Phase 1")
+        try:
+            app.state.delivery.resume()
+        except Exception:
+            logger.exception("Failed to resume")
     elif action == "reload_model":
         try:
             await app.state.engine.load()
@@ -956,11 +1405,37 @@ async def _handle_command(app: FastAPI, msg: Command) -> None:
             logger.info("clear_memory removed %s memories", removed)
         except Exception:
             logger.exception("Failed to clear memory")
+        # #75: the activity history is memory too.
+        try:
+            rows = await asyncio.to_thread(activity_store.clear)
+            logger.info("clear_memory removed %s activity rows", rows)
+        except Exception:
+            logger.exception("Failed to clear activity history")
+        # #82: the privacy ledger is a record of what left; Clear empties it.
+        try:
+            rows = await asyncio.to_thread(egress_log.clear)
+            logger.info("clear_memory removed %s privacy-ledger rows", rows)
+        except Exception:
+            logger.exception("Failed to clear the privacy ledger")
     elif action == "reload_dynamic_tools":
         try:
             app.state.orchestrator.load_dynamic_tools()
         except Exception:
             logger.exception("Failed to reload dynamic tools")
+    elif action in ("demonstration_start", "demonstration_stop", "demonstration_cancel"):
+        # #84 "Watch me": the user's own menu item / hotkey.
+        demo = getattr(app.state, "demonstration", None)
+        if demo is None:
+            return
+        try:
+            if action == "demonstration_start":
+                await demo.start()
+            elif action == "demonstration_stop":
+                await demo.stop("user")
+            else:
+                await demo.cancel()
+        except Exception:
+            logger.exception("Failed to run %s", action)
 
 
 def _listener_health() -> dict[str, dict[str, Any]] | None:
@@ -987,8 +1462,27 @@ def _status_frame() -> Status:
             listener_health=_listener_health(),
             engine_providers=settings.engine_providers(),
             cloud_personal_text=personal_text_allowed(),
+            **_delivery_status(),
         ),
     )
+
+
+def _delivery_status() -> dict[str, Any]:
+    """#87: Pause, held and Inbox counts for the status frame ({} if unset)."""
+    delivery = getattr(app.state, "delivery", None)
+    if delivery is None:
+        return {}
+    try:
+        st = delivery.status()
+    except Exception:
+        logger.exception("delivery.status() failed")
+        return {}
+    return {
+        "paused": bool(st.get("paused")),
+        "paused_until": st.get("paused_until"),
+        "held_count": int(st.get("held_count") or 0),
+        "inbox_count": int(st.get("inbox_count") or 0),
+    }
 
 
 # Fields that make a listener-health change worth a new status frame
@@ -1047,6 +1541,65 @@ def _calendar_sender(websocket: WebSocket):
     return send
 
 
+def _screen_text_sender(websocket: WebSocket):
+    """``screen_text_request`` frames go to this one connection only (#89)."""
+
+    async def send(request_id: str, max_chars: int, never_watch: list[str],
+                   timeout_seconds: int) -> None:
+        frame = ScreenTextRequest(
+            seq=_next_seq(),
+            timestamp=_now_iso(),
+            payload=ScreenTextRequestPayload(
+                request_id=request_id, max_chars=max_chars,
+                never_watch=never_watch, timeout_seconds=timeout_seconds,
+            ),
+        )
+        await websocket.send_text(frame.model_dump_json())
+
+    return send
+
+
+_MEETING_FRAMES = {
+    "meeting_record_offer": (MeetingRecordOffer, MeetingRecordOfferPayload),
+    "meeting_record_stop": (MeetingRecordStop, MeetingRecordStopPayload),
+}
+
+
+def _meeting_sender(websocket: WebSocket):
+    """#86: the meeting-notes offer / stop frames, to this connection."""
+
+    async def send(frame_type: str, payload: dict[str, Any]) -> None:
+        cls, payload_cls = _MEETING_FRAMES[frame_type]
+        frame = cls(seq=_next_seq(), timestamp=_now_iso(), payload=payload_cls(**payload))
+        await websocket.send_text(frame.model_dump_json())
+
+    return send
+
+
+# Strong refs to running meeting-audio jobs (a bare create_task can be GC'd).
+_MEETING_JOBS: set[asyncio.Task[Any]] = set()
+
+
+async def _process_meeting_audio(meeting_notes: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """#86: transcript / audio -> one card. Anything but a card is told to
+    the user as a notification (the audio is deleted either way)."""
+    try:
+        result = await meeting_notes.process(payload)
+    except Exception as exc:
+        logger.exception("meeting notes: processing failed")
+        result = {"status": "error", "reason": str(exc)[:300]}
+    if result.get("status") != "offered":
+        try:
+            from tools.show_notification import show_notification  # noqa: WPS433
+
+            await asyncio.to_thread(
+                show_notification, "Meeting notes", str(result.get("reason") or "No notes."),
+            )
+        except Exception:
+            logger.exception("meeting notes notification failed")
+    return result
+
+
 @app.websocket("/ws/stream")
 async def ws_stream(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -1076,6 +1629,17 @@ async def ws_stream(websocket: WebSocket) -> None:
     calendar_access.app_bridge.connect(
         conn_id, _calendar_sender(websocket), asyncio.get_running_loop(),
     )
+    # #89: this connection may serve read_front_window once it reports
+    # ``screen_text_status``.
+    screen_text.bridge.connect(
+        conn_id, _screen_text_sender(websocket), asyncio.get_running_loop(),
+    )
+    # #86: the meeting recorder lives in the app.
+    meeting_notes = getattr(app.state, "meeting_notes", None)
+    if meeting_notes is not None:
+        meeting_notes.link.connect(
+            conn_id, _meeting_sender(websocket), asyncio.get_running_loop(),
+        )
 
     try:
         while True:
@@ -1097,6 +1661,25 @@ async def ws_stream(websocket: WebSocket) -> None:
                 calendar_access.app_bridge.set_status(
                     conn_id, msg.payload.authorization,
                 )
+            elif isinstance(msg, ScreenTextResponse):
+                screen_text.bridge.submit_response(conn_id, msg.payload.model_dump())
+            elif isinstance(msg, ScreenTextStatus):
+                screen_text.bridge.set_status(conn_id, msg.payload.accessibility_trusted)
+            elif isinstance(msg, DemonstrationDraft):
+                demo = getattr(app.state, "demonstration", None)
+                if demo is not None:
+                    await demo.draft(msg.payload.sentence, msg.payload.removed_step_ids)
+            elif isinstance(msg, MeetingRecordState):
+                if meeting_notes is not None:
+                    meeting_notes.on_record_state(conn_id, msg.payload.model_dump())
+            elif isinstance(msg, MeetingAudioReady):
+                if meeting_notes is not None:
+                    task = asyncio.create_task(
+                        _process_meeting_audio(meeting_notes, msg.payload.model_dump()),
+                        name="meeting-notes",
+                    )
+                    _MEETING_JOBS.add(task)
+                    task.add_done_callback(_MEETING_JOBS.discard)
             elif isinstance(msg, Command):
                 await _handle_command(app, msg)
             elif isinstance(msg, UserMessage):
@@ -1107,6 +1690,8 @@ async def ws_stream(websocket: WebSocket) -> None:
                         metadata={
                             "event_id": msg.payload.message_id,
                             "text": msg.payload.text,
+                            # #74: quick-ask context, this turn only.
+                            "context": msg.payload.context.model_dump(exclude_none=True) if msg.payload.context else None,
                         },
                     )
                 )
@@ -1118,3 +1703,6 @@ async def ws_stream(websocket: WebSocket) -> None:
         health_task.cancel()
         orchestrator.remove_subscriber(_ws_send)
         calendar_access.app_bridge.disconnect(conn_id)
+        screen_text.bridge.disconnect(conn_id)
+        if meeting_notes is not None:
+            meeting_notes.link.disconnect(conn_id)

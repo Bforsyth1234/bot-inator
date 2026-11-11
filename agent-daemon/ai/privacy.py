@@ -11,7 +11,8 @@ user never typed to the assistant:
 * iMessage text (``imessage_received`` ``metadata.text``),
 * email subjects (``mail_received`` ``metadata.subject``),
 * email bodies and subjects returned by ``read_email``,
-* the same text inside built-in follow-up ``event_details`` (#32).
+* the same text inside built-in follow-up ``event_details`` (#32),
+* calendar attendees (``event_starting_soon`` ``metadata.attendees``, #80).
 
 Not covered (decision scope, unchanged from before #31): sender handles and
 addresses (the agent needs them to act), window titles, file paths, app
@@ -42,6 +43,14 @@ OPT_IN_ENV = "AGENT_CLOUD_PERSONAL_TEXT"
 PERSONAL_EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "imessage_received": ("text",),
     "mail_received": ("subject",),
+    # #80: calendar attendees (names and addresses of other people). The
+    # open-help source dumps event metadata into the detection prompt.
+    "event_starting_soon": ("attendees",),
+    # The same people (and mail with them) in the gathered prep (#71/#80),
+    # and the brief's new waiting-on / look-ahead sections (#73/#77), as the
+    # idea sources' detection prompts would dump them.
+    "meeting_prep": ("attendees", "mail"),
+    "daily_brief": ("waiting_on", "lookahead"),
 }
 # ``read_email`` result keys holding personal text.
 PERSONAL_EMAIL_FIELDS: tuple[str, ...] = ("subject", "body")

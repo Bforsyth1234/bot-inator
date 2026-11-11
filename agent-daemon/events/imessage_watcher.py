@@ -22,11 +22,12 @@ import logging
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from schemas.ws_messages import NOTICE_EVENT_TYPE, full_disk_access_notice
 
 from .event_bus import ContextEvent, EventBus
+from .remote_channel import excluded_handle, same_handle
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +54,12 @@ class IMessageWatcher:
         bus: EventBus,
         db_path: Path | str = DEFAULT_DB_PATH,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
+        exclude_handle: Callable[[], Optional[str]] = excluded_handle,
     ) -> None:
         self._bus = bus
+        # #85: the own thread (the iPhone remote's) is not an inbound
+        # iMessage; its echo rows would start a normal iMessage turn.
+        self._exclude_handle = exclude_handle
         self._db_path = Path(db_path).expanduser()
         self._poll_interval = poll_interval
         self._thread: Optional[threading.Thread] = None
@@ -171,9 +176,15 @@ class IMessageWatcher:
             if max_row and int(max_row[0]) > self._last_rowid:
                 self._last_rowid = int(max_row[0])
             return
+        try:
+            own = self._exclude_handle()
+        except Exception:  # pragma: no cover - defensive
+            own = None
         for rowid, text, sender in rows:
             self._last_rowid = max(self._last_rowid, int(rowid))
             if not text:
+                continue
+            if own and same_handle(sender, own):
                 continue
             event = ContextEvent(
                 event_type="imessage_received",

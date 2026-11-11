@@ -1,4 +1,10 @@
-"""Groq HTTP engine wrapper. Mirrors :class:`MLXEngine`'s public surface.
+"""OpenAI-compatible HTTP engine (#97). Mirrors :class:`MLXEngine`'s surface.
+
+One class serves every cloud or local-server preset in :mod:`providers`
+(Groq, OpenAI, Anthropic, Gemini, xAI, OpenRouter, Ollama / LM Studio,
+custom). The class keeps its old name ``GroqEngine`` (existing imports,
+tests and the egress-ledger hook points use it) with
+``OpenAICompatibleEngine`` as an alias; the module keeps its old name too.
 
 The orchestrator and meta-tool generator are written against a duck-typed
 engine interface (``generate``, ``generate_sync``, ``generate_chat_sync``,
@@ -23,7 +29,11 @@ DEFAULT_API_BASE = "https://api.groq.com/openai/v1"
 
 
 class GroqEngine:
-    """Async wrapper around Groq's OpenAI-compatible chat completions API.
+    """Async wrapper around an OpenAI-compatible chat completions API.
+
+    Named ``GroqEngine`` for history (the egress-ledger hook points and the
+    wave-15 wiring refer to ``GroqEngine._chat_completion``); new code uses
+    the ``OpenAICompatibleEngine`` alias below.
 
     There is no model to "load" — every call is a network round-trip — so
     :meth:`load`/:meth:`unload`/:meth:`swap` are cheap bookkeeping
@@ -43,10 +53,25 @@ class GroqEngine:
         api_key: Optional[str] = None,
         api_base: str = DEFAULT_API_BASE,
         request_timeout: float = 60.0,
+        role: Optional[str] = None,
+        provider: str = "groq",
+        label: str = "Groq",
+        key_env: str = "GROQ_API_KEY",
+        key_required: bool = True,
+        token_param: str = "max_tokens",
     ) -> None:
         self.model_name: str = model_name
+        # #82: which engine this is (main / analysis / drafting / detection),
+        # for the privacy ledger's rows.
+        self.role: Optional[str] = role
         self.api_key: Optional[str] = api_key
         self.api_base: str = api_base
+        self.provider: str = provider
+        self.label: str = label
+        self.key_env: str = key_env
+        self.key_required: bool = key_required
+        # ``max_completion_tokens`` for OpenAI's reasoning models (#97).
+        self.token_param: str = token_param
         self.request_timeout: float = request_timeout
         self._client: Any = None
         self._lock: asyncio.Lock = asyncio.Lock()
@@ -118,7 +143,7 @@ class GroqEngine:
                 max_tokens,
             )
         except Exception:
-            logger.exception("evaluate_event (groq) failed")
+            logger.exception("evaluate_event (%s) failed", self.provider)
             return ""
         return THINK_BLOCK_RE.sub("", raw or "").strip()
 
@@ -127,20 +152,31 @@ class GroqEngine:
     async def _load_locked(self) -> None:
         if self._loaded:
             return
-        if not self.api_key:
+        if self.key_required and not self.api_key:
             raise RuntimeError(
-                "Groq provider selected but GROQ_API_KEY is not set"
+                f"{self.label} provider selected but {self.key_env} is not set"
+            )
+        if not self.model_name:
+            raise RuntimeError(
+                f"{self.label} provider selected but no model name is set"
             )
         try:
             from openai import OpenAI  # type: ignore
         except ImportError as exc:  # pragma: no cover - dep not installed
             raise RuntimeError(
-                "openai package is not installed; cannot use Groq provider"
+                f"openai package is not installed; cannot use {self.label}"
             ) from exc
         with GroqEngine._client_lock:
-            self._client = OpenAI(api_key=self.api_key, base_url=self.api_base)
+            # The OpenAI client refuses an empty key; a local server
+            # (Ollama, LM Studio) ignores whatever is sent.
+            self._client = OpenAI(
+                api_key=self.api_key or "not-needed", base_url=self.api_base
+            )
         self._loaded = True
-        logger.info("Groq engine ready: model=%s base=%s", self.model_name, self.api_base)
+        logger.info(
+            "%s engine ready: model=%s base=%s",
+            self.label, self.model_name, self.api_base,
+        )
 
     def _ensure_loaded_blocking(self) -> None:
         loop = asyncio.new_event_loop()
@@ -159,16 +195,55 @@ class GroqEngine:
     ) -> str:
         client = self._client
         if client is None:
-            raise RuntimeError("Groq client not initialised; call load() first")
-        with self.generation_lock:
-            resp = client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                max_tokens=max_tokens,
-                timeout=self.request_timeout,
+            raise RuntimeError(
+                f"{self.label} client not initialised; call load() first"
             )
+        from . import egress_log
+
+        # #82: one privacy-ledger row per call (what was sent, to where).
+        request = {"model": self.model_name, "messages": messages, self.token_param: max_tokens}
+        with self.generation_lock:
+            try:
+                resp = client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    timeout=self.request_timeout,
+                    **{self.token_param: max_tokens},
+                )
+            except Exception as exc:
+                egress_log.record_completion(
+                    role=self.role, model=self.model_name, api_base=self.api_base,
+                    request=request, error=exc,
+                )
+                raise
+        egress_log.record_completion(
+            role=self.role, model=self.model_name, api_base=self.api_base,
+            request=request, response=resp,
+        )
         try:
             return resp.choices[0].message.content or ""
         except (AttributeError, IndexError):
-            logger.warning("Groq response missing content: %r", resp)
+            logger.warning("%s response missing content: %r", self.label, resp)
             return ""
+
+
+# The name new code uses (#97); same class.
+OpenAICompatibleEngine = GroqEngine
+
+
+def build_engine(settings: Any, provider: str, role: str) -> OpenAICompatibleEngine:
+    """The engine for ``role`` on preset ``provider`` (#97)."""
+    import providers as _providers  # noqa: WPS433 (top-level daemon module)
+
+    preset = _providers.PRESETS[provider]
+    return OpenAICompatibleEngine(
+        settings.provider_model(provider, role),
+        api_key=settings.provider_api_key(provider),
+        api_base=settings.provider_api_base(provider),
+        provider=provider,
+        label=preset.label,
+        key_env=preset.key_env(),
+        key_required=preset.key_required,
+        token_param=preset.token_param,
+        role=role,
+    )

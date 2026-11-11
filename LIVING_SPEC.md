@@ -11,6 +11,116 @@ wherever it can. It observes system events, reasons about them with an
 LLM, and proposes tools and actions that the user approves or rejects
 from a MenuBar UI. No background action without consent.
 
+**Standing rules (amendment to "no background action without consent",
+user decision 2026-11-10, item #78).** Consent is given per action, on an
+approval card, or by a standing rule. A standing rule is the only way a
+side-effecting action may run without a card, and only within these
+limits:
+
+1. The user creates it. The app may offer a rule only after the user has
+   approved the same tool for the same kind of trigger at least 5 times
+   with no edits and no denials. A model can never create, change or
+   enable a rule.
+2. It is narrow: one trigger kind, one tool, one fixed argument pattern.
+3. It can never cover: sending or drafting messages or email,
+   `generate_custom_tool`, generated tools, `run_shortcut`, deleting
+   anything, or any action that uses the network.
+4. It runs without a model: matching and arguments are deterministic, so
+   text in a file, email or web page cannot trigger or steer it.
+5. The user can see and revoke it: every rule is listed in Settings with
+   on/off and delete; every automatic run posts a notification with Undo
+   and is logged; a rule that is undone twice switches itself off.
+
+Everything outside these limits still needs an approval card.
+
+Built (#78, wave 16; `ai/standing_rules.py`, `routes/rules.py`, Settings >
+Standing rules). The narrower choices it made, part of the limits: only
+`move_file`, `create_reminder`, `create_event` and `create_note` (the
+built-ins History can undo) may have a rule; triggers are `file` and
+`mail_received` only, a mail rule matches the sender header only (never
+words in the email, mailing lists left out); the only placeholders are
+`{path}` (exactly `move_file`'s `src`) and `{date}`; a move rule keeps the
+file's name and files only into ordinary home folders (no dot folders,
+`~/Library`, `~/.ssh`, `~/.bot-inator`). An offer is raised only from a card
+whose arguments came from structured data (the triggering file's path, a
+one-action prepared offer, a watch's own spec), is listed in Settings and
+announced by an "Always do this?" notice; a rule exists only after the
+user's accept route re-checks every limit and the clean-approval count. At
+most 20 rules, 20 runs per rule a day, one run per file / message. The run
+hook sits in `Orchestrator._handle_event` after #84 recording and #87
+delivery (a paused, held or capped event never reaches a rule) and before
+any turn: deterministic match, fixed arguments, the built-in function
+itself, journaled (#83, `source="rule"`), then a thought, a "Done
+automatically" notice with one-click Undo and a macOS notification. A run
+whose tool failed is not journaled and the normal card path goes on.
+Store `~/.bot-inator/standing_rules.json` (0600, `AGENT_STANDING_RULES_PATH`).
+
+**iPhone remote (amendment to 7a and 7c, user decisions 2026-11-10, item
+#85).** 7a: a reply `yes <code>` / `no <code>` sent from the user's own
+devices (`is_from_me = 1`, iMessage service, in the own thread only) is
+consent for the one card carrying that code. Codes are single use and end
+with the request. Code review, `generate_custom_tool`, `run_shortcut`, cards
+with origin notes (#81) and cards with several actions are never approvable
+from the phone. The app's texts to the own thread are chat-channel output,
+not a tool call: `send_imessage` stays unregistered and the model never
+picks a recipient. 7c: answer and card text may travel through Apple's
+iMessage to the user's own handle only while the remote is on
+(`AGENT_REMOTE`, off by default); every message is recorded in the privacy
+ledger (kind `imessage`), at most 20 an hour. A card is mirrored only while
+the Mac is idle (`AGENT_REMOTE_IDLE_MINUTES`, default 10) or when the turn
+came from the phone, and then waits up to 15 minutes; the phone's answer
+resolves the same future the Mac card waits on, and an `approval_resolved`
+frame closes the Mac card.
+
+**Watch me (#84).** A recording is explicit (menu item or ⌃⌥⌘R) and stops
+by itself after 5 minutes. While it runs it takes events first, before #87
+delivery and any rule: step events are recorded (memory only, never the
+activity history), chat passes through, everything else is deferred and
+released when it stops. The reviewed trace + one sentence become a spec
+(`pattern_detected`, source `demonstration`) that goes through the normal
+idea card, code review (7b) and sandbox; nothing is replayed. Refused when
+the main or drafting engine is a cloud one without the personal-text opt-in.
+
+**Meeting notes (#86).** Off by default (`AGENT_MEETING_NOTES`). The daemon
+only OFFERS ("Take notes for <title>?"); the app records only after the
+user's click. Audio stays in `~/.bot-inator/meetings/audio/` and is deleted
+once a transcript exists and on every failure; the transcript (0600) never
+goes to a cloud engine, whatever the provider or the personal-text opt-in
+(the summary uses local engines or local rules only). The result is ONE
+prepared-offer card (reminders, a follow-up event, an unsent draft, a note);
+nothing runs before it is approved.
+
+**Undo is a user click, not a bypass (#83).** History (`ai/action_journal.py`)
+records every side-effecting call that ran after its card (and each action of
+an approved prepared offer). Undo reverses `move_file`, `create_event`,
+`create_reminder` and `create_note` only after checking the item is unchanged
+since ("Changed since, not undone" otherwise); it is the user's click, with
+no card, and never runs a tool the model chose.
+
+**The injection shield (#81).** Text the agent reads (an email, a web page,
+a file, an iMessage, an invite, an MCP result, quick-ask's selected or
+clipboard text) can hold instructions. `ai/taint.py` marks a turn,
+deterministically and with no model, when its event carries outside text
+(`mail_received`, `imessage_received`, a `pattern_detected` idea built from
+one: `mail_*`, `tracking_number`, `plan_with_time`, `lookahead_*`,
+`meeting_with_video_link`, or an idea whose `source_event_type` is mail /
+iMessage / calendar) or when a tool that returns outside text ran in it
+(`read_email`, `read_active_tab_text`, `summarize_file`, `read_clipboard`,
+`list_events`, `read_front_window`, any MCP tool). In a marked turn a
+read-only tool that writes state (`remember_preference`, an MCP tool the
+user marked "runs without asking") loses its bypass and raises a card. The
+shield can only ADD a card, never remove one. Every card in a marked turn
+carries `origin_notes`: what was read, and for each target argument (`to`,
+`path`, `url`, `preference`, ...) whether it came "from you", "from the
+email, not from you", or was written by the assistant. The text kept for
+matching is a bounded in-memory copy, dropped at the next turn.
+
+**Never-watch apps (#87).** Nothing observes an app on the never-watch list
+(`ai.delivery.is_never_watched`; password managers by default, editable in
+Settings > Delivery): no `app_activated` event, no `clipboard_changed`
+event, `read_active_tab_text` refuses it, and #89's `read_front_window`
+sends the same list to the app, which refuses those apps before reading.
+
 **Guiding question.** For every event, or window of events, the LLM asks:
 *"How could I possibly help the user here?"* That question is always
 asked. It is never gated on repetition or on a fixed list of event kinds.
@@ -32,10 +142,38 @@ Known-good follow-ups (`FOLLOW_UPS` in `ai/idea_sources.py`) and the
 repeated-workflow detector (`ai/pattern_recognizer.py`) are seed sources
 of high-confidence ideas. They are not the only ideas allowed.
 
-Inference runs on-device (MLX) by default. Groq cloud inference is an
-opt-in alternative (`AGENT_PROVIDER=groq`, Phase 4.7). With Groq selected,
+Inference runs on-device (MLX) by default. Cloud inference is an opt-in
+alternative: any OpenAI-compatible preset (#97: Groq, OpenAI, Anthropic,
+Gemini, xAI, OpenRouter, custom), first Groq (`AGENT_PROVIDER=groq`, Phase
+4.7). Whether an engine is cloud is decided by its base URL's host, not the
+provider name: a loopback URL (Ollama, LM Studio: the `local_server`
+preset) is local, and its calls are not ledger rows. With a cloud provider selected,
 event summaries, chat and tool drafts leave the machine; nothing else
 about the consent model changes.
+
+**First run (#93).** A fresh install (no `~/.bot-inator/settings.json`)
+starts with no engine loaded and downloads nothing; the app shows the
+first-run screen (`FirstRunView.swift`, `routes/first_run.py`,
+`ai/first_run.py`). It marks Local (24 GB of memory and up) or Cloud key
+(under 24 GB) "Recommended for this Mac" but selects nothing: the user
+picks Local, Cloud key or Mixed (only tool drafts to the cloud), and a
+cloud engine needs their own key. The stock local models download only
+from the screen's Download button. An install with a settings file never
+sees the screen, and its routes refuse (409) once it is answered.
+`AGENT_SKIP_FIRST_RUN=1` turns it off (tests, scripted setups).
+
+**The egress ledger (#82).** Everything that leaves the Mac is recorded in
+`~/.bot-inator/egress.db` (`ai/egress_log.py`, override `AGENT_EGRESS_DB`,
+0600, 90 days): one row per cloud completion (`GroqEngine._chat_completion`
+and the agent loop's Groq client: host, role, model, bytes, tokens, whether
+personal text was sent or replaced), per MCP tool call, per network-enabled
+sandboxed tool run, per `open_url` (host only), and per model download
+(Hugging Face cache growth on an MLX or sentence-transformers load). What
+was sent is kept only with `AGENT_EGRESS_KEEP_TEXT=1` (7 days). A guard test
+(`tests/test_egress_log.py`) fails when a daemon file imports a network
+module without a ledger hook. Settings > Privacy ledger lists it; the menu
+and Debug show today's one-line summary ("Nothing left this Mac today").
+`clear_memory` empties it.
 
 ## 2. Topology
 
@@ -107,8 +245,58 @@ Server → client: `status`, `thought`, `approval_request`,
 Client → server: `approval_response`, `code_approval_response`,
 `command` (`pause_listeners`, `resume_listeners`, `reload_model`,
 `clear_memory`, `reload_dynamic_tools`).
+Wave 15 fields (all optional, absent from older daemons):
+`approval_request.origin_notes` `[str]` (#81) and `reversible` (#83);
+`code_approval_request.previous_code` (#90: a repair's diff base);
+`command.duration` `"1h" | "tomorrow" | "indefinite"` (#87, for
+`pause_listeners`); `status.paused`, `paused_until` (ISO or "indefinite"),
+`held_count`, `inbox_count` (#87; a status frame is broadcast whenever they
+change). `pause_listeners` is a real Pause: listeners keep running, the
+delivery gate holds agent work and drops the rest; `resume_listeners`
+resumes with no restart.
 Calendar (#60): server → client `calendar_request`; client → server
 `calendar_response`, `calendar_status` (see the Calendar flow below).
+Wave 16 frames:
+- **`approval_resolved`** (server → client, #85) `{request_id, outcome:
+  approved | declined | timed_out, note?}`: sent for every card once it is
+  answered (from any window or the phone) or times out; a client still
+  showing that card closes it without answering.
+- `notice.action` may be `{kind: "undo", entry_id}` (#78): the "Done
+  automatically" notice of a standing-rule run; the banner's Undo calls
+  `POST /api/rules/runs/{entry_id}/undo`. `open_settings` keeps
+  `{kind, url}`.
+- **`demonstration_trace`** (server → client, #84) `{recording_id?, state:
+  idle | recording | stopped | drafted | refused, started_at?, ends_at?,
+  stop_reason?, steps: [{id, kind, text}], reason?, tool_name?,
+  deferred_count?}`; **`demonstration_draft`** (client → server)
+  `{sentence ≤ 2000, removed_step_ids}`; `command` actions
+  `demonstration_start` / `demonstration_stop` / `demonstration_cancel`.
+- Meeting notes (#86): server → client **`meeting_record_offer`**
+  `{meeting_id, title, start, end, stop_at, engine: apple | whisper,
+  attendee_count}` (an offer, never a start) and **`meeting_record_stop`**
+  `{meeting_id, reason}`; client → server **`meeting_record_state`**
+  `{meeting_id?, state: idle | started | stopped | failed | declined, title?,
+  stop_at?, microphone, speech_recognition, error?}` (authorization names
+  `not_determined | restricted | denied | authorized`; they feed the
+  Permissions rows) and **`meeting_audio_ready`** `{meeting_id, title?,
+  started_at?, ended_at?, audio_path?, system_audio_path?, transcript_path?,
+  error?, stop_reason?}` (processed in a task; anything but a card is told
+  as a notification).
+- Front window (#89): server → client **`screen_text_request`**
+  `{request_id, max_chars, never_watch, timeout_seconds}` to ONE connection
+  (the one that last sent `screen_text_status`); client → server
+  **`screen_text_response`** `{request_id, ok, app?, bundle_id?, title?,
+  text?, truncated, error?, error_code?, accessibility_trusted?}` and
+  **`screen_text_status`** `{accessibility_trusted}` (on connect and on
+  change). `user_message.context.selection_source` may be `"window"` (no
+  text sent; the daemon reads the window itself).
+Chat: client → server `user_message` `{message_id, text, context?}`.
+`context` (#74, quick-ask panel only; absent from the Chat window and older
+clients) is `{front_app?, window_title?, selection?, selection_source?
+"selection" | "clipboard"}`. `ai/chat_context.py` appends it to that one
+turn's prompt; it is never stored (not in `memory.log_chat`, not in the
+recall query), and under a cloud main engine without the personal-text
+opt-in the selection is replaced by a "kept on this Mac" line (7c).
 
 Thought stages: `event_received` → `analysis` (optional) → `memory`
 (optional) → `reasoning` → `plan` → `tool_result` → `complete`. The
@@ -130,6 +318,42 @@ Approval flow:
 4. Default timeout: 120 s. On timeout or `approved: false`, the wrapper
    returns `{"skipped": True, "reason": "user_denied"}` back into the
    agent loop which surfaces a `no action` thought.
+5. Prepared offers (#76): `approval_request` may carry `actions`
+   (`[{tool, args, enabled, label}]`, `ApprovalAction`; absent = a one-call
+   card). Two or more actions: `tool_name` is `prepared_offer` and the card
+   shows a tick box per action; the response's `edited_args` carries
+   `{"actions": [...]}` back (or plain `{"args","kwargs"}` edits for a
+   one-action card). The bundle card IS the approval: only the ticked
+   actions run, after Approve, through the normal tool functions, and only
+   tools the offer listed (`prepared_offers.BUNDLE_TOOLS`: `move_file`,
+   `create_reminder`, `create_event`, and for #88 watches `draft_email`,
+   `create_note`, `open_app`, `open_url`, `run_shortcut`).
+   Deny or timeout runs nothing. The #79 offer and decision records happen
+   as for any card.
+6. Learned preferences (#72): a call whose tool + trigger kind the user
+   denied 3 times in a row (no approval between) is refused before its card
+   with `user_declined_before`; a `pattern_detected` idea for it is not
+   offered. A preference never lets a call run without its card (7a).
+7. Injection shield (#81, §1): in a marked turn `remember_preference` and
+   user-marked MCP tools raise a card, and every card carries
+   `origin_notes`, shown first on the card in orange ("Shaped by text it
+   read"). A prepared offer built from outside text carries them too.
+8. History (#83): every call that ran after its card is journaled
+   (`ai/action_journal.py`). `reversible` is true for an undoable tool's
+   one-call card (not a bundle, not a card with `origin_notes`); the app
+   shows it as a small panel that keeps the front app's focus.
+9. Right-moment delivery (#87): `Orchestrator._handle_event` asks
+   `ai.delivery.Delivery.decide` before anything else (no thought, no
+   observer, no model call, no activity row while paused). Agent-initiated
+   events (`pattern_detected`, `mail_received`, `imessage_received`, `file`)
+   are held during a timed calendar event, screen sharing, typing (key in the
+   last 3 s) or Pause, and released one at a time when free; a held offer
+   expires after its shelf life (recorded as `expired` in #79, never
+   `timed_out`). Past the daily cap (default 8 cards) an idea goes to the
+   Inbox instead of a window. Chat and quick-ask always run.
+10. Watches (#88): a watch idea (source `watch`, trigger `watch:<id>`)
+   carries a one-action prepared offer with its exact arguments, so the card
+   is filled in and no model runs. Every watch action still needs its card.
 
 Calendar flow (#60): the menu bar app owns EventKit (the daemon's Python
 is silently denied it), and the daemon asks it over this WebSocket.
@@ -148,7 +372,9 @@ is silently denied it), and the daemon asks it over this WebSocket.
    request shows the macOS prompt) and for `request_access`.
 3. The app answers **`calendar_response`** `{request_id, ok, events? |
    event_id? + calendar?, error?, authorization?}`; `main.py` routes it to
-   the bridge. Events are #42 dicts. A disconnect fails pending requests.
+   the bridge. Events are #42 dicts, plus optional `attendees`
+   `[{name, email, is_self}]` (#80; the key is absent when the backend
+   doesn't know, `[]` for no other people). A disconnect fails pending requests.
 4. `ready()` (watcher / setup-scan gate) = the reported status is
    `full_access`; the Permissions `calendars` row reads the same status,
    and its Request click sends `request_access`. No app connected → the
@@ -190,9 +416,49 @@ the bearer token (see Auth above):
 | GET    | `/health`                 | Liveness probe: `{"status":"ok","version":...}`. |
 | GET    | `/api/tools`              | List of every tool the agent knows about.        |
 | DELETE | `/api/tools/{tool_name}`  | Uninstall an agent-authored tool.                |
+| GET    | `/api/outcomes/stats`     | Per-source / per-kind approval + kept rates, each source's adjustment, card-decision summary (#79). |
+| GET    | `/api/outcomes/removal-candidates` | Tools approved ≥ 30 days ago, never run since (#79). |
+| POST   | `/api/outcomes/removal-candidates/{name}/keep` | Stop listing one (#79).      |
+| GET    | `/api/activity`           | Activity-history stats, switch, current routine candidates (#75). |
+| PUT    | `/api/activity`           | `{enabled}`: the history switch (#75).            |
+| DELETE | `/api/activity`           | Forget every activity row (#75).                  |
+| GET/PUT| `/api/meeting-prep`       | `{enabled, minutes_before 1..10, locked_fields}` (#71). |
+| GET    | `/api/preferences/learned` | Preferences learned from card decisions, newest first: `[{id, text, rule, tool_name, trigger_kind, created_at}]` (#72). |
+| DELETE | `/api/preferences/learned/{id}` | Forget one (tombstoned: old decisions don't re-learn it) (#72). |
+| GET    | `/api/mcp/servers`        | MCP servers, their tools and flags, the load cap (#69). |
+| POST   | `/api/mcp/servers`        | Add `{name, command, args, env}` (stdio only) (#69). |
+| DELETE | `/api/mcp/servers/{name}` | Stop and forget a server (#69).                   |
+| POST   | `/api/mcp/servers/{name}/restart` | Restart a server (#69).                   |
+| PATCH  | `/api/mcp/servers/{name}/tools/{tool}` | `{enabled?, runs_without_asking?}` (#69). |
+| GET    | `/api/actions`            | History: journaled actions, newest first, with what can still be undone (#83). |
+| POST   | `/api/actions/{id}/undo`  | Undo one (the user's click; refused when the item changed since) (#83). |
+| GET    | `/api/egress`             | Privacy ledger rows + today's totals + `keep_text` (#82). |
+| GET    | `/api/egress/stats`       | One day's totals (`day=YYYY-MM-DD`) (#82).         |
+| PUT    | `/api/egress`             | `{keep_text}`; off also erases kept text (#82).   |
+| DELETE | `/api/egress`             | Forget every ledger row (#82).                    |
+| GET    | `/api/delivery`           | Pause, held offers, Inbox, cards today, busy checks, `debug_line` (#87). |
+| POST   | `/api/delivery/pause`     | `{duration}` (`1h`, `tomorrow` or `indefinite`) or `{minutes}` (#87). |
+| POST   | `/api/delivery/resume`    | End Pause (#87).                                  |
+| GET    | `/api/delivery/inbox`     | Offers over today's cap (#87).                    |
+| POST   | `/api/delivery/inbox/{id}/open` | Show it now (user-caused: no cap, no hold) (#87). |
+| DELETE | `/api/delivery/inbox/{id}` | Dismiss it (#87).                                |
+| GET/PUT| `/api/delivery/settings`  | `{daily_cap, never_watch}` (#87).                 |
+| POST   | `/api/watches/preview`    | Sentence (one detection-engine call) or spec → `{spec, words, backtest}`; saves nothing (#88). |
+| GET/POST | `/api/watches`          | List / save watches (≤ 20; denied 3× in a row switches one off) (#88). |
+| PATCH/DELETE | `/api/watches/{id}` | `{enabled?, daily_limit?, cooldown_minutes?}` / delete (#88). |
+| GET    | `/api/tool-health`        | Every logged generated tool's health (#90).       |
+| GET    | `/api/rules`              | Standing rules, pending "always do this?" offers, recent automatic runs (#78). |
+| POST   | `/api/rules/offers/{id}/accept` | The user's yes: re-checks every limit, creates the rule (404 / 409) (#78). |
+| POST   | `/api/rules/offers/{id}/dismiss` | "No thanks" (offered again only after 5 more clean approvals) (#78). |
+| PATCH/DELETE | `/api/rules/{id}`   | `{enabled}` only / delete (#78).                  |
+| POST   | `/api/rules/runs/{entry_id}/undo` | Undo one automatic run (two undos switch the rule off) (#78). |
+| GET/PUT| `/api/remote`             | iPhone remote `{enabled, handle, idle_minutes}` (+ limits, `locked_fields`); can't be on without a valid own handle (#85). |
+| GET/PUT| `/api/meeting-notes`      | `{enabled, engine apple / whisper}` (+ `engine_in_use`, `whisper_available`, `notes_dir`, `locked_fields`) (#86). |
+| GET    | `/api/tools/{name}/health` | One tool: status, recent failures, ok runs, repair cooldown, `can_restore` (#90). |
+| POST   | `/api/tools/{name}/restore-previous` | Put back the prior committed version (user click) (#90). |
 
 `GET /api/tools` returns a plain JSON array `[{"name","description",
-"is_generated"}, …]`. The handler walks the orchestrator's live tools
+"is_generated"}, …]`; a loaded MCP tool also has `"kind": "mcp"` (#69). The handler walks the orchestrator's live tools
 list first (built-ins and currently-loaded generated modules together,
 deduplicated by `name`), then scans `agent-daemon/tools/generated/`
 for any cold `.py` files that aren't yet loaded so the Manage Tools
@@ -242,7 +508,8 @@ restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 | `ai/friction.py`              | `FrictionDetector`: copy in A → paste in B loops   |
 |                               | and app ping-pong → judged ideas.                  |
 | `events/mail_watcher.py`      | Mail.app Envelope Index (read-only) → mail_received|
-| `events/calendar_watcher.py`  | Upcoming meetings → event_starting_soon.           |
+| `events/calendar_watcher.py`  | Upcoming meetings → event_starting_soon (with      |
+|                               | `attendees` when known, #80; personal field).      |
 | `events/clipboard_watcher.py` | Clipboard changes → clipboard_changed (app + kind, |
 |                               | never content).                                    |
 | `events/daily_brief.py`       | One `daily_brief` event a day at                   |
@@ -252,15 +519,91 @@ restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 |                               | last-24 h mail headers (no bodies; subjects        |
 |                               | redacted for cloud engines) and due reminders,     |
 |                               | read-only; names a source it can't read; never     |
-|                               | prompts for a permission (#65).                    |
+|                               | prompts for a permission (#65). Sections added in  |
+|                               | wave 14: "Waiting on" (#73, `ai/waiting_on.py`,    |
+|                               | sent mail that asked something, unanswered for     |
+|                               | AGENT_WAITING_ON_DAYS 1..14, default 3) and        |
+|                               | "Look-ahead" (#77, `events/lookahead.py`: travel,  |
+|                               | mail deadlines, clashes in the next 3 days, from   |
+|                               | the brief's own sources; skipped checks named).    |
+|                               | After the SCHEDULED brief only: ≤3 "draft a        |
+|                               | nudge?" `draft_email` ideas (cooldown 7 d per      |
+|                               | message id) and each look-ahead gap's built-in     |
+|                               | offer (cooldown 7 d per gap key; dropped when it   |
+|                               | resembles a declined idea), as `pattern_detected`. |
 | `ai/privacy.py`               | Replaces personal text (iMessage, mail) in cloud   |
 |                               | engines' prompts unless AGENT_CLOUD_PERSONAL_TEXT=1|
+|                               | Also calendar `attendees` (`event_starting_soon`,  |
+|                               | `meeting_prep`) and the brief's `waiting_on` /     |
+|                               | `lookahead` in detection windows (#80). Meeting    |
+|                               | prep drops attendee/sender email addresses (names  |
+|                               | kept) under a cloud main engine (#80).             |
+| `ai/preference_learning.py`   | Learns from the #79 decision log after each card   |
+|                               | (off the event loop): 3 denials of a tool for one  |
+|                               | trigger kind → stop offering it; shortened drafts  |
+|                               | → "keeps drafts short". Saved as memories          |
+|                               | (`kind=preference, source=approval`), recalled with|
+|                               | every prompt; `routes/preferences.py` (#72).       |
+| `ai/prepared_offers.py`       | `Preparer`: read-only preparation before a next-   |
+|                               | step card (documents in Downloads → name, folder,  |
+|                               | reminder; mail invites/deadlines → filled          |
+|                               | `create_event`/`create_reminder`); ≤1 detection    |
+|                               | call, 10 s; any failure = the plain offer. Wired in|
+|                               | `NextStepSuggester(preparer=…)` (#76).             |
 | `ai/permissions.py`           | Permission table + never-prompting checks (#59);   |
 |                               | `GET /api/permissions` in `routes/permissions.py`. |
 | `ai/idea_match.py`            | Declined-idea matching (names, model2vec, judge);  |
 |                               | review/remove via `routes/ideas.py` (#56).         |
 | `routes/tool_detail.py`       | `GET /api/tools/{name}`: summary, when it runs,    |
 |                               | gate, inputs, sandbox, source (#61).               |
+| `ai/idea_outcomes.py`         | `OutcomeStore` (`~/.bot-inator/idea_outcomes.json`,|
+|                               | `AGENT_IDEA_OUTCOMES_PATH`): per idea card source, |
+|                               | kind, verdict, runs, disabled/deleted; rates,      |
+|                               | `judge_threshold` / `cooldown_multiplier`, removal |
+|                               | candidates. `DecisionLog`                          |
+|                               | (`~/.bot-inator/approval_decisions.json`,          |
+|                               | `AGENT_APPROVAL_DECISIONS_PATH`): every non-timeout|
+|                               | card decision, edited field names + facts only     |
+|                               | (#79). Hooks: `_request_approval`, gated runs of   |
+|                               | generated tools, tool disable/delete routes.       |
+|                               | `routes/outcomes.py`; Debug tab section.           |
+| `ai/activity_store.py`        | `~/.bot-inator/activity.db` (0600,                 |
+|                               | `AGENT_ACTIVITY_DB`): allow-listed event kind/time |
+|                               | fields, never content; 90 days. Every event is     |
+|                               | recorded from `_handle_event`; switch              |
+|                               | `AGENT_ACTIVITY_HISTORY` (settings key, default 1).|
+|                               | Cleared by `clear_memory` and `DELETE /api/activity`|
+|                               | (`routes/activity.py`) (#75).                      |
+| `ai/routines.py`              | Deterministic routine mining over the history;     |
+|                               | `python -m ai.routines --report` (#75).            |
+| `ai/routine_ideas.py`         | `RoutineIdeaSource` (source `routine`): mines once |
+|                               | a day, publishes `pattern_detected` (time routine →|
+|                               | built-in `open_app`/`run_shortcut` in its slot;    |
+|                               | else `generate_custom_tool`); cooldown per         |
+|                               | candidate id (30 d); prompts see only `summary`;   |
+|                               | `card_text` (evidence) is card-only.               |
+|                               | `AGENT_ROUTINE_IDEAS=0` turns it off (#75).        |
+| `ai/needs_reply.py`           | Deterministic "this mail asks the user something"; |
+|                               | `NextStepSuggester(reply_judge=…)` turns it into a |
+|                               | `draft_email` reply idea. User addresses: delivery |
+|                               | headers + `AGENT_USER_EMAILS`. Notice              |
+|                               | `needs_reply:personal_text_off` (info) under a     |
+|                               | cloud engine with personal text off (#70).         |
+| `events/meeting_prep.py`      | `MeetingPrepScheduler` (idea source + listener):   |
+|                               | `event_starting_soon` → one read-only              |
+|                               | `meeting_prep` event `AGENT_MEETING_PREP_MINUTES`  |
+|                               | (1..10, default 10) before; `AGENT_MEETING_PREP`   |
+|                               | (default 1). Orchestrator words it (≤6 lines) and  |
+|                               | posts "Meeting prep: <title>" (#71).               |
+| `ai/chat_context.py`          | Quick-ask context block for one chat prompt (#74). |
+| `ai/mcp_client.py`            | `McpManager`: stdio MCP servers from               |
+|                               | `~/.bot-inator/mcp_servers.json` (0600,            |
+|                               | `AGENT_MCP_CONFIG_PATH`), logs in                  |
+|                               | `~/.bot-inator/mcp_logs/`; tools named             |
+|                               | `<server>__<tool>`, off until enabled, ≤15 loaded, |
+|                               | gated unless the user marks one "runs without      |
+|                               | asking". Notice `mcp_server_down:<server>:<n>`.    |
+|                               | `routes/mcp.py` (#69).                             |
 | `ai/orchestrator.py`          | Event loop, tool gating, subscriber fan-out,       |
 |                               | dynamic-tool hot-reload (`load_dynamic_tools`).    |
 | `ai/pattern_recognizer.py`    | Rolling 50-event deque fed by the orchestrator;    |
@@ -300,12 +643,63 @@ restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 |                               | drafted module (DONE.md #11).                      |
 | `tools/draft_critic.py`       | Grounded logic review of a draft against its spec; |
 |                               | advisory, `AGENT_DRAFT_CRITIC=0` disables.         |
+| `ai/taint.py`                 | #81 injection shield: `TurnTaint` per turn         |
+|                               | (`begin_turn`, `mark_read`, `mark_context`,        |
+|                               | `requires_card`, `notes_for` → `origin_notes`).    |
+| `ai/action_journal.py`        | #83 History + Undo: `~/.bot-inator/actions.db`     |
+|                               | (`AGENT_ACTIONS_DB`, 30 days); `routes/actions.py`.|
+| `ai/egress_log.py`            | #82 privacy ledger: `~/.bot-inator/egress.db`      |
+|                               | (`AGENT_EGRESS_DB`); hooks in `groq_engine`,       |
+|                               | `orchestrator` (agent-loop client), `mlx_engine`,  |
+|                               | `memory`, `mcp_client`, `tool_sandbox`, `open_url`;|
+|                               | `routes/egress.py`.                                |
+| `ai/delivery.py`              | #87 right-moment delivery: busy gate, held offers  |
+|                               | + Inbox `~/.bot-inator/held_offers.json`           |
+|                               | (`AGENT_HELD_OFFERS_PATH`), settings               |
+|                               | `delivery_settings.json`                           |
+|                               | (`AGENT_DELIVERY_SETTINGS_PATH`), Pause, daily     |
+|                               | cap, never-watch list; release loop task in        |
+|                               | `main.py`; `routes/delivery.py`. Tests set         |
+|                               | `AGENT_DELIVERY_BUSY_CHECKS=0`.                    |
+| `ai/watches.py`               | #88 "Watch for…": `WatchStore`                     |
+|                               | `~/.bot-inator/watches.json` (`AGENT_WATCHES_PATH`),|
+|                               | `WatchSource` (idea source + time-watch listener,  |
+|                               | source `watch`, trigger `watch:<id>`), `Compiler`  |
+|                               | (sentence → spec, detection engine), backtest;     |
+|                               | `routes/watches.py`.                               |
+| `ai/tool_health.py`           | #90 generated-tool health: `tool_health.json`      |
+|                               | (`AGENT_TOOL_HEALTH_PATH`); recorded in            |
+|                               | `gated_forward` for every dynamic-tool call (raise |
+|                               | or `status: error`); 2 repairable failures in a    |
+|                               | week → a repair idea; `routes/tool_health.py`.     |
+| `ai/standing_rules.py`        | #78 standing rules: offers, limits, deterministic  |
+|                               | runs; `~/.bot-inator/standing_rules.json`          |
+|                               | (`AGENT_STANDING_RULES_PATH`); hooks in            |
+|                               | `_record_decision` (arg pattern + offer) and       |
+|                               | `_handle_event` (run); undo listener on the        |
+|                               | journal; `routes/rules.py`.                        |
+| `ai/demonstration.py`         | #84 "Watch me": `DemonstrationController` (memory  |
+|                               | only), `intercept` first in `_handle_event`;       |
+|                               | trace → `pattern_detected` source `demonstration`. |
+| `events/remote_channel.py`    | #85 iPhone remote: polls the own thread in         |
+|                               | `chat.db`, mirrors eligible cards with a code,     |
+|                               | answers phone turns (`source: "remote"`); excluded |
+|                               | from `imessage_received`; `routes/remote.py`.      |
+| `events/meeting_notes.py`     | #86 meeting notes: offer at prep time, stop timer, |
+|                               | transcript (0600, `~/.bot-inator/meetings/`) → one |
+|                               | prepared offer; local engines only;                |
+|                               | `routes/meeting_notes.py`. Optional `mlx-whisper`. |
+| `tools/read_front_window.py`  | #89 front-window text via the app's Accessibility  |
+|                               | bridge (`bridge`, WS routed in `main.py`).         |
 
 ## 5. Inference engines
 
 `main._build_engines()` builds three engines from `settings.provider`
-(`AGENT_PROVIDER`): `local` (default) → `MLXEngine`, `groq` →
-`GroqEngine`. Each has its own `asyncio.Lock`. Eager-loading is
+(`AGENT_PROVIDER`, per role `AGENT_PROVIDER_<ROLE>`): `local` (default) →
+`MLXEngine`; any preset in `providers.PRESETS` → `OpenAICompatibleEngine`
+(`ai/groq_engine.py`; the class is still named `GroqEngine`, with the new
+name as an alias) via `build_engine(settings, provider, role)` (#97). Each
+has its own `asyncio.Lock`. Eager-loading is
 serialised to avoid `huggingface_hub` lock contention.
 
 | Engine             | Local (MLX)                         | Groq (`GROQ_*_MODEL`)       | Used by                                         |
@@ -318,7 +712,22 @@ The detection engine is picked by `main._select_detection_engine` from
 `AGENT_PATTERN_ENGINE` (`main` / `analysis` / `drafting`).
 
 smolagents adapter: MLX engines use the custom `_MLXModel` with the
-`<tool_call>` parser; Groq engines plug into `OpenAIServerModel`.
+`<tool_call>` parser; every OpenAI-compatible engine plugs into
+`OpenAIServerModel` through `_make_groq_model_class`, whose Groq
+workarounds act only on their specific failures and stay on for all.
+
+**Presets (#97, `agent-daemon/providers.py`).** One provider kind, the
+OpenAI chat-completions format; a preset fills in the base URL, the
+settings keys (`<PREFIX>_API_KEY`, `_API_BASE`, `_<ROLE>_MODEL`; Groq keeps
+`GROQ_*`) and default models where confirmed (Groq, Anthropic). The others
+ship no default model: Settings lists the provider's own `GET /models`
+(`POST /api/providers/{id}/models`) and runs a one-request check
+(`POST /api/providers/{id}/test`, `routes/providers.py`, recorded in the
+privacy ledger unless the base is loopback). OpenAI gets
+`max_completion_tokens` instead of `max_tokens` (`Preset.token_param`). A
+preset is `tested` only after a recorded live run; the picker labels the
+others "Untested". `PUT /api/settings` takes `preset_settings` and refuses
+a preset in use with no key, base URL or model for its roles.
 
 When `analysis_engine` is not supplied the orchestrator falls back to
 the main engine, so tests and simpler deployments still work with a
@@ -344,7 +753,8 @@ same methods over HTTP.
 Config lives in `agent-daemon/.env` (template: `.env.example`):
 `AGENT_PROVIDER`, `AGENT_PATTERN_ENGINE`, `AGENT_DRAFT_CRITIC`,
 `GROQ_API_KEY`, `GROQ_API_BASE`, `GROQ_MAIN_MODEL`,
-`GROQ_ANALYSIS_MODEL`, `GROQ_DRAFTING_MODEL`.
+`GROQ_ANALYSIS_MODEL`, `GROQ_DRAFTING_MODEL`, and the same five per other
+preset (#97).
 
 ## 6. Tools (Phase 1 Sprint final)
 
@@ -365,11 +775,16 @@ bypass the approval gate and run inline; all other tools still emit an
 | `read_clipboard`   | ✅         | `pbpaste` → string.                              |
 | `write_clipboard`  |           | `pbcopy` ← string.                                |
 | `summarize_file`   | ✅         | Metadata + ≤2 KB preview for text files.         |
-| `move_file`        |           | Moves a file into an existing directory.          |
-| `send_imessage`    |           | AppleScript `tell application "Messages"` → send  |
-|                    |           | to a buddy on the iMessage service.               |
+| `move_file`        |           | Moves a file into an existing directory; optional |
+|                    |           | `new_name` (plain name, no separators, no leading |
+|                    |           | dot, keeps the extension if omitted); never       |
+|                    |           | overwrites an existing file (#76).                |
+| `send_imessage`    |           | NOT registered (the user doesn't want it). The    |
+|                    |           | iPhone remote (#85) sends to the own handle only, |
+|                    |           | as chat-channel output, never as a tool.          |
 | `remember_preference`| ✅       | Persists a user preference string into the shared |
-|                    |           | `Memory` at `~/.bot-inator/memory.db`.            |
+|                    |           | `Memory` at `~/.bot-inator/memory.db`. Asks first |
+|                    |           | in a turn that read outside text (#81).           |
 | `find_files`       | ✅         | Spotlight (`mdfind`) by name or content, optional |
 |                    |           | folder and kind; newest first, ≤50 results.       |
 | `list_shortcuts`   | ✅         | `shortcuts list` → the user's Shortcut names.     |
@@ -391,15 +806,39 @@ bypass the approval gate and run inline; all other tools still emit an
 |                    |           | headers, reminders due (#65).                     |
 | `list_events`      | ✅         | Calendar events in a range, via the menu bar      |
 |                    |           | app's EventKit (#60; app must be running).        |
+|                    |           | `attendees`: other people's names only, never     |
+|                    |           | addresses (#80).                                  |
 | `create_event`     |           | Adds a Calendar event (app's EventKit; default    |
 |                    |           | calendar unless one is named).                    |
 | `list_reminders`   | ✅         | Reminders (EventKit/AppleScript), soonest first.  |
+| `read_front_window`| ✅         | #89: the front window's Accessibility text, once, |
+|                    |           | through the menu bar app (WS `screen_text_*`;     |
+|                    |           | Accessibility is the app's). Only in a turn the   |
+|                    |           | user started (chat / quick ask); never password   |
+|                    |           | fields, never-watch apps, bot-inator's own or     |
+|                    |           | browser windows (use `read_active_tab_text`);     |
+|                    |           | cloud placeholder per #31; marks the turn (#81).  |
 | `create_reminder`  |           | Adds a reminder (optional due date, list, notes). |
+| `<server>__<tool>` |           | An MCP server's tool (#69): listed in Tool        |
+|                    |           | Manager, off until enabled, gated unless the user |
+|                    |           | marked it "runs without asking" (the server's     |
+|                    |           | `readOnlyHint` never changes the gate). Results   |
+|                    |           | are untrusted data; redacted for cloud engines.   |
+| `repair_generated_tool`|        | #90: drafts a fix for a failing generated tool    |
+|                    |           | from its recorded failure and spec (checks + dry  |
+|                    |           | run), then a code-review card with a diff         |
+|                    |           | (`previous_code`); installs only on approval      |
+|                    |           | (provenance `source="repair"`). Needs approval.   |
 | `generate_custom_tool`|         | Meta-tool: drafts a new `@tool` module on the     |
 |                    |           | main engine, runs static safety checks, emits a   |
 |                    |           | `code_approval_request` for human review, and —   |
 |                    |           | on approval — installs it into                    |
 |                    |           | `tools/generated/` and hot-loads it.              |
+
+**Accessibility (#74).** The quick-ask hotkey reads the front app's
+selected text through Accessibility (`AXIsProcessTrusted`, never the
+prompting variant) only when the user chose to include it;
+`ai/permissions.py` lists it as the `accessibility` row.
 
 `tool_result` thoughts emitted for read-only invocations are prefixed
 with ``"<name> (read-only)"`` so the MenuBar stream still reflects
@@ -436,7 +875,31 @@ SwiftUI MenuBar app with an AppKit shell:
   is a `TabView` with two tabs: "Thoughts" and "Debug". A `WindowGroup`
   scene named `tool-manager` hosts `ToolManagerView`; the status-bar
   popover shows a gear button that calls `openWindow(id: "tool-manager")`
-  to bring it forward.
+  to bring it forward. Wave 15: the popover and "Open in window" also have an
+  "Inbox" tab (`OfferInboxView`, badge = Inbox count), the button bar has
+  `PauseMenu` (1 h / until tomorrow / until I resume) and a
+  `PrivacyLedgerTodayLabel` line; the menu bar icon shows a pause glyph
+  while paused and the Inbox count. One `DeliveryViewModel` (owned by
+  `AppDelegate`, refreshed on every status frame) is shared by the menu, the
+  Inbox, Settings > Delivery and Debug. Settings embeds `WatchesView`
+  ("Watch for…", #88), `DeliverySettingsView` (#87), `ActionHistoryView`
+  (History + Undo, #83) and `PrivacyLedgerView` (#82); Debug shows the
+  delivery state, busy checks and today's ledger line; `ApprovalAlert`
+  shows `originNotesSection` first (#81); `CodeReviewAlert` diffs against
+  `previousCode` for a repair (#90).
+  Wave 16: the popover has a "Watch me…" button (#84, also ⌃⌥⌘R via
+  `RecordHotKeyController`, `DemonstrationPanelController`) and
+  `MeetingRecorderMenuItems` ("Take meeting notes now" / "Stop taking
+  notes", #86); the menu bar icon shows `record.circle.fill` while a
+  demonstration records (the pause glyph wins). Settings embeds
+  `MeetingNotesSettingsView` (#86), a "Watch me" record-shortcut picker
+  (#84), `RemoteSettingsView` (#85) and `RulesView` ("Standing rules",
+  #78). `NoticeBanner` shows Undo for a `kind: "undo"` notice action;
+  `WebSocketManager` closes the open card on `approval_resolved` (#85),
+  routes `meeting_record_offer` / `_stop` to `MeetingRecorder` and its
+  state / audio frames back; quick-ask has "Include this window's text"
+  (#89, only with Accessibility); the privacy ledger labels kind
+  `imessage` "iMessage to you".
 - `Services/WebSocketManager.swift` — publishes `@Published messages`,
   `pendingApproval`, `lastStatus`, and a `DebugStats` struct (frame
   counts by type, thought counts by stage, decode-error ring buffer,

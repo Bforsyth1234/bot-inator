@@ -12,6 +12,9 @@ struct ApprovalAlert: View {
     @State private var values: [String: String] = [:]
     @State private var populated = false
     @State private var showTechnical = false
+    /// Bundled card (#76): one tick and one set of field values per action.
+    @State private var ticks: [Bool] = []
+    @State private var actionValues: [[String: String]] = []
     @Environment(\.textSize) private var textSize
 
     /// The plain-language summary of a suggested tool (#64), when the
@@ -23,10 +26,18 @@ struct ApprovalAlert: View {
         return text
     }
 
+    /// A prepared offer with two or more actions (#76), else nil. A
+    /// one-action offer uses that tool's own editable card.
+    private var bundleActions: [ApprovalAction]? {
+        guard let actions = payload.actions, actions.count >= 2 else { return nil }
+        return actions
+    }
+
     /// Fixed window height: grows with the Text size setting, capped so the
     /// buttons stay on a 13" screen (the card scrolls past that).
     private var windowHeight: CGFloat {
-        let base: CGFloat = toolIdeaSummary != nil ? 580 : (spec?.windowHeight ?? 480)
+        let base: CGFloat = toolIdeaSummary != nil ? 580
+            : bundleActions.map(BundleCard.windowHeight) ?? (spec?.windowHeight ?? 480)
         return min(ApprovalEditSpec.maxWindowHeight, (base * textSize.layoutScale).rounded())
     }
 
@@ -43,8 +54,12 @@ struct ApprovalAlert: View {
             // larger text can never push Approve/Deny out of the window.
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    originNotesSection
                     if let summary = toolIdeaSummary {
                         toolIdeaCard(summary)
+                    } else if let actions = bundleActions {
+                        reasoningSection
+                        bundleCard(actions)
                     } else {
                         reasoningSection
                         if let spec {
@@ -75,7 +90,8 @@ struct ApprovalAlert: View {
                 .foregroundStyle(.orange)
                 .appFont(.title2)
             VStack(alignment: .leading, spacing: 2) {
-                Text(toolIdeaSummary != nil ? "New Tool Idea" : "Approval Required")
+                Text(toolIdeaSummary != nil ? "New Tool Idea"
+                     : bundleActions != nil ? "Ready When You Are" : "Approval Required")
                     .appFont(.headline)
                 Text(payload.toolName)
                     .appFont(.label, design: .monospaced)
@@ -86,6 +102,26 @@ struct ApprovalAlert: View {
                 Text("\(timeout)s")
                     .appFont(.secondary, design: .monospaced)
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// #81: this turn read outside text (an email, a page, a message), so
+    /// say where the card's targets came from. Empty on unmarked turns.
+    @ViewBuilder
+    private var originNotesSection: some View {
+        if let notes = payload.originNotes, !notes.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Shaped by text it read", systemImage: "exclamationmark.triangle.fill")
+                    .appFont(.label)
+                    .foregroundStyle(.orange)
+                ForEach(Array(notes.enumerated()), id: \.offset) { _, note in
+                    Text(note)
+                        .appFont(.secondary)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -141,6 +177,65 @@ struct ApprovalAlert: View {
                 caption("Technical details")
             }
         }
+    }
+
+    // MARK: - Bundled card (#76)
+
+    /// One tick box per action; a ticked action shows its editable fields.
+    /// Unticked actions go back with `enabled: false` and do not run.
+    private func bundleCard(_ actions: [ApprovalAction]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            caption("Approving does the ticked steps")
+            ForEach(Array(actions.enumerated()), id: \.offset) { index, action in
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle(isOn: tickBinding(index)) {
+                        Text(BundleCard.title(action))
+                            .appFont(.body, weight: .semibold)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .toggleStyle(.checkbox)
+                    if let spec = BundleCard.spec(action), index < ticks.count, ticks[index] {
+                        actionFields(spec, action: action, index: index)
+                            .padding(.leading, 22)
+                    }
+                }
+                .padding(10)
+                .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private func actionFields(_ spec: ApprovalEditSpec, action: ApprovalAction, index: Int) -> some View {
+        let toolArgs = BundleCard.toolArgs(action)
+        let merged = ApprovalEditSpec.mergedKwargs(toolArgs, params: spec.params)
+        return VStack(alignment: .leading, spacing: 8) {
+            ForEach(spec.readOnly(merged), id: \.label) { row in
+                VStack(alignment: .leading, spacing: 2) {
+                    caption(row.label)
+                    Text(row.value).appFont(.body).textSelection(.enabled)
+                }
+            }
+            ForEach(spec.fields, id: \.key) { field in
+                VStack(alignment: .leading, spacing: 4) {
+                    caption(field.required ? field.label : "\(field.label) (optional)")
+                    TextField(field.placeholder, text: actionBinding(index, field.key),
+                              axis: field.multiline ? .vertical : .horizontal)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(field.multiline ? 2...4 : 1...1)
+                        .appFont(.body, design: field.monospaced ? .monospaced : .default)
+                }
+            }
+        }
+    }
+
+    private func tickBinding(_ index: Int) -> Binding<Bool> {
+        Binding(get: { index < ticks.count ? ticks[index] : true },
+                set: { if index < ticks.count { ticks[index] = $0 } })
+    }
+
+    private func actionBinding(_ index: Int, _ key: String) -> Binding<String> {
+        Binding(get: { index < actionValues.count ? actionValues[index][key] ?? "" : "" },
+                set: { if index < actionValues.count { actionValues[index][key] = $0 } })
     }
 
     private var noteSection: some View {
@@ -210,23 +305,232 @@ struct ApprovalAlert: View {
             .keyboardShortcut(.cancelAction)
 
             Button {
+                if let actions = bundleActions {
+                    onDecision(true, userNote,
+                               BundleCard.editedArgs(actions, ticks: ticks, values: actionValues))
+                    return
+                }
                 let edited = spec.flatMap {
                     ApprovalEditSpec.editedArgs($0, toolArgs: payload.toolArgs, values: values)
                 }
                 onDecision(true, userNote, edited)
             } label: {
-                Label(spec?.approveLabel ?? "Approve", systemImage: "checkmark.circle.fill")
+                Label(approveLabel, systemImage: "checkmark.circle.fill")
             }
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
-            .disabled(!(spec?.isComplete(values) ?? true))
+            .disabled(!approveEnabled)
         }
     }
 
+    private var approveLabel: String {
+        if bundleActions != nil {
+            let count = ticks.filter { $0 }.count
+            return count == 1 ? "Approve 1 Step" : "Approve \(count) Steps"
+        }
+        return spec?.approveLabel ?? "Approve"
+    }
+
+    private var approveEnabled: Bool {
+        if let actions = bundleActions {
+            return BundleCard.isComplete(actions, ticks: ticks, values: actionValues)
+        }
+        return spec?.isComplete(values) ?? true
+    }
+
     private func populate() {
-        guard !populated, let spec else { return }
+        guard !populated else { return }
         populated = true
+        if let actions = bundleActions {
+            ticks = actions.map { $0.enabled ?? true }
+            actionValues = actions.map { action in
+                BundleCard.spec(action).map {
+                    ApprovalEditSpec.initialValues($0, toolArgs: BundleCard.toolArgs(action))
+                } ?? [:]
+            }
+            return
+        }
+        guard let spec else { return }
         values = ApprovalEditSpec.initialValues(spec, toolArgs: payload.toolArgs)
+    }
+}
+
+// MARK: - Light card (#83)
+
+/// The small card for a call the daemon marked `reversible` (the action
+/// journal can undo it). Still a card (invariant 7a): nothing runs until the
+/// user approves. Return approves, Escape denies, "Edit…" opens the full
+/// card with every field. The presenter shows it in a panel that does not
+/// activate the app, so the app the user is typing in keeps focus until the
+/// user clicks the panel.
+struct CompactApprovalCard: View {
+    let payload: ApprovalRequestPayload
+    let onDecision: (_ approved: Bool) -> Void
+    let onEdit: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.uturn.backward.circle.fill")
+                    .foregroundStyle(.orange)
+                    .appFont(.headline)
+                Text(CompactCard.title(payload))
+                    .appFont(.headline)
+                    .lineLimit(1)
+                Spacer()
+                if let timeout = payload.timeoutSeconds {
+                    Text("\(timeout)s")
+                        .appFont(.secondary, design: .monospaced)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ForEach(CompactCard.lines(payload), id: \.label) { row in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(row.label)
+                        .appFont(.secondary, weight: .semibold)
+                        .foregroundStyle(.secondary)
+                    Text(row.value)
+                        .appFont(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+            }
+            Text("You can undo this later in History.")
+                .appFont(.fine)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Edit…", action: onEdit)
+                    .buttonStyle(.borderless)
+                Spacer()
+                Button(role: .destructive) {
+                    onDecision(false)
+                } label: {
+                    Text("Deny")
+                }
+                .keyboardShortcut(.cancelAction)
+                Button {
+                    onDecision(true)
+                } label: {
+                    Text(CompactCard.approveLabel(payload))
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(!CompactCard.isComplete(payload))
+            }
+        }
+        .padding(14)
+        .frame(width: 380)
+    }
+}
+
+/// Pure logic for the light card (#83).
+enum CompactCard {
+    /// A reversible one-call card (not a #76 bundle, not an idea card).
+    static func applies(_ payload: ApprovalRequestPayload) -> Bool {
+        payload.reversible == true && (payload.actions?.isEmpty ?? true)
+            && payload.toolName != "generate_custom_tool"
+    }
+
+    static func title(_ payload: ApprovalRequestPayload) -> String {
+        switch payload.toolName {
+        case "move_file": return "Move a file?"
+        case "create_event": return "Add a calendar event?"
+        case "create_reminder": return "Add a reminder?"
+        case "create_note": return "Create a note?"
+        default: return "Run \(payload.toolName)?"
+        }
+    }
+
+    static func approveLabel(_ payload: ApprovalRequestPayload) -> String {
+        ApprovalEditSpec.spec(for: payload.toolName, toolArgs: payload.toolArgs)?.approveLabel
+            ?? "Approve"
+    }
+
+    /// The card's read-only rows, then every non-empty field, at most four.
+    static func lines(_ payload: ApprovalRequestPayload) -> [ApprovalInfoRow] {
+        guard let spec = ApprovalEditSpec.spec(for: payload.toolName, toolArgs: payload.toolArgs) else {
+            return [ApprovalInfoRow(label: "Arguments",
+                                    value: payload.toolArgs.prettyPrinted()
+                                        .split(whereSeparator: \.isNewline).joined(separator: " "))]
+        }
+        let merged = ApprovalEditSpec.mergedKwargs(payload.toolArgs, params: spec.params)
+        let values = ApprovalEditSpec.initialValues(spec, toolArgs: payload.toolArgs)
+        var rows = spec.fields.compactMap { field -> ApprovalInfoRow? in
+            let value = (values[field.key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return nil }
+            let oneLine = value.split(whereSeparator: \.isNewline).joined(separator: " ")
+            return ApprovalInfoRow(label: field.label, value: oneLine)
+        }
+        rows.append(contentsOf: spec.readOnly(merged))
+        var seen = Set<String>()
+        return Array(rows.filter { seen.insert($0.label).inserted }.prefix(4))
+    }
+
+    /// Approve needs the same required fields as the full card.
+    static func isComplete(_ payload: ApprovalRequestPayload) -> Bool {
+        guard let spec = ApprovalEditSpec.spec(for: payload.toolName, toolArgs: payload.toolArgs) else {
+            return true
+        }
+        return spec.isComplete(ApprovalEditSpec.initialValues(spec, toolArgs: payload.toolArgs))
+    }
+}
+
+// MARK: - Bundled card logic (#76, pure)
+
+enum BundleCard {
+    static func toolArgs(_ action: ApprovalAction) -> JSONValue {
+        .object(["args": .array([]), "kwargs": action.args])
+    }
+
+    static func spec(_ action: ApprovalAction) -> ApprovalEditSpec? {
+        ApprovalEditSpec.spec(for: action.tool, toolArgs: toolArgs(action))
+    }
+
+    static func title(_ action: ApprovalAction) -> String {
+        if let label = action.label?.trimmingCharacters(in: .whitespaces), !label.isEmpty {
+            return label
+        }
+        return action.tool
+    }
+
+    static func windowHeight(_ actions: [ApprovalAction]) -> CGFloat {
+        let fields = actions.reduce(CGFloat(0)) { total, action in
+            guard let spec = spec(action) else { return total + 40 }
+            return total + 60 + CGFloat(spec.fields.count) * 58 + CGFloat(spec.readOnly([:]).count) * 40
+        }
+        return min(ApprovalEditSpec.maxWindowHeight, 300 + fields)
+    }
+
+    /// At least one action ticked, and every ticked one has its required fields.
+    static func isComplete(_ actions: [ApprovalAction], ticks: [Bool], values: [[String: String]]) -> Bool {
+        guard ticks.count == actions.count, ticks.contains(true) else { return false }
+        for (index, action) in actions.enumerated() where ticks[index] {
+            if let spec = spec(action), index < values.count, !spec.isComplete(values[index]) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// `{"actions": [{tool, args, enabled, label}, ...]}`: every action, in
+    /// order, with the user's tick and edited fields. Always sent, so the
+    /// daemon knows which steps were unticked.
+    static func editedArgs(
+        _ actions: [ApprovalAction], ticks: [Bool], values: [[String: String]]
+    ) -> JSONValue {
+        let list: [JSONValue] = actions.enumerated().map { index, action in
+            let enabled = index < ticks.count ? ticks[index] : (action.enabled ?? true)
+            var newArgs: JSONValue? = nil
+            if let spec = spec(action), index < values.count,
+               case .object(let edited)? = ApprovalEditSpec.editedArgs(
+                   spec, toolArgs: toolArgs(action), values: values[index]),
+               let kwargs = edited["kwargs"] {
+                newArgs = kwargs
+            }
+            return action.encoded(enabled: enabled, args: newArgs)
+        }
+        return .object(["actions": .array(list)])
     }
 }
 
@@ -360,12 +664,15 @@ struct ApprovalEditSpec {
             ),
             ApprovalEditSpec(
                 toolName: "move_file",
-                params: ["src", "dst_dir"],
+                params: ["src", "dst_dir", "new_name"],
                 fields: [
                     .init(key: "src", label: "File", placeholder: "/path/to/file",
                           required: true, monospaced: true),
                     .init(key: "dst_dir", label: "Move to folder", placeholder: "/path/to/folder",
                           required: true, monospaced: true),
+                    // #76: optional rename; empty keeps the file's own name.
+                    .init(key: "new_name", label: "File name", placeholder: "Keep the current name",
+                          monospaced: true),
                 ],
                 approveLabel: "Approve & Move"
             ),

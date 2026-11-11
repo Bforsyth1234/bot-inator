@@ -28,6 +28,14 @@ final class WebSocketManager: ObservableObject {
     private var calendarStatusTask: Task<Void, Never>?
     private let calendarStatusInterval: TimeInterval = 30.0
 
+    /// Front-window text for the daemon's `read_front_window` (#89).
+    let screenTextBridge = ScreenTextBridge()
+    /// Last `screen_text_status` sent on this connection (nil: none yet).
+    private var sentScreenTextTrusted: Bool?
+    /// #86: the meeting recorder's state was reported on this connection.
+    private var sentMeetingState = false
+    private var meetingRecorderWired = false
+
     private let url: URL
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
@@ -105,8 +113,28 @@ final class WebSocketManager: ObservableObject {
         isConnected = true
         reconnectDelay = 1.0
         sentCalendarStatus = nil  // a new connection needs its own calendar_status
+        sentScreenTextTrusted = nil  // and its own screen_text_status (#89)
+        sentMeetingState = false  // and its own meeting_record_state (#86)
+        wireMeetingRecorder()
         receiveTask = Task { [weak self] in await self?.receiveLoop() }
         startCalendarStatusRefresh()
+    }
+
+    /// #86: the recorder (app side) sends its frames through this socket.
+    private func wireMeetingRecorder() {
+        guard !meetingRecorderWired else { return }
+        meetingRecorderWired = true
+        let recorder = MeetingRecorder.shared
+        recorder.send = { [weak self] out in
+            guard let self else { return }
+            switch out {
+            case .state(let payload):
+                self.send(.meetingRecordState(seq: self.nextSeq(), timestamp: Date(), payload: payload))
+            case .audioReady(let payload):
+                self.send(.meetingAudioReady(seq: self.nextSeq(), timestamp: Date(), payload: payload))
+            }
+        }
+        recorder.isConnected = { [weak self] in self?.isConnected ?? false }
     }
 
     func dismissNotice(id: String) {
@@ -187,27 +215,33 @@ final class WebSocketManager: ObservableObject {
         }
     }
 
-    func sendCommand(_ action: CommandAction) {
+    func sendCommand(_ action: CommandAction, duration: PauseDuration? = nil) {
         let msg = WSMessage.command(
             seq: nextSeq(),
             timestamp: Date(),
-            payload: CommandPayload(action: action)
+            payload: CommandPayload(action: action, duration: duration)
         )
         send(msg)
+    }
+
+    /// #84: the user's one sentence for the stopped recording, and the
+    /// steps they removed.
+    func sendDemonstrationDraft(_ payload: DemonstrationDraftPayload) {
+        send(.demonstrationDraft(seq: nextSeq(), timestamp: Date(), payload: payload))
     }
 
     /// Send a user chat turn. Returns the generated `messageId` so the
     /// caller can immediately render a local user bubble keyed by the
     /// same id the daemon will echo back on every `thought` frame.
     @discardableResult
-    func sendUserMessage(_ text: String) -> String {
+    func sendUserMessage(_ text: String, context: ChatContextPayload? = nil) -> String {
         let messageId = "msg_" + UUID().uuidString
             .replacingOccurrences(of: "-", with: "")
             .prefix(12).lowercased()
         let msg = WSMessage.userMessage(
             seq: nextSeq(),
             timestamp: Date(),
-            payload: UserMessagePayload(messageId: messageId, text: text)
+            payload: UserMessagePayload(messageId: messageId, text: text, context: context)
         )
         send(msg)
         return messageId
@@ -248,7 +282,31 @@ final class WebSocketManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard !Task.isCancelled else { return }
                 self?.sendCalendarStatusIfChanged()
+                self?.sendScreenTextStatusIfChanged()
             }
+        }
+    }
+
+    // MARK: - Front-window text (#89)
+
+    /// Tell the daemon this app reads front windows, and whether it has
+    /// Accessibility (never prompts). Sent once per connection and on change.
+    private func sendScreenTextStatusIfChanged() {
+        guard task != nil else { return }
+        let trusted = ScreenTextBridge.isTrusted()
+        guard trusted != sentScreenTextTrusted else { return }
+        sentScreenTextTrusted = trusted
+        send(.screenTextStatus(seq: nextSeq(), timestamp: Date(),
+                               payload: ScreenTextStatusPayload(accessibilityTrusted: trusted)))
+    }
+
+    private func handleScreenTextRequest(_ payload: ScreenTextRequestPayload) {
+        let bridge = screenTextBridge
+        Task { [weak self] in
+            let response = await bridge.handle(payload)
+            guard let self else { return }
+            self.send(.screenTextResponse(seq: self.nextSeq(), timestamp: Date(), payload: response))
+            self.sendScreenTextStatusIfChanged()
         }
     }
 
@@ -318,6 +376,21 @@ final class WebSocketManager: ObservableObject {
                 handleCalendarRequest(payload)
                 return
             }
+            if case .screenTextRequest(_, _, let payload) = parsed {
+                // Plumbing, not UI; the text is not kept in `messages` (#89).
+                handleScreenTextRequest(payload)
+                return
+            }
+            // #86: an OFFER to take notes (the recorder starts only on a
+            // click) and the safety stop. Plumbing, not kept in `messages`.
+            if case .meetingRecordOffer(_, _, let payload) = parsed {
+                MeetingRecorder.shared.receiveOffer(payload)
+                return
+            }
+            if case .meetingRecordStop(_, _, let payload) = parsed {
+                MeetingRecorder.shared.receiveStop(payload)
+                return
+            }
             messages.append(parsed)
             switch parsed {
             case .approvalRequest(let seq, _, let payload):
@@ -327,6 +400,17 @@ final class WebSocketManager: ObservableObject {
             case .status(_, _, let payload):
                 lastStatus = payload
                 sendCalendarStatusIfChanged()
+                sendScreenTextStatusIfChanged()
+                if !sentMeetingState {
+                    sentMeetingState = true
+                    MeetingRecorder.shared.reportIdle()
+                }
+            case .approvalResolved(_, _, let payload):
+                // #85: answered elsewhere (the phone, another window) or
+                // timed out: the open card closes without sending anything.
+                if pendingApproval?.payload.requestId == payload.requestId {
+                    pendingApproval = nil
+                }
             case .notice(_, _, let payload):
                 showNotice(payload)
             case .toolsChanged(_, _, let payload):
@@ -414,6 +498,16 @@ struct DebugStats {
         case .calendarRequest: key = "calendar_request"
         case .calendarResponse: key = "calendar_response"
         case .calendarStatus: key = "calendar_status"
+        case .screenTextRequest: key = "screen_text_request"
+        case .screenTextResponse: key = "screen_text_response"
+        case .screenTextStatus: key = "screen_text_status"
+        case .approvalResolved: key = "approval_resolved"
+        case .demonstrationTrace: key = "demonstration_trace"
+        case .demonstrationDraft: key = "demonstration_draft"
+        case .meetingRecordOffer: key = "meeting_record_offer"
+        case .meetingRecordStop: key = "meeting_record_stop"
+        case .meetingRecordState: key = "meeting_record_state"
+        case .meetingAudioReady: key = "meeting_audio_ready"
         }
         framesByType[key, default: 0] += 1
     }

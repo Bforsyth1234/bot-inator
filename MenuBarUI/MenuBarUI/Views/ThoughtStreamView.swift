@@ -79,14 +79,35 @@ struct ThoughtStreamView: View {
 
     // MARK: - Footer
 
+    private var pausedText: String {
+        guard let until = ws.lastStatus?.pausedUntil, until != "indefinite",
+              let date = ISO8601DateFormatter.delivery.date(from: until) else {
+            return "Paused"
+        }
+        return "Paused until \(date.formatted(date: .omitted, time: .shortened))"
+    }
+
     private var footer: some View {
         HStack {
-            Button {
-                ws.sendCommand(.pauseListeners)
-            } label: { Label("Pause", systemImage: "pause.circle") }
-            Button {
-                ws.sendCommand(.resumeListeners)
-            } label: { Label("Resume", systemImage: "play.circle") }
+            // #87: a real Pause (listeners keep running); the status frame
+            // says whether it is on.
+            if ws.lastStatus?.paused == true {
+                Button {
+                    ws.sendCommand(.resumeListeners)
+                } label: { Label("Resume", systemImage: "play.circle") }
+                Text(pausedText)
+                    .foregroundStyle(.secondary)
+            } else {
+                Menu {
+                    ForEach(PauseDuration.allCases) { duration in
+                        Button(duration.label) {
+                            ws.sendCommand(.pauseListeners, duration: duration)
+                        }
+                    }
+                } label: { Label("Pause", systemImage: "pause.circle") }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
             Spacer()
             Button {
                 NSApplication.shared.terminate(nil)

@@ -42,6 +42,7 @@ def no_prompts(monkeypatch, tmp_path):
     monkeypatch.setattr(P, "_cg_request_screen_capture", boom)
     monkeypatch.setattr(P, "_cg_preflight_screen_capture", lambda: False)
     monkeypatch.setattr(P, "_read_defaults", lambda *_a: None)
+    monkeypatch.setattr(P, "_ax_is_process_trusted", lambda: False)
     monkeypatch.setattr(P, "MESSAGES_DB", tmp_path / "missing.db")
     monkeypatch.setattr(P, "MAIL_DIR", tmp_path / "missing-mail")
     monkeypatch.setattr(P, "CHROME_DIR", tmp_path / "no-chrome")
@@ -81,8 +82,11 @@ def test_no_prompt_guard_is_not_vacuous(no_prompts, monkeypatch) -> None:
     assert sorted(prompted) == ["AE ask=True for com.apple.Notes", "request path called"]
 
 
-def test_no_messages_row() -> None:
-    assert P.get("automation_messages") is None
+def test_messages_row_is_the_remote_channel_only() -> None:
+    # #85 (user answer A): Automation -> Messages exists for the iPhone
+    # remote's own-thread sends; send_imessage stays unregistered.
+    row = P.get("automation_messages")
+    assert row is not None and row.used_by == ("events/remote_channel.py",)
     assert all("send_imessage" not in " ".join(p.used_by) for p in P.PERMISSIONS)
 
 
@@ -179,6 +183,82 @@ def test_calendars_unknown_until_menu_bar_app_reports() -> None:
         assert P._row(P.get("calendars"))["status"] == P.GRANTED
     finally:
         P.set_external_check("calendars", None)
+
+
+# ── Accessibility (#74 quick-ask) ────────────────────────────────────────
+
+def test_accessibility_row_is_listed() -> None:
+    perm = P.get("accessibility")
+    assert perm is not None and perm.name == "Accessibility"
+    assert perm.request_kind == "settings"
+    assert any("QuickAsk" in u for u in perm.used_by)
+    assert "accessibility" in [r["id"] for r in P.check_all()]
+
+
+@pytest.mark.parametrize("value,status", [(True, P.GRANTED), (False, P.DENIED),
+                                          (None, P.UNKNOWN)])
+def test_accessibility_mapping(monkeypatch, value, status) -> None:
+    monkeypatch.setattr(P, "_ax_is_process_trusted", lambda: value)
+    assert P._row(P.get("accessibility"))["status"] == status
+
+
+def test_accessibility_check_error_is_unknown(monkeypatch) -> None:
+    def boom() -> bool:
+        raise OSError("no ApplicationServices")
+    monkeypatch.setattr(P, "_ax_is_process_trusted", boom)
+    assert P.check_accessibility()["status"] == P.UNKNOWN
+
+
+def test_accessibility_menu_bar_app_report_wins(monkeypatch) -> None:
+    monkeypatch.setattr(P, "_ax_is_process_trusted", lambda: False)
+    P.set_external_check("accessibility", lambda: P._result(P.GRANTED))
+    try:
+        assert P.check_accessibility()["status"] == P.GRANTED
+    finally:
+        P.set_external_check("accessibility", None)
+    assert P.check_accessibility()["status"] == P.DENIED
+
+
+def test_request_accessibility_opens_pane(monkeypatch) -> None:
+    opened = []
+    monkeypatch.setattr(P, "_open_url", opened.append)
+    monkeypatch.setattr(P, "_ax_is_process_trusted", lambda: False)
+    out = P.request("accessibility")
+    assert out["action"] == "opened_settings"
+    assert opened == [P.SETTINGS_URLS["accessibility"]]
+    assert out["permission"]["status"] == P.DENIED
+
+
+# ── Microphone / Speech Recognition (#86 meeting notes) ─────────────────
+
+@pytest.mark.parametrize("perm_id,name", [("microphone", "Microphone"),
+                                          ("speech_recognition", "Speech Recognition")])
+def test_meeting_rows_listed_and_app_reported(perm_id, name) -> None:
+    perm = P.get(perm_id)
+    assert perm is not None and perm.name == name
+    assert perm.request_kind == "settings"
+    assert any("MeetingRecorder" in u for u in perm.used_by)
+    row = P._row(perm)
+    assert row["status"] == P.UNKNOWN and "menu bar app" in row["detail"]
+    P.set_external_check(perm_id, lambda: P._result(P.GRANTED))
+    try:
+        assert P._row(perm)["status"] == P.GRANTED
+    finally:
+        P.set_external_check(perm_id, None)
+    assert P._row(perm)["status"] == P.UNKNOWN
+
+
+@pytest.mark.parametrize("perm_id", ["microphone", "speech_recognition"])
+def test_request_meeting_rows_open_pane(monkeypatch, perm_id) -> None:
+    opened = []
+    monkeypatch.setattr(P, "_open_url", opened.append)
+    out = P.request(perm_id)
+    assert out["action"] == "opened_settings"
+    assert opened == [P.SETTINGS_URLS[perm_id]]
+
+
+def test_screen_recording_names_meeting_recorder() -> None:
+    assert any("MeetingRecorder" in u for u in P.get("screen_recording").used_by)
 
 
 def test_bad_status_is_reported_unknown(monkeypatch) -> None:
@@ -280,3 +360,29 @@ def test_routes_need_token(client, monkeypatch, method, path) -> None:
         monkeypatch.setattr(perm, "request", lambda: called.append(1) or {})
     assert getattr(client, method)(path).status_code == 401
     assert called == []
+
+
+# ── #98: Messages bundle id, and Request starts a target that isn't running ──
+
+def test_messages_row_targets_mobilesms(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(P, "_ae_determine", lambda b, ask: calls.append(b) or 0)
+    P.request("automation_messages")
+    assert calls and set(calls) == {"com.apple.MobileSMS"}
+
+
+def test_request_automation_launches_target_when_not_running(monkeypatch) -> None:
+    codes = iter([-600, 0])
+    launched = []
+    monkeypatch.setattr(P, "_ae_determine", lambda b, ask: next(codes))
+    monkeypatch.setattr(P, "_launch_hidden", launched.append)
+    out = P.request("automation_system_events")
+    assert launched == ["com.apple.systemevents"]
+    assert out["action"] == "prompted"
+
+
+def test_request_automation_still_not_running_says_so(monkeypatch) -> None:
+    monkeypatch.setattr(P, "_ae_determine", lambda b, ask: -600)
+    monkeypatch.setattr(P, "_launch_hidden", lambda b: None)
+    out = P.request("automation_messages")
+    assert out["action"] == "none" and "couldn't start Messages" in out["detail"]

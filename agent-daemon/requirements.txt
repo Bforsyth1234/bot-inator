@@ -30,3 +30,10 @@ python-dotenv>=1.0.0,<2.0
 # Local embeddings for matching reworded repeats of declined tool ideas
 # (ai/idea_match.py). Optional: without it only exact/word matches count.
 model2vec>=0.4,<1.0
+# MCP client (#69): other apps' local stdio MCP servers as tools. Imported
+# only when a configured server starts (ai/mcp_client.py).
+mcp>=2.3,<3
+# Meeting notes (#86), optional: the "whisper" engine transcribes on this Mac
+# with mlx-whisper. Not required (the default "apple" engine transcribes in
+# the menu bar app). Install by hand to enable:
+# mlx-whisper>=0.4

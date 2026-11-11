@@ -5,6 +5,8 @@ import SwiftUI
 /// pipeline to keep in sync.
 struct DebugView: View {
     @EnvironmentObject private var ws: WebSocketManager
+    /// #87: held offers and the busy checks behind them.
+    @EnvironmentObject private var delivery: DeliveryViewModel
 
     var body: some View {
         ScrollView {
@@ -12,9 +14,11 @@ struct DebugView: View {
                 connectionSection
                 providersSection
                 listenerHealthSection
+                deliverySection
                 countersSection
                 stagesSection
                 errorsSection
+                SuggestionOutcomesView()
                 placeholderSection
             }
             .padding(12)
@@ -23,6 +27,27 @@ struct DebugView: View {
     }
 
     // MARK: - Sections
+
+    /// #87 delivery: Pause, held offers ("held: 1 (meeting 1)"), the Inbox,
+    /// today's count and each busy check; #82: what left this Mac today.
+    private var deliverySection: some View {
+        section(title: "Delivery") {
+            if let status = ws.lastStatus {
+                row("Paused", status.paused == true ? (status.pausedUntil ?? "yes") : "no")
+                if let held = status.heldCount { row("Held", "\(held)") }
+                if let inbox = status.inboxCount { row("Inbox", "\(inbox)") }
+            }
+            if let status = delivery.status {
+                if let line = status.debugLine { row("Held by reason", line, mono: true) }
+                row("Cards today", "\(status.cardsToday) of \(status.dailyCap)")
+                ForEach(status.checks.keys.sorted(), id: \.self) { key in
+                    row("Check: \(key)", status.checks[key] ?? "", mono: true)
+                }
+            }
+            PrivacyLedgerTodayLabel()
+        }
+        .task { await delivery.refresh() }
+    }
 
     private var connectionSection: some View {
         section(title: "Connection") {

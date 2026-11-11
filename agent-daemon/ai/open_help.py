@@ -457,6 +457,22 @@ class OpenHelpSuggester:
     """Ask the guiding question over recent events; publish filtered ideas."""
 
     source_name = "open_help"
+    # #79: ``ai.idea_outcomes.OutcomeStore`` set by main.py. When this
+    # source's ideas are rarely kept it raises the judge bar and stretches
+    # the cooldown (deterministic; None = the configured values).
+    outcomes: Any = None
+
+    def _adjusted(self, base_score: int, base_cooldown: float, kind: Optional[str] = None) -> tuple[int, float]:
+        if self.outcomes is None:
+            return base_score, base_cooldown
+        try:
+            return (
+                self.outcomes.judge_threshold(self.source_name, base_score, kind),
+                base_cooldown * self.outcomes.cooldown_multiplier(self.source_name, kind),
+            )
+        except Exception:
+            logger.exception("%s outcome adjustment failed", self.source_name)
+            return base_score, base_cooldown
     # Events produced by the agent itself, or handled by chat.
     _SKIP_TYPES = frozenset({"pattern_detected", "user_message"})
 
@@ -546,7 +562,8 @@ class OpenHelpSuggester:
             return
         idea["source"] = self.source_name
         idea["trigger"] = "open_help"
-        self.state.start(self.source_name, idea["tool_name"], self.idea_cooldown_seconds)
+        _, cooldown = self._adjusted(self.min_score, self.idea_cooldown_seconds)
+        self.state.start(self.source_name, idea["tool_name"], cooldown)
         try:
             await self._publish(ContextEvent(event_type="pattern_detected", metadata=idea))
         except Exception:
@@ -592,15 +609,16 @@ class OpenHelpSuggester:
             logger.exception("open_help judge failed")
             return False
         self.last_verdict.update(score=score, reason=reason)
-        if score is None or score < self.min_score:
+        min_score, _ = self._adjusted(self.min_score, self.idea_cooldown_seconds)
+        if score is None or score < min_score:
             logger.info(
                 "open_help dropped %r: judge score %s (min %s): %s",
-                name, score, self.min_score, reason,
+                name, score, min_score, reason,
             )
             return False
         logger.info(
             "open_help passed %r: judge score %s (min %s): %s",
-            name, score, self.min_score, reason,
+            name, score, min_score, reason,
         )
         idea["judge_score"] = score
         idea["judge_reason"] = reason

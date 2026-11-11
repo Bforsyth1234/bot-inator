@@ -1,8 +1,8 @@
 """Settings the user edits from the MenuBar app's Settings window.
 
 Stored as JSON at ``~/.bot-inator/settings.json`` (override with
-``AGENT_SETTINGS_PATH``), file mode 0600 because it can hold the Groq API
-key. Keys use the same names as the environment variables they stand in
+``AGENT_SETTINGS_PATH``), file mode 0600 because it can hold provider API
+keys. Keys use the same names as the environment variables they stand in
 for, so :mod:`config` can merge them into ``os.environ`` at startup.
 
 Precedence, highest first: real shell exports, this file, ``.env``.
@@ -13,6 +13,8 @@ import json
 import os
 import tempfile
 from pathlib import Path
+
+import providers
 
 # Only these keys may be written from the UI.
 ALLOWED_KEYS = frozenset({
@@ -34,8 +36,35 @@ ALLOWED_KEYS = frozenset({
     # (default "08:00"). Read live by events.daily_brief; no restart.
     "AGENT_DAILY_BRIEF",
     "AGENT_DAILY_BRIEF_TIME",
-})
-PROVIDERS = ("local", "groq")
+    # Meeting prep (#71): "1"/"0" (default on) and whole minutes before the
+    # meeting, 1..10 (default 10). Read live by events.meeting_prep.
+    "AGENT_MEETING_PREP",
+    "AGENT_MEETING_PREP_MINUTES",
+    # Activity history (#75): "1"/"0" (default on). Read live by
+    # ai.activity_store through os.environ (routes/activity.py updates it).
+    "AGENT_ACTIVITY_HISTORY",
+    # Waiting on (#73): whole days a sent question may go unanswered before
+    # the brief lists it, 1..14 (default 3). Read live by ai.waiting_on.
+    "AGENT_WAITING_ON_DAYS",
+    # Privacy ledger (#82): "1" keeps what was sent (7 days) next to each
+    # row; default "0" keeps metadata only. Read live by ai.egress_log.
+    "AGENT_EGRESS_KEEP_TEXT",
+    # iPhone remote (#85): "1"/"0" (default off, 7c), the own handle (E.164
+    # phone or Apple ID email) and idle minutes 1..120 (default 10). Read
+    # live by events.remote_channel.
+    "AGENT_REMOTE",
+    "AGENT_REMOTE_HANDLE",
+    "AGENT_REMOTE_IDLE_MINUTES",
+    # Meeting notes (#86): "1"/"0" (default off) and the engine "apple" |
+    # "whisper". Read live by events.meeting_notes.
+    "AGENT_MEETING_NOTES",
+    "AGENT_MEETING_NOTES_ENGINE",
+    # First run (#93): "local" | "cloud" | "mixed", what the user picked on
+    # the first-run screen. Informational; its presence is not the gate
+    # (the settings file existing is).
+    "AGENT_FIRST_RUN_CHOICE",
+}) | providers.preset_env_keys()  # <PRESET>_API_KEY / _API_BASE / _<ROLE>_MODEL (#97)
+PROVIDERS = providers.PROVIDERS
 
 
 def settings_path() -> Path:

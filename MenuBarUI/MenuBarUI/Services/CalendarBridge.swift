@@ -8,6 +8,10 @@ import EventKit
 /// daemon's `calendar_request` frames. Access is requested only when the
 /// daemon first needs it (never at launch). All EventKit work runs on a
 /// private serial queue, off the main thread.
+///
+/// `get` / `delete` (#83) serve the daemon's undo: the action journal reads
+/// an event it created (to check it was not edited) and deletes it by the
+/// id it stored. The model has no delete tool; only the journal sends them.
 final class CalendarBridge: @unchecked Sendable {
     static let notesLimit = 500
 
@@ -47,6 +51,14 @@ final class CalendarBridge: @unchecked Sendable {
                                                    eventId: eventId, calendar: calendar)
             case .requestAccess:
                 try await ensureAccess(write: false)
+                response = CalendarResponsePayload(requestId: request.requestId, ok: true)
+            case .get:
+                try await ensureAccess(write: false)
+                let events = try await get(args: request.args)
+                response = CalendarResponsePayload(requestId: request.requestId, ok: true, events: events)
+            case .delete:
+                try await ensureAccess(write: false)
+                try await delete(args: request.args)
                 response = CalendarResponsePayload(requestId: request.requestId, ok: true)
             }
             response.authorization = Self.authorization()
@@ -157,6 +169,29 @@ final class CalendarBridge: @unchecked Sendable {
         }
     }
 
+    /// #83: the one event with this id, or `[]` when it no longer exists.
+    private func get(args: JSONValue?) async throws -> [CalendarEventDTO] {
+        guard let eventId = Self.string(args, "event_id"), !eventId.isEmpty else {
+            throw BridgeError(message: "event_id is required.")
+        }
+        return try await onQueue { [store] in
+            store.event(withIdentifier: eventId).map { [Self.dto($0)] } ?? []
+        }
+    }
+
+    /// #83: delete the one event with this id (this occurrence only).
+    private func delete(args: JSONValue?) async throws {
+        guard let eventId = Self.string(args, "event_id"), !eventId.isEmpty else {
+            throw BridgeError(message: "event_id is required.")
+        }
+        try await onQueue { [store] in
+            guard let event = store.event(withIdentifier: eventId) else {
+                throw BridgeError(message: "No event with id '\(eventId)'.")
+            }
+            try store.remove(event, span: .thisEvent, commit: true)
+        }
+    }
+
     // MARK: - Mapping
 
     private static func iso(_ date: Date) -> String {
@@ -176,8 +211,39 @@ final class CalendarBridge: @unchecked Sendable {
             location: event.location ?? "",
             notes: String((event.notes ?? "").prefix(notesLimit)),
             url: event.url?.absoluteString ?? "",
-            allDay: event.isAllDay
+            allDay: event.isAllDay,
+            attendees: attendees(event)
         )
+    }
+
+    static let attendeesLimit = 50
+
+    /// `EKEvent.attendees` plus the organizer when not listed (#80); `[]`
+    /// when the event has no other people. Rooms and resources are skipped.
+    private static func attendees(_ event: EKEvent) -> [CalendarAttendeeDTO] {
+        var people = (event.attendees ?? []).compactMap(attendee)
+        if !people.isEmpty, let organizer = event.organizer.flatMap(attendee),
+           !people.contains(where: { !$0.email.isEmpty && $0.email == organizer.email }) {
+            people.append(organizer)
+        }
+        return Array(people.prefix(attendeesLimit))
+    }
+
+    private static func attendee(_ participant: EKParticipant) -> CalendarAttendeeDTO? {
+        switch participant.participantType {
+        case .room, .resource: return nil
+        default: break
+        }
+        var email = ""
+        let url = participant.url
+        if url.scheme?.lowercased() == "mailto" {
+            let raw = url.absoluteString.dropFirst("mailto:".count)
+            let address = raw.split(separator: "?", maxSplits: 1).first.map(String.init) ?? ""
+            email = (address.removingPercentEncoding ?? address).lowercased()
+        }
+        let name = participant.name ?? ""
+        if name.isEmpty && email.isEmpty { return nil }
+        return CalendarAttendeeDTO(name: name, email: email, isSelf: participant.isCurrentUser)
     }
 
     // MARK: - Args

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from evals import suites
+from providers import PROVIDERS
 
 ROOT = Path(__file__).resolve().parent
 RESULTS_DIR = ROOT / "results"
@@ -122,13 +123,14 @@ async def run_suite(
 def build_engine(role: str, settings: Any, model: Optional[str] = None) -> Any:
     """The engine for ``role`` on its configured provider (as ``main.py``
     builds it), optionally on another ``model``."""
-    if settings.engine_provider(role) == "groq":
-        from ai.groq_engine import GroqEngine
+    provider = settings.engine_provider(role)
+    if provider != "local":
+        from ai.groq_engine import build_engine
 
-        return GroqEngine(
-            model or getattr(settings, f"groq_{role}_model"),
-            api_key=settings.groq_api_key, api_base=settings.groq_api_base,
-        )
+        engine = build_engine(settings, provider, role)
+        if model:
+            engine.model_name = model
+        return engine
     from ai.mlx_engine import MLXEngine
 
     local = {"main": settings.model_path, "analysis": settings.analysis_model_path,
@@ -167,7 +169,7 @@ def _git(*args: str) -> str:
 def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - live check
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--suite", required=True, choices=suites.SUITES)
-    parser.add_argument("--provider", choices=("local", "groq"),
+    parser.add_argument("--provider", choices=PROVIDERS,
                         help="override the configured provider for this run")
     parser.add_argument("--model", help="override the model id for this run")
     parser.add_argument("--repeats", type=int, default=3)

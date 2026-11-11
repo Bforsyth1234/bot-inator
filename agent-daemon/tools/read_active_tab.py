@@ -26,6 +26,10 @@ Safety of ``read_active_tab_text``:
   -- is refused. ``file://`` is refused because a local file can be
   anything on disk (statements, exports, keys) and is not "a web page the
   user is browsing"; the agent has file tools for files it is asked about.
+* Nothing is read while an app on the never-watch list (#87,
+  ``ai.delivery.is_never_watched``; password managers by default) is in
+  front, or when the browser itself is on the list. URL and title are
+  blanked too.
 * With a cloud main engine, ``text`` is replaced by the #31 placeholder
   unless ``AGENT_CLOUD_PERSONAL_TEXT=1`` (invariant 7c). URL and title are
   unchanged.
@@ -62,6 +66,10 @@ DEFAULT_MAX_CHARS = 8000
 MAX_CHARS_CAP = 20_000
 
 SENSITIVE_ERROR = "page is on the sensitive-site list"
+NEVER_WATCH_ERROR = "an app on the never-watch list is in front, or is this browser"
+
+# #87: bundle ids, for the never-watch list (``ai.delivery``).
+BROWSER_BUNDLE_IDS: dict[str, str] = {CHROME: "com.google.Chrome", SAFARI: "com.apple.Safari"}
 
 # Menu path to the one-time browser setting (#58 decision 3).
 JS_SETTING_MENU: dict[str, str] = {
@@ -286,6 +294,36 @@ def read_active_tab() -> dict[str, Any]:
     return {"url": "", "title": "", "browser": "", "error": _NO_BROWSER}
 
 
+# ---- never-watch apps (#87) -------------------------------------------------
+
+def _front_app() -> tuple[Optional[str], Optional[str]]:
+    """(bundle id, name) of the frontmost app via ``lsappinfo``; Nones on failure."""
+    try:
+        asn = subprocess.run(
+            ["lsappinfo", "front"], capture_output=True, text=True, timeout=2.0,
+        ).stdout.strip()
+        if not asn.startswith("ASN:"):
+            return None, None
+        out = subprocess.run(
+            ["lsappinfo", "info", "-only", "bundleid", "-only", "name", asn],
+            capture_output=True, text=True, timeout=2.0,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    values = dict(re.findall(r'"([^"]+)"="([^"]*)"', out or ""))
+    return values.get("CFBundleIdentifier") or None, values.get("LSDisplayName") or None
+
+
+def never_watched(browser: str) -> bool:
+    """True when the browser or the frontmost app is on the never-watch list."""
+    from ai.delivery import is_never_watched  # lazy: ai pulls in the AI stack
+
+    if is_never_watched(BROWSER_BUNDLE_IDS.get(browser), browser):
+        return True
+    bundle, name = _front_app()
+    return is_never_watched(bundle, name)
+
+
 # ---- page text -------------------------------------------------------------
 
 _HSPACE_RE = re.compile(r"[^\S\n]+")
@@ -356,6 +394,9 @@ def read_active_tab_text(max_chars: int = DEFAULT_MAX_CHARS) -> dict[str, Any]:
         result["error"] = SENSITIVE_ERROR
         return result
     browser = tab["browser"]
+    if never_watched(browser):
+        result.update(url="", title="", error=NEVER_WATCH_ERROR)
+        return result
     ok, out, err = _osascript(
         _JS_SCRIPTS[browser], PAGE_TEXT_JS, tab["url"], timeout=_JS_TIMEOUT_S,
     )

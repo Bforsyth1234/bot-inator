@@ -18,6 +18,14 @@ CHECKS NEVER PROMPT. ``check_all()`` must not put a macOS dialog on screen:
   ``defaults``). No JavaScript is ever run in the user's tabs.
 * Calendars: provided by the menu bar app via EventKit (#60); ``unknown``
   until #60 calls :func:`set_external_check`.
+* Accessibility (#74, quick-ask reads the selected text): ``AXIsProcessTrusted``
+  through ``ctypes`` on ApplicationServices (never prompts; the prompting
+  variant ``AXIsProcessTrustedWithOptions`` is never called). The menu bar
+  app may supply its own status with :func:`set_external_check`.
+* Microphone and Speech Recognition (#86, meeting notes): the menu bar app
+  records and transcribes on the device, so only it can say;
+  ``unknown`` until ``events.meeting_notes`` relays the app's
+  ``meeting_record_state`` report through :func:`set_external_check`.
 
 Only :func:`request` (an explicit ``POST /api/permissions/<id>/request``,
 i.e. a user click) may prompt or open System Settings.
@@ -35,6 +43,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +63,9 @@ SETTINGS_URLS = {
     "screen_recording": _PANE + "Privacy_ScreenCapture",
     "automation": _PANE + "Privacy_Automation",
     "calendars": _PANE + "Privacy_Calendars",
+    "accessibility": _PANE + "Privacy_Accessibility",
+    "microphone": _PANE + "Privacy_Microphone",
+    "speech_recognition": _PANE + "Privacy_SpeechRecognition",
 }
 
 CheckResult = dict[str, str]  # {"status": ..., "detail": ...}
@@ -69,6 +81,18 @@ def _open_url(url: str) -> None:
     """Open a URL (System Settings pane) with ``/usr/bin/open``."""
     subprocess.run(["/usr/bin/open", url], check=False, timeout=10,
                    capture_output=True)
+
+
+def _launch_hidden(bundle_id: str) -> None:
+    """Start ``bundle_id`` in the background (``open -g -j -b``) and give it
+    a moment to register for Apple Events (#98: the user could not open
+    System Events, a background app with no window)."""
+    subprocess.run(["/usr/bin/open", "-g", "-j", "-b", bundle_id], check=False,
+                   timeout=10, capture_output=True)
+    time.sleep(_LAUNCH_SETTLE_SECONDS)
+
+
+_LAUNCH_SETTLE_SECONDS = 1.5
 
 
 def _quartz() -> Any:
@@ -146,6 +170,24 @@ def _read_defaults(domain: str, key: str) -> Optional[str]:
     proc = subprocess.run(["/usr/bin/defaults", "read", domain, key],
                           capture_output=True, text=True, timeout=5, check=False)
     return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+_APPSERVICES = ("/System/Library/Frameworks/ApplicationServices.framework/"
+                "ApplicationServices")
+
+
+def _ax_is_process_trusted() -> Optional[bool]:
+    """``AXIsProcessTrusted()`` (never prompts); None when unavailable."""
+    try:
+        lib = ctypes.CDLL(_APPSERVICES)
+    except OSError:
+        return None
+    fn = getattr(lib, "AXIsProcessTrusted", None)
+    if fn is None:
+        return None
+    fn.argtypes = []
+    fn.restype = ctypes.c_bool
+    return bool(fn())
 
 
 # ---- checks -------------------------------------------------------------------
@@ -269,6 +311,39 @@ def check_calendars() -> CheckResult:
     return fn()
 
 
+def check_accessibility() -> CheckResult:
+    """Accessibility for quick-ask's selected text (#74). The menu bar app
+    reads the selection, so its own report wins when it supplies one."""
+    fn = _external_checks.get("accessibility")
+    if fn is not None:
+        return fn()
+    try:
+        ok = _ax_is_process_trusted()
+    except Exception as exc:
+        return _result(UNKNOWN, f"can't check: {exc}")
+    if ok is None:
+        return _result(UNKNOWN, "AXIsProcessTrusted unavailable")
+    # Like Screen Recording, macOS doesn't say whether it was ever asked.
+    return _result(GRANTED) if ok else _result(
+        DENIED, "not granted; quick-ask offers the clipboard instead")
+
+
+_APP_REPORTS = "reported by the menu bar app (meeting notes, #86)"
+
+
+def check_microphone() -> CheckResult:
+    """Microphone for meeting notes (#86). The app records, so only its
+    own report counts; never checked (or prompted) from the daemon."""
+    fn = _external_checks.get("microphone")
+    return fn() if fn is not None else _result(UNKNOWN, _APP_REPORTS)
+
+
+def check_speech_recognition() -> CheckResult:
+    """On-device Speech Recognition for meeting notes (#86); app-reported."""
+    fn = _external_checks.get("speech_recognition")
+    return fn() if fn is not None else _result(UNKNOWN, _APP_REPORTS)
+
+
 # ---- requests (only on an explicit user click) --------------------------------
 
 def _opened(url: str, detail: str = "") -> dict[str, Any]:
@@ -292,10 +367,15 @@ def request_screen_recording() -> dict[str, Any]:
 
 def request_automation(bundle_id: str, app: str) -> dict[str, Any]:
     code = _ae_determine(bundle_id, ask=True)
+    if code == _AE_PROC_NOT_FOUND:
+        # #98: start the target ourselves and ask once more, so Request
+        # always does something instead of "open X first".
+        _launch_hidden(bundle_id)
+        code = _ae_determine(bundle_id, ask=True)
     if code == _AE_NO_ERR:
         return {"action": "prompted", "detail": "granted"}
     if code == _AE_PROC_NOT_FOUND:
-        return {"action": "none", "detail": f"open {app} first, then click Request"}
+        return {"action": "none", "detail": f"couldn't start {app}; open it, then click Request"}
     return _opened(SETTINGS_URLS["automation"],
                    f"turn on {app} under this process in Automation")
 
@@ -310,6 +390,33 @@ def request_calendars() -> dict[str, Any]:
         return fn()
     return _opened(SETTINGS_URLS["calendars"],
                    "Calendar access moves to the menu bar app (#60)")
+
+
+def request_accessibility() -> dict[str, Any]:
+    fn = _external_requests.get("accessibility")
+    if fn is not None:
+        return fn()
+    return _opened(SETTINGS_URLS["accessibility"],
+                   "turn on the menu bar app (and the process below) "
+                   "in Accessibility")
+
+
+def request_microphone() -> dict[str, Any]:
+    fn = _external_requests.get("microphone")
+    if fn is not None:
+        return fn()
+    return _opened(SETTINGS_URLS["microphone"],
+                   "macOS asks the first time you click Take notes; if you "
+                   "said no, turn on the menu bar app here")
+
+
+def request_speech_recognition() -> dict[str, Any]:
+    fn = _external_requests.get("speech_recognition")
+    if fn is not None:
+        return fn()
+    return _opened(SETTINGS_URLS["speech_recognition"],
+                   "macOS asks the first time a meeting is transcribed; if "
+                   "you said no, turn on the menu bar app here")
 
 
 # ---- the table ---------------------------------------------------------------
@@ -347,8 +454,9 @@ PERMISSIONS: list[Permission] = [
     ),
     Permission(
         id="screen_recording", name="Screen Recording",
-        why="See window titles when listing open windows.",
-        used_by=("tools/windows.py",),
+        why=("See window titles when listing open windows; with meeting "
+             "notes, hear the other side of a call (system audio)."),
+        used_by=("tools/windows.py", "MenuBarUI/Services/MeetingRecorder.swift"),
         check=lambda: check_screen_recording(),
         request=lambda: request_screen_recording(),
     ),
@@ -359,6 +467,33 @@ PERMISSIONS: list[Permission] = [
                  "tools/create_event.py", "events/calendar_watcher.py"),
         check=lambda: check_calendars(),
         request=lambda: request_calendars(), request_kind="settings",
+    ),
+    Permission(
+        id="accessibility", name="Accessibility",
+        why=("Read the text you selected when you open quick-ask (⌥Space); "
+             "without it quick-ask offers the clipboard instead."),
+        used_by=("MenuBarUI/Views/QuickAskPanel.swift",),
+        check=lambda: check_accessibility(),
+        request=lambda: request_accessibility(), request_kind="settings",
+    ),
+    Permission(
+        id="microphone", name="Microphone",
+        why=("Record a meeting's audio for notes, only after you click Take "
+             "notes; the audio stays on this Mac and is deleted once "
+             "transcribed."),
+        used_by=("MenuBarUI/Services/MeetingRecorder.swift",
+                 "events/meeting_notes.py"),
+        check=lambda: check_microphone(),
+        request=lambda: request_microphone(), request_kind="settings",
+    ),
+    Permission(
+        id="speech_recognition", name="Speech Recognition",
+        why=("Turn a recorded meeting into text on this Mac (on-device "
+             "only; nothing goes to Apple's servers)."),
+        used_by=("MenuBarUI/Services/MeetingRecorder.swift",
+                 "events/meeting_notes.py"),
+        check=lambda: check_speech_recognition(),
+        request=lambda: request_speech_recognition(), request_kind="settings",
     ),
     _automation("automation_reminders", "Reminders", "com.apple.reminders",
                 "List and create reminders (AGENT_REMINDERS_BACKEND=applescript).",
@@ -398,9 +533,15 @@ PERMISSIONS: list[Permission] = [
             "then Develop → Allow JavaScript from Apple Events."),
         request_kind="instructions",
     ),
+    # #85 (user, 2026-11-10, answer A): the iPhone remote sends to the
+    # user's OWN handle only. tools/send_imessage.py stays unregistered.
+    # #98: Messages is com.apple.MobileSMS on current macOS (com.apple.iChat
+    # was the old id: no process ever has it, so Request could never ask).
+    _automation("automation_messages", "Messages", "com.apple.MobileSMS",
+                "Send answers and approval cards to your own Messages thread "
+                "(iPhone remote, only when it is on).",
+                ("events/remote_channel.py",)),
 ]
-# Not listed: Automation → Messages. tools/send_imessage.py is not a
-# registered tool (the user doesn't want it); add a row if it ever is.
 
 _BY_ID = {p.id: p for p in PERMISSIONS}
 

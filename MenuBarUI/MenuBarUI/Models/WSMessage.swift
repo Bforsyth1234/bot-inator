@@ -34,6 +34,17 @@ struct ApprovalRequestPayload: Codable, Hashable {
     /// Plain-language summary of a suggested tool (#64). Only set on
     /// `generate_custom_tool` idea cards; nil from older daemons.
     let summary: String?
+    /// A prepared offer's actions (#76): one approval runs every ticked one.
+    /// nil (older daemons, ordinary cards) keeps the one-call card.
+    let actions: [ApprovalAction]?
+    /// #83: the daemon's action journal can undo this tool's result. The
+    /// presenter shows such a card as a small panel that does not take focus
+    /// (still a card: Approve / Deny / Edit). nil (older daemons) = false.
+    var reversible: Bool? = nil
+    /// #81: the card was shaped by outside text this turn read ("Read this
+    /// turn: email from ...", "to: from the email, not from you"). nil on
+    /// unmarked turns and from older daemons.
+    var originNotes: [String]? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -43,6 +54,29 @@ struct ApprovalRequestPayload: Codable, Hashable {
         case reasoning
         case timeoutSeconds = "timeout_seconds"
         case summary
+        case actions
+        case reversible
+        case originNotes = "origin_notes"
+    }
+}
+
+/// One action of a bundled approval card (#76). `args` are the tool's
+/// kwargs. The card sends the list back in `edited_args["actions"]` with
+/// `enabled` as the user ticked it; the daemon runs only ticked actions.
+struct ApprovalAction: Codable, Hashable {
+    let tool: String
+    let args: JSONValue
+    let enabled: Bool?
+    let label: String?
+
+    /// `{"tool", "args", "enabled", "label"}` for `edited_args["actions"]`.
+    func encoded(enabled: Bool, args newArgs: JSONValue? = nil) -> JSONValue {
+        .object([
+            "tool": .string(tool),
+            "args": newArgs ?? args,
+            "enabled": .bool(enabled),
+            "label": .string(label ?? ""),
+        ])
     }
 }
 
@@ -84,12 +118,20 @@ struct StatusPayload: Codable, Hashable {
     /// True when personal text may reach cloud engines
     /// (`AGENT_CLOUD_PERSONAL_TEXT=1`), #31.
     let cloudPersonalText: Bool?
+    /// #87 delivery: Pause, offers held for a better moment, and the Inbox.
+    /// `pausedUntil` is ISO 8601 or "indefinite". nil from older daemons.
+    let paused: Bool?
+    let pausedUntil: String?
+    let heldCount: Int?
+    let inboxCount: Int?
 
     init(state: DaemonState, modelLoaded: String? = nil,
          listenersActive: [String]? = nil, version: String? = nil,
          listenerHealth: [String: ListenerHealth]? = nil,
          engineProviders: [String: String]? = nil,
-         cloudPersonalText: Bool? = nil) {
+         cloudPersonalText: Bool? = nil,
+         paused: Bool? = nil, pausedUntil: String? = nil,
+         heldCount: Int? = nil, inboxCount: Int? = nil) {
         self.state = state
         self.modelLoaded = modelLoaded
         self.listenersActive = listenersActive
@@ -97,6 +139,10 @@ struct StatusPayload: Codable, Hashable {
         self.listenerHealth = listenerHealth
         self.engineProviders = engineProviders
         self.cloudPersonalText = cloudPersonalText
+        self.paused = paused
+        self.pausedUntil = pausedUntil
+        self.heldCount = heldCount
+        self.inboxCount = inboxCount
     }
 
     enum CodingKeys: String, CodingKey {
@@ -107,6 +153,10 @@ struct StatusPayload: Codable, Hashable {
         case listenerHealth = "listener_health"
         case engineProviders = "engine_providers"
         case cloudPersonalText = "cloud_personal_text"
+        case paused
+        case pausedUntil = "paused_until"
+        case heldCount = "held_count"
+        case inboxCount = "inbox_count"
     }
 }
 
@@ -143,9 +193,31 @@ enum NoticeLevel: String, Codable, Hashable {
 }
 
 struct NoticeAction: Codable, Hashable {
-    /// Only `open_settings` today: opens `url` (a System Settings pane).
+    /// `open_settings` opens `url` (a System Settings pane). `undo` (#78):
+    /// one-click Undo of the standing-rule run journaled as `entryId`
+    /// (`POST /api/rules/runs/{entry_id}/undo`).
     let kind: String
-    let url: String
+    var url: String? = nil
+    var entryId: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case kind, url
+        case entryId = "entry_id"
+    }
+}
+
+/// Server→client (#85): the card `requestId` was answered (here, in another
+/// window, or from the phone) or timed out. A card still open closes.
+struct ApprovalResolvedPayload: Codable, Hashable {
+    let requestId: String
+    /// `approved`, `declined` or `timed_out`.
+    let outcome: String
+    var note: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case outcome, note
+    }
 }
 
 /// Server→client hint that `GET /api/tools` changed (#29).
@@ -169,6 +241,14 @@ enum DaemonState: String, Codable, Hashable {
 
 struct CommandPayload: Codable, Hashable {
     let action: CommandAction
+    /// Only for `pause_listeners` (#87); nil means "until I resume".
+    /// `PauseDuration` lives in `OfferInboxView.swift`.
+    let duration: PauseDuration?
+
+    init(action: CommandAction, duration: PauseDuration? = nil) {
+        self.action = action
+        self.duration = duration
+    }
 }
 
 enum CommandAction: String, Codable, Hashable {
@@ -177,6 +257,10 @@ enum CommandAction: String, Codable, Hashable {
     case reloadModel = "reload_model"
     case clearMemory = "clear_memory"
     case reloadDynamicTools = "reload_dynamic_tools"
+    /// #84 "Watch me".
+    case demonstrationStart = "demonstration_start"
+    case demonstrationStop = "demonstration_stop"
+    case demonstrationCancel = "demonstration_cancel"
 }
 
 /// Server→client request to review AI-generated Python tool source.
@@ -192,6 +276,9 @@ struct CodeApprovalRequestPayload: Codable, Hashable {
     /// Plain-language summary shown above the code (#64); nil from older
     /// daemons.
     let summary: String?
+    /// #90: the installed source a repair replaces; the review card shows a
+    /// diff against it. nil for a new tool and from older daemons.
+    var previousCode: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -201,6 +288,7 @@ struct CodeApprovalRequestPayload: Codable, Hashable {
         case code
         case timeoutSeconds = "timeout_seconds"
         case summary
+        case previousCode = "previous_code"
     }
 }
 
@@ -235,10 +323,50 @@ struct CodeApprovalResponsePayload: Codable, Hashable {
 struct UserMessagePayload: Codable, Hashable {
     let messageId: String
     let text: String
+    /// What the user was looking at (#74 quick-ask). Nil from the Chat
+    /// window; omitted from the JSON when nil, so older daemons are fine.
+    let context: ChatContextPayload?
+
+    init(messageId: String, text: String, context: ChatContextPayload? = nil) {
+        self.messageId = messageId
+        self.text = text
+        self.context = context
+    }
 
     enum CodingKeys: String, CodingKey {
         case messageId = "message_id"
         case text
+        case context
+    }
+}
+
+/// Quick-ask context (#74): front app, window title, and the selected text
+/// or clipboard only when the user chose to include it. The daemon puts it
+/// in that one turn's prompt; it is not stored.
+struct ChatContextPayload: Codable, Hashable {
+    var frontApp: String? = nil
+    var windowTitle: String? = nil
+    var selection: String? = nil
+    var selectionSource: SelectionSource? = nil
+
+    enum SelectionSource: String, Codable, Hashable {
+        case selection
+        case clipboard
+        /// #89: "include this window's text". Sent with no `selection`;
+        /// the daemon reads the window itself. Older daemons reject the
+        /// value, so send it only to a daemon that has `read_front_window`.
+        case window
+    }
+
+    var isEmpty: Bool {
+        frontApp == nil && windowTitle == nil && selection == nil
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case frontApp = "front_app"
+        case windowTitle = "window_title"
+        case selection
+        case selectionSource = "selection_source"
     }
 }
 
@@ -257,6 +385,11 @@ enum CalendarOp: String, Codable, Hashable {
     case list
     case create
     case requestAccess = "request_access"
+    /// #83 (undo only): `{event_id}`. `get` answers `events` = [] or one
+    /// event; `delete` removes that one event. Only the daemon's action
+    /// journal sends them.
+    case get
+    case delete
 }
 
 /// Server→client: run one EventKit operation for the daemon. `args` is
@@ -286,10 +419,27 @@ struct CalendarEventDTO: Codable, Hashable {
     let notes: String
     let url: String
     let allDay: Bool
+    /// #80: people on the event (rooms and resources left out); `[]` for a
+    /// solo event. Optional so the frame stays the same shape for daemons
+    /// older than #80, which ignore it.
+    var attendees: [CalendarAttendeeDTO]? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, title, start, end, calendar, location, notes, url
+        case id, title, start, end, calendar, location, notes, url, attendees
         case allDay = "all_day"
+    }
+}
+
+/// One `EKParticipant` (#80). `email` is the address from its `mailto:`
+/// URL ("" when it has none).
+struct CalendarAttendeeDTO: Codable, Hashable {
+    let name: String
+    let email: String
+    let isSelf: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case name, email
+        case isSelf = "is_self"
     }
 }
 
@@ -317,6 +467,72 @@ struct CalendarStatusPayload: Codable, Hashable {
     let authorization: CalendarAuthorization
 }
 
+// MARK: - Front-window text through the app (#89)
+
+/// Why a `screen_text_request` read nothing (matches the daemon's
+/// `ScreenTextErrorCode`).
+enum ScreenTextErrorCode: String, Codable, Hashable {
+    case accessibilityOff = "accessibility_off"
+    case noWindow = "no_window"
+    case neverWatch = "never_watch"
+    case secureField = "secure_field"
+    case browser
+    case ownApp = "own_app"
+    case nothingReadable = "nothing_readable"
+    case failed
+}
+
+/// Server→client: read the focused window's Accessibility text once.
+/// `neverWatch` is the daemon's #87 list (bundle ids with a dot, app names
+/// without): those apps are refused before anything is read.
+struct ScreenTextRequestPayload: Codable, Hashable {
+    let requestId: String
+    var maxChars: Int? = nil
+    var neverWatch: [String]? = nil
+    var timeoutSeconds: Int? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case maxChars = "max_chars"
+        case neverWatch = "never_watch"
+        case timeoutSeconds = "timeout_seconds"
+    }
+}
+
+/// Client→server answer to a `screen_text_request`. `text` never holds a
+/// secure field's value; on `ok == false` it is nil and `errorCode` says why.
+struct ScreenTextResponsePayload: Codable, Hashable {
+    let requestId: String
+    let ok: Bool
+    var app: String? = nil
+    var bundleId: String? = nil
+    var title: String? = nil
+    var text: String? = nil
+    var truncated: Bool = false
+    var error: String? = nil
+    var errorCode: ScreenTextErrorCode? = nil
+    var accessibilityTrusted: Bool? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case ok, app
+        case bundleId = "bundle_id"
+        case title, text, truncated, error
+        case errorCode = "error_code"
+        case accessibilityTrusted = "accessibility_trusted"
+    }
+}
+
+/// Client→server: this app reads front windows for the daemon, and whether
+/// it has Accessibility (`AXIsProcessTrusted`, never prompts).
+struct ScreenTextStatusPayload: Codable, Hashable {
+    let accessibilityTrusted: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case accessibilityTrusted = "accessibility_trusted"
+    }
+}
+
 // MARK: - Discriminated Union
 
 enum WSMessage: Codable, Hashable {
@@ -333,6 +549,19 @@ enum WSMessage: Codable, Hashable {
     case calendarRequest(seq: Int, timestamp: Date, payload: CalendarRequestPayload)
     case calendarResponse(seq: Int, timestamp: Date, payload: CalendarResponsePayload)
     case calendarStatus(seq: Int, timestamp: Date, payload: CalendarStatusPayload)
+    case screenTextRequest(seq: Int, timestamp: Date, payload: ScreenTextRequestPayload)
+    case screenTextResponse(seq: Int, timestamp: Date, payload: ScreenTextResponsePayload)
+    case screenTextStatus(seq: Int, timestamp: Date, payload: ScreenTextStatusPayload)
+    /// #85: a card was answered anywhere (incl. the phone) or timed out.
+    case approvalResolved(seq: Int, timestamp: Date, payload: ApprovalResolvedPayload)
+    /// #84 "Watch me" (payload structs live in DemonstrationPanel.swift).
+    case demonstrationTrace(seq: Int, timestamp: Date, payload: DemonstrationTracePayload)
+    case demonstrationDraft(seq: Int, timestamp: Date, payload: DemonstrationDraftPayload)
+    /// #86 meeting notes (payload structs live in MeetingRecorder.swift).
+    case meetingRecordOffer(seq: Int, timestamp: Date, payload: MeetingRecordOfferPayload)
+    case meetingRecordStop(seq: Int, timestamp: Date, payload: MeetingRecordStopPayload)
+    case meetingRecordState(seq: Int, timestamp: Date, payload: MeetingRecordStatePayload)
+    case meetingAudioReady(seq: Int, timestamp: Date, payload: MeetingAudioReadyPayload)
 
     var seq: Int {
         switch self {
@@ -344,7 +573,13 @@ enum WSMessage: Codable, Hashable {
              .toolsChanged(let seq, _, _), .command(let seq, _, _),
              .userMessage(let seq, _, _),
              .calendarRequest(let seq, _, _), .calendarResponse(let seq, _, _),
-             .calendarStatus(let seq, _, _):
+             .calendarStatus(let seq, _, _),
+             .screenTextRequest(let seq, _, _), .screenTextResponse(let seq, _, _),
+             .screenTextStatus(let seq, _, _),
+             .approvalResolved(let seq, _, _),
+             .demonstrationTrace(let seq, _, _), .demonstrationDraft(let seq, _, _),
+             .meetingRecordOffer(let seq, _, _), .meetingRecordStop(let seq, _, _),
+             .meetingRecordState(let seq, _, _), .meetingAudioReady(let seq, _, _):
             return seq
         }
     }
@@ -359,7 +594,13 @@ enum WSMessage: Codable, Hashable {
              .toolsChanged(_, let ts, _), .command(_, let ts, _),
              .userMessage(_, let ts, _),
              .calendarRequest(_, let ts, _), .calendarResponse(_, let ts, _),
-             .calendarStatus(_, let ts, _):
+             .calendarStatus(_, let ts, _),
+             .screenTextRequest(_, let ts, _), .screenTextResponse(_, let ts, _),
+             .screenTextStatus(_, let ts, _),
+             .approvalResolved(_, let ts, _),
+             .demonstrationTrace(_, let ts, _), .demonstrationDraft(_, let ts, _),
+             .meetingRecordOffer(_, let ts, _), .meetingRecordStop(_, let ts, _),
+             .meetingRecordState(_, let ts, _), .meetingAudioReady(_, let ts, _):
             return ts
         }
     }
@@ -382,6 +623,16 @@ enum WSMessage: Codable, Hashable {
         case calendarRequest = "calendar_request"
         case calendarResponse = "calendar_response"
         case calendarStatus = "calendar_status"
+        case screenTextRequest = "screen_text_request"
+        case screenTextResponse = "screen_text_response"
+        case screenTextStatus = "screen_text_status"
+        case approvalResolved = "approval_resolved"
+        case demonstrationTrace = "demonstration_trace"
+        case demonstrationDraft = "demonstration_draft"
+        case meetingRecordOffer = "meeting_record_offer"
+        case meetingRecordStop = "meeting_record_stop"
+        case meetingRecordState = "meeting_record_state"
+        case meetingAudioReady = "meeting_audio_ready"
     }
 
     init(from decoder: Decoder) throws {
@@ -430,6 +681,36 @@ enum WSMessage: Codable, Hashable {
         case .calendarStatus:
             self = .calendarStatus(seq: seq, timestamp: timestamp,
                                    payload: try container.decode(CalendarStatusPayload.self, forKey: .payload))
+        case .screenTextRequest:
+            self = .screenTextRequest(seq: seq, timestamp: timestamp,
+                                      payload: try container.decode(ScreenTextRequestPayload.self, forKey: .payload))
+        case .screenTextResponse:
+            self = .screenTextResponse(seq: seq, timestamp: timestamp,
+                                       payload: try container.decode(ScreenTextResponsePayload.self, forKey: .payload))
+        case .screenTextStatus:
+            self = .screenTextStatus(seq: seq, timestamp: timestamp,
+                                     payload: try container.decode(ScreenTextStatusPayload.self, forKey: .payload))
+        case .approvalResolved:
+            self = .approvalResolved(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(ApprovalResolvedPayload.self, forKey: .payload))
+        case .demonstrationTrace:
+            self = .demonstrationTrace(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(DemonstrationTracePayload.self, forKey: .payload))
+        case .demonstrationDraft:
+            self = .demonstrationDraft(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(DemonstrationDraftPayload.self, forKey: .payload))
+        case .meetingRecordOffer:
+            self = .meetingRecordOffer(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(MeetingRecordOfferPayload.self, forKey: .payload))
+        case .meetingRecordStop:
+            self = .meetingRecordStop(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(MeetingRecordStopPayload.self, forKey: .payload))
+        case .meetingRecordState:
+            self = .meetingRecordState(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(MeetingRecordStatePayload.self, forKey: .payload))
+        case .meetingAudioReady:
+            self = .meetingAudioReady(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(MeetingAudioReadyPayload.self, forKey: .payload))
         }
     }
 
@@ -476,6 +757,36 @@ enum WSMessage: Codable, Hashable {
             try container.encode(payload, forKey: .payload)
         case .calendarStatus(_, _, let payload):
             try container.encode(MessageType.calendarStatus, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .screenTextRequest(_, _, let payload):
+            try container.encode(MessageType.screenTextRequest, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .screenTextResponse(_, _, let payload):
+            try container.encode(MessageType.screenTextResponse, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .screenTextStatus(_, _, let payload):
+            try container.encode(MessageType.screenTextStatus, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .approvalResolved(_, _, let payload):
+            try container.encode(MessageType.approvalResolved, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .demonstrationTrace(_, _, let payload):
+            try container.encode(MessageType.demonstrationTrace, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .demonstrationDraft(_, _, let payload):
+            try container.encode(MessageType.demonstrationDraft, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .meetingRecordOffer(_, _, let payload):
+            try container.encode(MessageType.meetingRecordOffer, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .meetingRecordStop(_, _, let payload):
+            try container.encode(MessageType.meetingRecordStop, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .meetingRecordState(_, _, let payload):
+            try container.encode(MessageType.meetingRecordState, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .meetingAudioReady(_, _, let payload):
+            try container.encode(MessageType.meetingAudioReady, forKey: .type)
             try container.encode(payload, forKey: .payload)
         }
     }

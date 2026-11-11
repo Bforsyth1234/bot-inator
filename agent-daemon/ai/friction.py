@@ -111,6 +111,22 @@ class FrictionDetector:
     """Detect copy -> switch and ping-pong between two apps; publish filtered ideas."""
 
     source_name = "friction"
+    # #79: ``ai.idea_outcomes.OutcomeStore`` set by main.py. When this
+    # source's ideas are rarely kept it raises the judge bar and stretches
+    # the cooldown (deterministic; None = the configured values).
+    outcomes: Any = None
+
+    def _adjusted(self, base_score: int, base_cooldown: float, kind: Optional[str] = None) -> tuple[int, float]:
+        if self.outcomes is None:
+            return base_score, base_cooldown
+        try:
+            return (
+                self.outcomes.judge_threshold(self.source_name, base_score, kind),
+                base_cooldown * self.outcomes.cooldown_multiplier(self.source_name, kind),
+            )
+        except Exception:
+            logger.exception("%s outcome adjustment failed", self.source_name)
+            return base_score, base_cooldown
 
     def __init__(
         self,
@@ -217,7 +233,7 @@ class FrictionDetector:
             return None
         if self._task is not None and not self._task.done():
             return None
-        self._cooldowns[key] = now + self.cooldown_seconds
+        self._cooldowns[key] = now + self._adjusted(0, self.cooldown_seconds, trigger)[1]
         self._cooldowns = {k: v for k, v in self._cooldowns.items() if v > now}
         self._transfers.pop(apps, None)
         self._switches.clear()
@@ -259,6 +275,7 @@ class FrictionDetector:
             self.last_verdict = {"tool_name": None, "stage": "no_idea", "score": None, "reason": ""}
             return
         min_score = self.min_score if trigger == "copy_paste" else self.pingpong_min_score
+        min_score, _ = self._adjusted(min_score, self.cooldown_seconds, trigger)
         if not await self._accept(idea, prompt, apps, min_score):
             return
         idea.update(

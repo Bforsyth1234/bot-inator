@@ -40,3 +40,37 @@ os.environ.setdefault(
 # A developer's .env opt-in to sending personal text to the cloud (#31) must
 # not change test expectations; tests that need it set it themselves.
 os.environ.setdefault("AGENT_CLOUD_PERSONAL_TEXT", "0")
+# #93: the settings path above usually does not exist, which would make
+# every app start "first run pending" (no engines). tests/test_first_run.py
+# clears this to exercise the screen.
+os.environ.setdefault("AGENT_SKIP_FIRST_RUN", "1")
+# Wave 13: keep the developer's real ~/.bot-inator stores out of tests:
+# activity history (#75), MCP servers (#69), suggestion outcomes and the
+# approval-decision log (#79).
+_wave13_tmp = _tempfile.mkdtemp(prefix="bot-inator-w13-")
+os.environ.setdefault("AGENT_ACTIVITY_DB", os.path.join(_wave13_tmp, "activity.db"))
+os.environ.setdefault("AGENT_MCP_CONFIG_PATH", os.path.join(_wave13_tmp, "mcp_servers.json"))
+os.environ.setdefault("AGENT_IDEA_OUTCOMES_PATH", os.path.join(_wave13_tmp, "idea_outcomes.json"))
+os.environ.setdefault(
+    "AGENT_APPROVAL_DECISIONS_PATH", os.path.join(_wave13_tmp, "approval_decisions.json")
+)
+# Wave 15: keep the developer's real ~/.bot-inator stores out of tests:
+# the action journal (#83), the privacy ledger (#82, REQUIRED: the egress
+# hooks write a row on every cloud call, URL open and model download), tool
+# health (#90), delivery settings + held offers (#87) and watches (#88).
+_wave15_tmp = _tempfile.mkdtemp(prefix="bot-inator-w15-")
+os.environ.setdefault("AGENT_ACTIONS_DB", os.path.join(_wave15_tmp, "actions.db"))
+os.environ.setdefault("AGENT_EGRESS_DB", os.path.join(_wave15_tmp, "egress.db"))
+os.environ.setdefault("AGENT_TOOL_HEALTH_PATH", os.path.join(_wave15_tmp, "tool_health.json"))
+os.environ.setdefault(
+    "AGENT_DELIVERY_SETTINGS_PATH", os.path.join(_wave15_tmp, "delivery_settings.json")
+)
+os.environ.setdefault("AGENT_HELD_OFFERS_PATH", os.path.join(_wave15_tmp, "held_offers.json"))
+os.environ.setdefault("AGENT_WATCHES_PATH", os.path.join(_wave15_tmp, "watches.json"))
+# #87: the developer's real calendar, running apps and key presses must not
+# hold test events (Pause still works).
+os.environ.setdefault("AGENT_DELIVERY_BUSY_CHECKS", "0")
+# Wave 16: keep the developer's real ~/.bot-inator stores out of tests:
+# standing rules (#78).
+_wave16_tmp = _tempfile.mkdtemp(prefix="bot-inator-w16-")
+os.environ.setdefault("AGENT_STANDING_RULES_PATH", os.path.join(_wave16_tmp, "standing_rules.json"))

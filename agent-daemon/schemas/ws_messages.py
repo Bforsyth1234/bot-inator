@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +32,20 @@ class ThoughtPayload(BaseModel):
     content: str
 
 
+class ApprovalAction(BaseModel):
+    """One action of a bundled approval card (#76).
+
+    ``args`` are the tool's kwargs. The card shows a tick box per action;
+    the response sends the list back in ``edited_args["actions"]`` with each
+    ``enabled`` as the user left it, and only ticked actions run.
+    """
+
+    tool: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    label: str = ""
+
+
 class ApprovalRequestPayload(BaseModel):
     request_id: str
     event_id: str
@@ -42,6 +56,18 @@ class ApprovalRequestPayload(BaseModel):
     # Plain-language summary of a suggested tool (#64): set on
     # ``generate_custom_tool`` idea cards, ``None`` otherwise.
     summary: str | None = None
+    # A prepared offer (#76): the actions one approval runs, each with a
+    # tick box. ``None`` (the default, and older daemons) is a one-call card.
+    actions: list[ApprovalAction] | None = None
+    # #83: the action journal can undo this tool's result (``ai.action_journal
+    # .is_undoable``). The app shows a reversible card as a small panel that
+    # does not take focus; it is still a card (invariant 7a). False (the
+    # default, and older daemons) keeps the full window.
+    reversible: bool = False
+    # #81: lines saying the card was shaped by outside text this turn read
+    # ("Read this turn: email from ...", "to: from the email, not from
+    # you"). ``None`` (the default, and every unmarked turn) shows nothing.
+    origin_notes: list[str] | None = None
 
 
 class ApprovalResponsePayload(BaseModel):
@@ -53,6 +79,20 @@ class ApprovalResponsePayload(BaseModel):
     # When present, the orchestrator invokes the tool with these values
     # instead of the ones the agent originally proposed.
     edited_args: dict[str, Any] | None = None
+
+
+ApprovalOutcome = Literal["approved", "declined", "timed_out"]
+
+
+class ApprovalResolvedPayload(BaseModel):
+    """Server→client (#85): the card ``request_id`` is answered or timed
+    out, wherever it was answered (this Mac, another window, the phone). A
+    client still showing that card closes it. ``note`` is the response's
+    ``user_note`` (e.g. "answered from your phone")."""
+
+    request_id: str
+    outcome: ApprovalOutcome
+    note: str | None = None
 
 
 class CodeApprovalRequestPayload(BaseModel):
@@ -72,6 +112,9 @@ class CodeApprovalRequestPayload(BaseModel):
     # Plain-language summary shown above the code (#64): what the tool
     # does, when it runs, what the drafted source touches, that it asks.
     summary: str | None = None
+    # #90: a repair's review card shows a diff against the installed source.
+    # ``None`` for a new tool (and older daemons).
+    previous_code: str | None = None
 
 
 class CodeApprovalResponsePayload(BaseModel):
@@ -104,6 +147,13 @@ class StatusPayload(BaseModel):
     # True when ``AGENT_CLOUD_PERSONAL_TEXT=1`` lets personal text reach
     # cloud engines; False when it is replaced by a placeholder (#31).
     cloud_personal_text: bool | None = None
+    # #87 right-moment delivery: Pause state (``paused_until`` is an ISO
+    # time, or "indefinite"), offers held until the user is free, and the
+    # Inbox (offers past the daily cap). ``None`` from older daemons.
+    paused: bool | None = None
+    paused_until: str | None = None
+    held_count: int | None = None
+    inbox_count: int | None = None
 
 
 NoticeLevel = Literal["info", "warning", "error"]
@@ -118,8 +168,21 @@ NOTICE_EVENT_TYPE = "system_notice"
 
 
 class NoticeAction(BaseModel):
-    kind: Literal["open_settings"]
-    url: str
+    """``open_settings``: open ``url``. ``undo`` (#78): one-click Undo of
+    the standing-rule run journaled as ``entry_id`` (the app calls
+    ``POST /api/rules/runs/{entry_id}/undo``; ``url`` is unused)."""
+
+    kind: Literal["open_settings", "undo"]
+    url: str = ""
+    entry_id: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_entry(self, handler: Any) -> dict[str, Any]:
+        # An ``open_settings`` action keeps its pre-#78 wire shape.
+        data = handler(self)
+        if data.get("entry_id") is None:
+            data.pop("entry_id", None)
+        return data
 
 
 class NoticePayload(BaseModel):
@@ -169,7 +232,7 @@ class ToolsChangedPayload(BaseModel):
 CalendarAuthorization = Literal[
     "not_determined", "restricted", "denied", "full_access", "write_only"
 ]
-CalendarOp = Literal["list", "create", "request_access"]
+CalendarOp = Literal["list", "create", "request_access", "get", "delete"]
 
 
 class CalendarRequestPayload(BaseModel):
@@ -178,6 +241,10 @@ class CalendarRequestPayload(BaseModel):
     ``list`` args: ``{start, end, calendars?}`` (ISO 8601 with offset).
     ``create`` args: ``{title, start, end, calendar?, location?, notes?}``.
     ``request_access`` (a Permissions "Request" click) takes no args.
+    ``get`` / ``delete`` (#83, undo only): ``{event_id}``. ``get`` answers
+    ``events`` = ``[]`` (no such event) or one event; ``delete`` removes that
+    one event (this occurrence) and answers ``ok``. Only the action journal
+    sends them, with an id it stored; the model has no delete tool.
     Sent to ONE connection (the app that advertised ``calendar_status``).
     """
 
@@ -211,17 +278,109 @@ class CalendarStatusPayload(BaseModel):
     authorization: CalendarAuthorization
 
 
+# ---- Front-window text through the menu bar app (#89) -------------------------
+# The app owns Accessibility (TCC); the daemon's ``read_front_window`` asks it
+# over this WebSocket, as Calendar does (#60).
+ScreenTextErrorCode = Literal[
+    "accessibility_off",  # AXIsProcessTrusted() is false for the app
+    "no_window",          # no other app / no focused window
+    "never_watch",        # the app is on the never-watch list (#87)
+    "secure_field",       # the focused element is a password field
+    "browser",            # a browser window: read_active_tab_text applies (#58)
+    "own_app",            # a bot-inator window
+    "nothing_readable",   # the window exposes no Accessibility text
+    "failed",             # anything else
+]
+
+
+class ScreenTextRequestPayload(BaseModel):
+    """Server→client: read the focused window's Accessibility text, once.
+
+    ``max_chars`` caps the text (the app caps at 8,000 regardless).
+    ``never_watch`` is the #87 list (bundle ids with a dot, app names
+    without); the app refuses those apps before reading anything. Sent to
+    ONE connection (the app that most recently sent ``screen_text_status``).
+    """
+
+    request_id: str
+    max_chars: int = 8000
+    never_watch: list[str] = Field(default_factory=list)
+    timeout_seconds: int = 2
+
+
+class ScreenTextResponsePayload(BaseModel):
+    """Client→server answer to a :class:`ScreenTextRequestPayload`.
+
+    ``text`` is the collected text (never a secure field's), already capped;
+    ``truncated`` says a cap (characters, nodes, depth or time) cut it.
+    On ``ok = false`` ``error_code`` says why and ``text`` is empty.
+    """
+
+    request_id: str
+    ok: bool
+    app: str | None = None
+    bundle_id: str | None = None
+    title: str | None = None
+    text: str | None = None
+    truncated: bool = False
+    error: str | None = None
+    error_code: ScreenTextErrorCode | None = None
+    accessibility_trusted: bool | None = None
+
+
+class ScreenTextStatusPayload(BaseModel):
+    """Client→server: this app can read the front window, and whether it has
+    Accessibility (``AXIsProcessTrusted``, never prompts). Sent on connect
+    and whenever it changes."""
+
+    accessibility_trusted: bool
+
+
 CommandAction = Literal[
     "pause_listeners",
     "resume_listeners",
     "reload_model",
     "clear_memory",
     "reload_dynamic_tools",
+    # #84 "Watch me": start / stop / cancel a demonstration recording.
+    "demonstration_start",
+    "demonstration_stop",
+    "demonstration_cancel",
 ]
+
+
+# #87: how long ``pause_listeners`` pauses (default: until resumed).
+PauseDuration = Literal["1h", "tomorrow", "indefinite"]
 
 
 class CommandPayload(BaseModel):
     action: CommandAction
+    # Only for ``pause_listeners`` (#87); ``None`` means "indefinite".
+    duration: PauseDuration | None = None
+
+
+# "window" (#89): the user ticked "include this window's text"; the app sends
+# no text, and the daemon reads the window itself (``read_front_window``,
+# with its never-watch / browser / secure-field / 7c rules) into
+# ``selection`` before the prompt is built.
+SelectionSource = Literal["selection", "clipboard", "window"]
+
+
+class ChatContextPayload(BaseModel):
+    """What the user was looking at when they opened quick-ask (#74).
+
+    Every field is optional. ``selection`` is text the user chose to
+    include for this one message (the app's selected text via
+    Accessibility, or the clipboard when the user picked "use what's on
+    the clipboard"); ``selection_source`` says which. The daemon renders
+    it into that turn's prompt only (:mod:`ai.chat_context`); it is not
+    stored in memory.
+    """
+
+    front_app: str | None = None
+    window_title: str | None = None
+    selection: str | None = None
+    selection_source: SelectionSource | None = None
 
 
 class UserMessagePayload(BaseModel):
@@ -231,10 +390,99 @@ class UserMessagePayload(BaseModel):
     ``event_id`` on every ``thought`` frame the daemon emits while handling
     the turn, so the chat UI can group the agent's streamed reasoning
     under the originating user bubble.
+
+    ``context`` (#74) is set by the quick-ask panel; absent from the Chat
+    window and older clients.
     """
 
     message_id: str
     text: str
+    context: ChatContextPayload | None = None
+
+
+# #84 "Watch me" ----------------------------------------------------------------
+
+DemonstrationState = Literal["idle", "recording", "stopped", "drafted", "refused"]
+
+
+class DemonstrationStepPayload(BaseModel):
+    id: str
+    kind: str
+    text: str
+
+
+class DemonstrationTracePayload(BaseModel):
+    """Server→client: the recording's state and its readable steps (memory
+    only; dropped after the draft, on cancel or 30 min after the stop)."""
+
+    recording_id: str | None = None
+    state: DemonstrationState
+    started_at: float | None = None
+    ends_at: float | None = None
+    stop_reason: str | None = None
+    steps: list[DemonstrationStepPayload] = Field(default_factory=list)
+    reason: str | None = None
+    tool_name: str | None = None
+    deferred_count: int | None = None
+
+
+class DemonstrationDraftPayload(BaseModel):
+    """Client→server: the user's one sentence and the steps they removed."""
+
+    sentence: str = Field(max_length=2000)
+    removed_step_ids: list[str] = Field(default_factory=list)
+
+
+# #86 meeting notes (the app records; the daemon only offers) ----------------
+
+MeetingAuthStatus = Literal["not_determined", "restricted", "denied", "authorized"]
+MeetingRecordStateKind = Literal["idle", "started", "stopped", "failed", "declined"]
+
+
+class MeetingRecordOfferPayload(BaseModel):
+    """Server→client: offer "Take notes for <title>?" (never a start)."""
+
+    meeting_id: str
+    title: str
+    start: str = ""
+    end: str = ""
+    stop_at: str
+    engine: Literal["apple", "whisper"] = "apple"
+    attendee_count: int = 0
+
+
+class MeetingRecordStopPayload(BaseModel):
+    """Server→client: stop the recording (the meeting ended + grace)."""
+
+    meeting_id: str
+    reason: str = "meeting_ended"
+
+
+class MeetingRecordStatePayload(BaseModel):
+    """Client→server: recorder state + Microphone / Speech authorization."""
+
+    meeting_id: str | None = None
+    state: MeetingRecordStateKind
+    title: str | None = None
+    stop_at: str | None = None
+    microphone: MeetingAuthStatus
+    speech_recognition: MeetingAuthStatus
+    error: str | None = None
+
+
+class MeetingAudioReadyPayload(BaseModel):
+    """Client→server: the recording finished; a transcript or audio path
+    (inside the daemon's audio folder) to turn into one card."""
+
+    meeting_id: str
+    title: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    audio_path: str | None = None
+    system_audio_path: str | None = None
+    transcript_path: str | None = None
+    error: str | None = None
+    stop_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +508,11 @@ class ApprovalRequest(_BaseMessage):
 class ApprovalResponse(_BaseMessage):
     type: Literal["approval_response"] = "approval_response"
     payload: ApprovalResponsePayload
+
+
+class ApprovalResolved(_BaseMessage):
+    type: Literal["approval_resolved"] = "approval_resolved"
+    payload: ApprovalResolvedPayload
 
 
 class CodeApprovalRequest(_BaseMessage):
@@ -313,6 +566,51 @@ class CalendarStatus(_BaseMessage):
     payload: CalendarStatusPayload
 
 
+class ScreenTextRequest(_BaseMessage):
+    type: Literal["screen_text_request"] = "screen_text_request"
+    payload: ScreenTextRequestPayload
+
+
+class ScreenTextResponse(_BaseMessage):
+    type: Literal["screen_text_response"] = "screen_text_response"
+    payload: ScreenTextResponsePayload
+
+
+class ScreenTextStatus(_BaseMessage):
+    type: Literal["screen_text_status"] = "screen_text_status"
+    payload: ScreenTextStatusPayload
+
+
+class DemonstrationTrace(_BaseMessage):
+    type: Literal["demonstration_trace"] = "demonstration_trace"
+    payload: DemonstrationTracePayload
+
+
+class DemonstrationDraft(_BaseMessage):
+    type: Literal["demonstration_draft"] = "demonstration_draft"
+    payload: DemonstrationDraftPayload
+
+
+class MeetingRecordOffer(_BaseMessage):
+    type: Literal["meeting_record_offer"] = "meeting_record_offer"
+    payload: MeetingRecordOfferPayload
+
+
+class MeetingRecordStop(_BaseMessage):
+    type: Literal["meeting_record_stop"] = "meeting_record_stop"
+    payload: MeetingRecordStopPayload
+
+
+class MeetingRecordState(_BaseMessage):
+    type: Literal["meeting_record_state"] = "meeting_record_state"
+    payload: MeetingRecordStatePayload
+
+
+class MeetingAudioReady(_BaseMessage):
+    type: Literal["meeting_audio_ready"] = "meeting_audio_ready"
+    payload: MeetingAudioReadyPayload
+
+
 WSMessage = Annotated[
     Union[
         Thought,
@@ -328,6 +626,16 @@ WSMessage = Annotated[
         CalendarRequest,
         CalendarResponse,
         CalendarStatus,
+        ScreenTextRequest,
+        ScreenTextResponse,
+        ScreenTextStatus,
+        ApprovalResolved,
+        DemonstrationTrace,
+        DemonstrationDraft,
+        MeetingRecordOffer,
+        MeetingRecordStop,
+        MeetingRecordState,
+        MeetingAudioReady,
     ],
     Field(discriminator="type"),
 ]

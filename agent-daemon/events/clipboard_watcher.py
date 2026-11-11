@@ -7,7 +7,8 @@ only the pasteboard's type list to classify the copy as ``text``, ``url``,
 ``dataForType_`` or any other accessor that returns the copied data.
 Copies marked concealed or transient (password managers set
 ``org.nspasteboard.ConcealedType``/``TransientType``) are not reported at
-all.
+all, and neither is a copy made while a never-watch app (#87,
+``ai.delivery.is_never_watched``: password managers by default) is in front.
 
 Each change becomes ``ContextEvent(event_type="clipboard_changed",
 app_name=<frontmost app or None>, metadata={"app", "kind"})``.
@@ -89,6 +90,32 @@ def _lsappinfo_front() -> Optional[str]:
     return value or None
 
 
+def _lsappinfo_front_bundle() -> Optional[str]:
+    """Bundle id of the frontmost app via ``lsappinfo`` (#87 never-watch)."""
+    try:
+        asn = subprocess.run(
+            ["lsappinfo", "front"], capture_output=True, text=True, timeout=2.0,
+        ).stdout.strip()
+        if not asn:
+            return None
+        out = subprocess.run(
+            ["lsappinfo", "info", "-only", "bundleid", asn],
+            capture_output=True, text=True, timeout=2.0,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # Output looks like: "CFBundleIdentifier"="com.apple.finder"
+    _, _, value = out.partition("=")
+    value = value.strip().strip('"')
+    return value or None
+
+
+def _never_watched(bundle_id: Optional[str], app_name: Optional[str]) -> bool:
+    from ai.delivery import is_never_watched  # lazy: ai pulls in the AI stack
+
+    return is_never_watched(bundle_id, app_name)
+
+
 def _general_pasteboard() -> Any:
     from AppKit import NSPasteboard  # type: ignore[import-not-found]
 
@@ -105,11 +132,19 @@ class ClipboardWatcher:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         pasteboard_factory: Callable[[], Any] = _general_pasteboard,
         frontmost_app: Callable[[], Optional[str]] = _lsappinfo_front,
+        frontmost_bundle: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         self._bus = bus
         self._poll_interval = poll_interval
         self._pasteboard_factory = pasteboard_factory
         self._frontmost_app = frontmost_app
+        # #87: the bundle id comes from the same place as the app name; with
+        # an injected name source and no bundle source, only names are checked.
+        if frontmost_bundle is None:
+            frontmost_bundle = (
+                _lsappinfo_front_bundle if frontmost_app is _lsappinfo_front else (lambda: None)
+            )
+        self._frontmost_bundle = frontmost_bundle
         self._pasteboard: Any = None
         self._last_count: Optional[int] = None
         self._thread: Optional[threading.Thread] = None
@@ -168,6 +203,8 @@ class ClipboardWatcher:
         if kind is None:
             return None
         app = self._frontmost_app()
+        if _never_watched(self._frontmost_bundle(), app):
+            return None  # #87: a copy in a never-watch app is not reported
         return ContextEvent(
             event_type="clipboard_changed",
             app_name=app,

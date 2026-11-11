@@ -10,13 +10,17 @@ from .create_event import create_event
 from .email_draft import draft_email
 from .find_files import find_files
 from .list_events import list_events
-from .meta_tool_generator import generate_custom_tool
+from .meta_tool_generator import generate_custom_tool, repair_generated_tool
 from .move_file import move_file
 from .notes import append_note, create_note
 from .open_url import open_url
 from .read_active_tab import read_active_tab, read_active_tab_text
 from .read_clipboard import read_clipboard
 from .read_email import read_email
+# #89: bound under another name so ``tools.read_front_window`` stays the
+# module (``from tools import read_front_window as screen_text`` in main.py,
+# the orchestrator and the tests needs its ``bridge`` and helpers).
+from .read_front_window import read_front_window as _read_front_window_tool
 from .reminders import create_reminder, list_reminders
 from .remember_preference import remember_preference
 from .send_imessage import send_imessage
@@ -29,6 +33,8 @@ from .write_clipboard import write_clipboard
 AVAILABLE_TOOLS = [
     read_active_tab,
     read_active_tab_text,
+    # #89: the front window's text through the app's Accessibility bridge.
+    _read_front_window_tool,
     open_url,
     show_notification,
     read_clipboard,
@@ -51,6 +57,9 @@ AVAILABLE_TOOLS = [
     list_reminders,
     create_reminder,
     generate_custom_tool,
+    # #90: drafts a fix for a failing generated tool; NOT read-only (the
+    # repair idea card, then the code-review diff card).
+    repair_generated_tool,
 ]
 
 # Tools whose side-effects are limited to reading local state (no file
@@ -61,6 +70,8 @@ AVAILABLE_TOOLS = [
 READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset({
     "read_active_tab",
     "read_active_tab_text",
+    # #89: reads only, only in a turn the user started (chat / quick ask).
+    "read_front_window",
     "read_clipboard",
     "summarize_file",
     "remember_preference",
@@ -98,6 +109,7 @@ __all__ = [
     "list_reminders",
     "create_reminder",
     "generate_custom_tool",
+    "repair_generated_tool",
     "AVAILABLE_TOOLS",
     "READ_ONLY_TOOL_NAMES",
 ]
