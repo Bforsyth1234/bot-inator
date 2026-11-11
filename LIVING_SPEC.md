@@ -142,8 +142,12 @@ Known-good follow-ups (`FOLLOW_UPS` in `ai/idea_sources.py`) and the
 repeated-workflow detector (`ai/pattern_recognizer.py`) are seed sources
 of high-confidence ideas. They are not the only ideas allowed.
 
-Inference runs on-device (MLX) by default. Groq cloud inference is an
-opt-in alternative (`AGENT_PROVIDER=groq`, Phase 4.7). With Groq selected,
+Inference runs on-device (MLX) by default. Cloud inference is an opt-in
+alternative: any OpenAI-compatible preset (#97: Groq, OpenAI, Anthropic,
+Gemini, xAI, OpenRouter, custom), first Groq (`AGENT_PROVIDER=groq`, Phase
+4.7). Whether an engine is cloud is decided by its base URL's host, not the
+provider name: a loopback URL (Ollama, LM Studio: the `local_server`
+preset) is local. With a cloud provider selected,
 event summaries, chat and tool drafts leave the machine; nothing else
 about the consent model changes.
 
@@ -680,8 +684,11 @@ restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 ## 5. Inference engines
 
 `main._build_engines()` builds three engines from `settings.provider`
-(`AGENT_PROVIDER`): `local` (default) → `MLXEngine`, `groq` →
-`GroqEngine`. Each has its own `asyncio.Lock`. Eager-loading is
+(`AGENT_PROVIDER`, per role `AGENT_PROVIDER_<ROLE>`): `local` (default) →
+`MLXEngine`; any preset in `providers.PRESETS` → `OpenAICompatibleEngine`
+(`ai/groq_engine.py`; the class is still named `GroqEngine`, with the new
+name as an alias) via `build_engine(settings, provider, role)` (#97). Each
+has its own `asyncio.Lock`. Eager-loading is
 serialised to avoid `huggingface_hub` lock contention.
 
 | Engine             | Local (MLX)                         | Groq (`GROQ_*_MODEL`)       | Used by                                         |
@@ -694,7 +701,22 @@ The detection engine is picked by `main._select_detection_engine` from
 `AGENT_PATTERN_ENGINE` (`main` / `analysis` / `drafting`).
 
 smolagents adapter: MLX engines use the custom `_MLXModel` with the
-`<tool_call>` parser; Groq engines plug into `OpenAIServerModel`.
+`<tool_call>` parser; every OpenAI-compatible engine plugs into
+`OpenAIServerModel` through `_make_groq_model_class`, whose Groq
+workarounds act only on their specific failures and stay on for all.
+
+**Presets (#97, `agent-daemon/providers.py`).** One provider kind, the
+OpenAI chat-completions format; a preset fills in the base URL, the
+settings keys (`<PREFIX>_API_KEY`, `_API_BASE`, `_<ROLE>_MODEL`; Groq keeps
+`GROQ_*`) and default models where confirmed (Groq, Anthropic). The others
+ship no default model: Settings lists the provider's own `GET /models`
+(`POST /api/providers/{id}/models`) and runs a one-request check
+(`POST /api/providers/{id}/test`, `routes/providers.py`, recorded in the
+privacy ledger unless the base is loopback). OpenAI gets
+`max_completion_tokens` instead of `max_tokens` (`Preset.token_param`). A
+preset is `tested` only after a recorded live run; the picker labels the
+others "Untested". `PUT /api/settings` takes `preset_settings` and refuses
+a preset in use with no key, base URL or model for its roles.
 
 When `analysis_engine` is not supplied the orchestrator falls back to
 the main engine, so tests and simpler deployments still work with a
@@ -720,7 +742,8 @@ same methods over HTTP.
 Config lives in `agent-daemon/.env` (template: `.env.example`):
 `AGENT_PROVIDER`, `AGENT_PATTERN_ENGINE`, `AGENT_DRAFT_CRITIC`,
 `GROQ_API_KEY`, `GROQ_API_BASE`, `GROQ_MAIN_MODEL`,
-`GROQ_ANALYSIS_MODEL`, `GROQ_DRAFTING_MODEL`.
+`GROQ_ANALYSIS_MODEL`, `GROQ_DRAFTING_MODEL`, and the same five per other
+preset (#97).
 
 ## 6. Tools (Phase 1 Sprint final)
 

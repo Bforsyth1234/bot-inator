@@ -299,6 +299,7 @@ HOOK_POINTS: dict[str, str] = {
     "tools/tool_sandbox.py": "SandboxedTool.forward",
     "tools/open_url.py": "open_url",
     "ai/memory.py": "_load_st_model",
+    "routes/providers.py": "_client",  # #97 Settings "List models" / "Test"
 }
 # file -> why a network import there sends nothing for the ledger.
 EXEMPT: dict[str, str] = {}

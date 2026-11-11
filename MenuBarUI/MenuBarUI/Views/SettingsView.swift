@@ -23,6 +23,8 @@ struct DaemonSettings: Codable, Equatable {
     // Let cloud engines see email and message text (#52). Applies live.
     // Optional so an older daemon without it still decodes.
     var cloudPersonalText: Bool?
+    // OpenAI-compatible presets (#97). Optional so an older daemon decodes.
+    var presets: [ProviderPreset]?
 
     enum CodingKeys: String, CodingKey {
         case provider
@@ -41,6 +43,7 @@ struct DaemonSettings: Codable, Equatable {
         case canRestart = "can_restart"
         case lockedFields = "locked_fields"
         case cloudPersonalText = "cloud_personal_text"
+        case presets
     }
 }
 
@@ -56,11 +59,9 @@ final class SettingsViewModel: ObservableObject {
     @Published var providerMain = ""
     @Published var providerAnalysis = ""
     @Published var providerDrafting = ""
-    @Published var apiKey = ""
-    @Published var mainModel = ""
-    @Published var analysisModel = ""
-    @Published var draftingModel = ""
     @Published private(set) var cloudPersonalText = false
+    // Per-preset form state (#97), keyed by preset id.
+    @Published var presetForms: [String: PresetForm] = [:]
 
     private let baseURL: URL
     private let session: URLSession
@@ -75,18 +76,103 @@ final class SettingsViewModel: ObservableObject {
         saved?.lockedFields.contains(field) ?? false
     }
 
-    /// True when the form, as edited, puts any engine on Groq.
-    var usesGroq: Bool {
-        [providerMain, providerAnalysis, providerDrafting]
-            .map { $0.isEmpty ? provider : $0 }
-            .contains("groq")
+    /// Every provider the pickers offer: local plus the daemon's presets.
+    var providerChoices: [(id: String, label: String)] {
+        let presets = saved?.presets?.map { ($0.id, $0.label) } ?? [("groq", "Groq")]
+        return [("local", "Local (MLX on this Mac)")] + presets
     }
 
-    /// True when the personal-text toggle matters: an engine uses Groq in
-    /// the form as edited, or in the running daemon (#52).
+    func providerLabel(_ id: String) -> String {
+        providerChoices.first { $0.id == id }?.label ?? id
+    }
+
+    /// The provider each role runs on, as edited.
+    var editedEngines: [String: String] {
+        let overrides = ["main": providerMain, "analysis": providerAnalysis,
+                         "drafting": providerDrafting]
+        return overrides.mapValues { $0.isEmpty ? provider : $0 }
+    }
+
+    /// Presets an engine uses in the form, with the roles they serve.
+    var presetsInUse: [(preset: ProviderPreset, roles: [String])] {
+        let engines = editedEngines
+        return (saved?.presets ?? []).compactMap { preset in
+            let roles = engineRoles.filter { engines[$0] == preset.id }
+            return roles.isEmpty ? nil : (preset, roles)
+        }
+    }
+
+    private func isCloudProvider(_ id: String) -> Bool {
+        if id == "local" { return false }
+        return saved?.presets?.first { $0.id == id }?.cloud ?? true
+    }
+
+    /// True when the personal-text toggle matters: an engine is on a cloud
+    /// provider in the form as edited, or in the running daemon (#52).
     var showsPersonalTextToggle: Bool {
-        usesGroq || (saved?.runningEngineProviders?.values.contains("groq") ?? false)
-            || saved?.runningProvider == "groq"
+        editedEngines.values.contains(where: isCloudProvider)
+            || (saved?.runningEngineProviders?.values.contains(where: isCloudProvider) ?? false)
+    }
+
+    func form(_ id: String) -> Binding<PresetForm> {
+        Binding(
+            get: { self.presetForms[id] ?? PresetForm() },
+            set: { self.presetForms[id] = $0 }
+        )
+    }
+
+    /// The key / base typed but not saved yet, so List models and Test
+    /// work before Save.
+    private func probeBody(_ id: String, model: String? = nil) -> [String: String] {
+        let f = presetForms[id] ?? PresetForm()
+        var body: [String: String] = [:]
+        let key = f.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !key.isEmpty { body["api_key"] = key }
+        let base = f.apiBase.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !base.isEmpty { body["api_base"] = base }
+        if let model, !model.isEmpty { body["model"] = model }
+        return body
+    }
+
+    func listModels(_ id: String) async {
+        do {
+            let data = try await post("api/providers/\(id)/models", probeBody(id))
+            let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let ids = obj?["models"] as? [String] ?? []
+            presetForms[id, default: PresetForm()].modelChoices = ids
+            presetForms[id, default: PresetForm()].testResult = ids.isEmpty
+                ? "The provider listed no models."
+                : "\(ids.count) models listed: use Choose next to each model."
+        } catch {
+            presetForms[id, default: PresetForm()].testResult = "List failed: \(error.localizedDescription)"
+        }
+    }
+
+    func testPreset(_ id: String, role: String) async {
+        let model = presetForms[id]?.models[role] ?? ""
+        do {
+            let data = try await post("api/providers/\(id)/test", probeBody(id, model: model))
+            let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let ok = obj?["ok"] as? Bool ?? false
+            let used = obj?["model"] as? String ?? model
+            presetForms[id, default: PresetForm()].testResult = ok
+                ? "Test passed: \(used) answered."
+                : "Test failed (\(used)): \(obj?["error"] as? String ?? "unknown error")"
+        } catch {
+            presetForms[id, default: PresetForm()].testResult = "Test failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func post(_ path: String, _ body: [String: String]) async throws -> Data {
+        var request = try DaemonAuth.request(baseURL.appendingPathComponent(path), method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(body)
+        isBusy = true
+        defer { isBusy = false }
+        let (data, response) = try await session.data(for: request)
+        try DaemonAuth.checkAuth(response)
+        try Self.checkStatus(response, data)
+        return data
     }
 
     /// Save the personal-text toggle at once: the daemon reads it on every
@@ -145,18 +231,30 @@ final class SettingsViewModel: ObservableObject {
     }
 
     func save() async {
-        var body: [String: String] = [
+        var body: [String: Any] = [
             "provider": provider,
             "provider_main": providerMain,
             "provider_analysis": providerAnalysis,
             "provider_drafting": providerDrafting,
-            "groq_main_model": mainModel,
-            "groq_analysis_model": analysisModel,
-            "groq_drafting_model": draftingModel,
         ]
-        // Blank field means "keep the saved key".
-        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !key.isEmpty { body["groq_api_key"] = key }
+        // Presets an engine uses (#97). Groq is one; its settings are the
+        // same keys the old groq_* fields wrote.
+        var presetSettings: [String: [String: String]] = [:]
+        for (preset, roles) in presetsInUse {
+            let f = presetForms[preset.id] ?? PresetForm()
+            var fields: [String: String] = [
+                "api_base": f.apiBase.trimmingCharacters(in: .whitespacesAndNewlines),
+            ]
+            for role in roles {
+                fields["\(role)_model"] = (f.models[role] ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            // Blank field means "keep the saved key".
+            let key = f.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty { fields["api_key"] = key }
+            presetSettings[preset.id] = fields.filter { !preset.lockedFields.contains($0.key) }
+        }
+        if !presetSettings.isEmpty { body["preset_settings"] = presetSettings }
 
         isBusy = true
         defer { isBusy = false }
@@ -165,12 +263,11 @@ final class SettingsViewModel: ObservableObject {
                 baseURL.appendingPathComponent("api/settings"), method: "PUT"
             )
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONEncoder().encode(body)
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
             let (data, response) = try await session.data(for: request)
             try DaemonAuth.checkAuth(response)
             try Self.checkStatus(response, data)
             apply(try JSONDecoder().decode(DaemonSettings.self, from: data))
-            apiKey = ""
             errorMessage = nil
             statusMessage = saved?.restartRequired == true
                 ? "Saved. Restart the daemon to apply."
@@ -221,10 +318,16 @@ final class SettingsViewModel: ObservableObject {
         providerMain = s.providerMain ?? ""
         providerAnalysis = s.providerAnalysis ?? ""
         providerDrafting = s.providerDrafting ?? ""
-        mainModel = s.groqMainModel
-        analysisModel = s.groqAnalysisModel
-        draftingModel = s.groqDraftingModel
         cloudPersonalText = s.cloudPersonalText ?? false
+        // Fresh form per preset from what is saved; typed keys are dropped
+        // (never kept after a save), fetched model lists are kept.
+        for preset in s.presets ?? [] {
+            var f = PresetForm()
+            f.apiBase = preset.apiBase == preset.defaultApiBase ? "" : preset.apiBase
+            f.models = preset.models
+            f.modelChoices = presetForms[preset.id]?.modelChoices ?? []
+            presetForms[preset.id] = f
+        }
     }
 
     private static func checkStatus(_ response: URLResponse, _ data: Data) throws {
@@ -252,10 +355,10 @@ struct SettingsView: View {
 
             Section("Inference provider") {
                 Picker("Provider", selection: $viewModel.provider) {
-                    Text("Local (MLX on this Mac)").tag("local")
-                    Text("Groq (cloud)").tag("groq")
+                    ForEach(viewModel.providerChoices, id: \.id) { choice in
+                        Text(choice.label).tag(choice.id)
+                    }
                 }
-                .pickerStyle(.radioGroup)
                 .disabled(viewModel.isLocked("provider"))
                 if let running = viewModel.runningSummary {
                     Text("Running now: \(running)")
@@ -279,23 +382,13 @@ struct SettingsView: View {
                 }
             }
 
-            if viewModel.usesGroq {
-                Section("Groq") {
-                    SecureField(apiKeyPlaceholder, text: $viewModel.apiKey)
-                        .disabled(viewModel.isLocked("groq_api_key"))
-                    Link("Get a key at console.groq.com/keys",
-                         destination: URL(string: "https://console.groq.com/keys")!)
-                        .appFont(.secondary)
-                    lockedNote("groq_api_key", env: "GROQ_API_KEY")
-                    DisclosureGroup("Models") {
-                        TextField("Main", text: $viewModel.mainModel)
-                            .disabled(viewModel.isLocked("groq_main_model"))
-                        TextField("Analysis", text: $viewModel.analysisModel)
-                            .disabled(viewModel.isLocked("groq_analysis_model"))
-                        TextField("Drafting", text: $viewModel.draftingModel)
-                            .disabled(viewModel.isLocked("groq_drafting_model"))
-                    }
-                }
+            ForEach(viewModel.presetsInUse, id: \.preset.id) { item in
+                ProviderPresetSection(
+                    preset: item.preset, roles: item.roles,
+                    form: viewModel.form(item.preset.id),
+                    listModels: { await viewModel.listModels(item.preset.id) },
+                    test: { await viewModel.testPreset(item.preset.id, role: item.roles[0]) }
+                )
             }
 
             DailyBriefSettingsView()
@@ -365,25 +458,21 @@ struct SettingsView: View {
         ))
         .disabled(viewModel.isLocked("cloud_personal_text"))
         Text(viewModel.cloudPersonalText
-             ? "Groq receives iMessage text and email subjects and bodies. Applies to the next prompt."
-             : "iMessage text and email subjects and bodies are replaced by a placeholder before a prompt goes to Groq.")
+             ? "Cloud providers receive iMessage text and email subjects and bodies. Applies to the next prompt."
+             : "iMessage text and email subjects and bodies are replaced by a placeholder before a prompt goes to a cloud provider.")
             .appFont(.secondary)
             .foregroundStyle(.secondary)
         lockedNote("cloud_personal_text", env: "AGENT_CLOUD_PERSONAL_TEXT")
-    }
-
-    private var apiKeyPlaceholder: String {
-        guard let saved = viewModel.saved, saved.groqApiKeySet else { return "API key" }
-        return "Saved key \(saved.groqApiKeyHint) (type to replace)"
     }
 
     @ViewBuilder
     private func enginePicker(_ title: String, field: String, env: String,
                               selection: Binding<String>) -> some View {
         Picker(title, selection: selection) {
-            Text("Same as default (\(viewModel.provider == "groq" ? "Groq" : "Local"))").tag("")
-            Text("Local").tag("local")
-            Text("Groq (cloud)").tag("groq")
+            Text("Same as default (\(viewModel.providerLabel(viewModel.provider)))").tag("")
+            ForEach(viewModel.providerChoices, id: \.id) { choice in
+                Text(choice.label).tag(choice.id)
+            }
         }
         .disabled(viewModel.isLocked(field))
         lockedNote(field, env: env)

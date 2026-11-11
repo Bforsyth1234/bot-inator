@@ -514,8 +514,15 @@ def record_completion(
 
     ``request`` is what was sent (the ``create`` kwargs, or the messages),
     ``response`` the reply (``None`` when the call raised: pass ``error``).
+
+    A loopback ``api_base`` (Ollama, LM Studio: the #97 "Local server"
+    preset) never left the Mac, so it is not a ledger row (#97 decision 6).
     """
     try:
+        import providers as _providers  # noqa: WPS433 (top-level daemon module)
+
+        if _providers.is_loopback_url(api_base or ""):
+            return False
         text = payload_text(request)
         tokens_out, tokens_in = _usage(response)
         note = None if error is None else f"failed: {type(error).__name__}"

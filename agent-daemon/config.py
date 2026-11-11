@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+import providers
 import user_settings
 
 # Load ``agent-daemon/.env`` (resolved relative to this file, not CWD) so the
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 PROVIDERS = user_settings.PROVIDERS
 # The three engines, in ``_build_engines`` order. Each one's provider is
 # ``AGENT_PROVIDER_<ROLE>`` when set, else ``AGENT_PROVIDER`` (#26).
-ENGINE_ROLES: tuple[str, ...] = ("main", "analysis", "drafting")
+ENGINE_ROLES: tuple[str, ...] = providers.ENGINE_ROLES
 PROVIDER_OVERRIDE_KEYS: dict[str, str] = {
     role: f"AGENT_PROVIDER_{role.upper()}" for role in ENGINE_ROLES
 }
@@ -82,8 +83,10 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8000
     # Default inference provider for the three engines (main, analysis,
-    # drafting). ``"local"`` runs MLX on Apple Silicon; ``"groq"`` calls
-    # Groq's OpenAI-compatible endpoint instead. Selected via
+    # drafting). ``"local"`` runs MLX on Apple Silicon; any other name is
+    # an OpenAI-compatible preset from ``providers.PRESETS`` (#97: groq,
+    # openai, anthropic, gemini, xai, openrouter, local_server, custom).
+    # Selected via
     # ``AGENT_PROVIDER``. Use :meth:`engine_provider` rather than reading
     # this directly: each engine can override it.
     provider: str = field(
@@ -195,7 +198,7 @@ class Settings:
         return normalize_provider(self.provider, source="AGENT_PROVIDER") or "local"
 
     def engine_override(self, role: str) -> str:
-        """``role``'s override (``"local"``/``"groq"``), ``""`` if none."""
+        """``role``'s override (a provider name), ``""`` if none."""
         return normalize_provider(
             getattr(self, f"provider_{role}"),
             source=PROVIDER_OVERRIDE_KEYS[role],
@@ -208,8 +211,46 @@ class Settings:
     def engine_providers(self) -> dict[str, str]:
         return {role: self.engine_provider(role) for role in ENGINE_ROLES}
 
+    # --- OpenAI-compatible presets (#97) ---------------------------------
+    # Groq keeps its dataclass fields (tests and old settings use them);
+    # the other presets read ``<PREFIX>_*`` from the environment live.
+
+    def provider_api_key(self, provider: str) -> str:
+        if provider == "groq":
+            return self.groq_api_key or ""
+        preset = providers.PRESETS.get(provider)
+        return os.environ.get(preset.key_env(), "") if preset else ""
+
+    def provider_api_base(self, provider: str) -> str:
+        if provider == "groq":
+            return self.groq_api_base
+        preset = providers.PRESETS.get(provider)
+        if preset is None:
+            return ""
+        return os.environ.get(preset.base_env(), "") or preset.api_base
+
+    def provider_model(self, provider: str, role: str) -> str:
+        if provider == "groq":
+            return getattr(self, f"groq_{role}_model")
+        preset = providers.PRESETS.get(provider)
+        if preset is None:
+            return ""
+        return (
+            os.environ.get(preset.model_env(role), "")
+            or preset.default_models.get(role, "")
+        )
+
     def is_cloud(self, role: str) -> bool:
-        return self.engine_provider(role) != "local"
+        """True when ``role``'s prompts leave the Mac.
+
+        Decided by host, not by name (#97 decision 6): a preset pointed at
+        a loopback URL (Ollama, LM Studio) is local; every other base URL,
+        including a blank or unparsable one, is cloud.
+        """
+        provider = self.engine_provider(role)
+        if provider == "local":
+            return False
+        return not providers.is_loopback_url(self.provider_api_base(provider))
 
     def uses_cloud(self) -> bool:
         """True when any engine sends prompts off the machine."""
@@ -221,6 +262,24 @@ class Settings:
 
     def groq_key_required(self) -> bool:
         return any(p == "groq" for p in self.engine_providers().values())
+
+    def engine_problems(self) -> dict[str, str]:
+        """``role -> reason`` for engines that cannot start as configured:
+        a missing key, base URL or model name. Empty when all can."""
+        problems: dict[str, str] = {}
+        for role, provider in self.engine_providers().items():
+            preset = providers.PRESETS.get(provider)
+            if preset is None:
+                continue
+            if preset.key_required and not self.provider_api_key(provider):
+                problems[role] = f"{preset.label} needs an API key ({preset.key_env()})"
+            elif not self.provider_api_base(provider):
+                problems[role] = f"{preset.label} needs a base URL ({preset.base_env()})"
+            elif not self.provider_model(provider, role):
+                problems[role] = (
+                    f"{preset.label} needs a {role} model ({preset.model_env(role)})"
+                )
+        return problems
 
 
 settings = Settings()

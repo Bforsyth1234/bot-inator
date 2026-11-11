@@ -84,7 +84,7 @@ def test_groq_without_key_rejected(client):
 
 
 def test_unknown_provider_rejected(client):
-    resp = client.put("/api/settings", json={"provider": "openai"})
+    resp = client.put("/api/settings", json={"provider": "nonsense"})
     assert resp.status_code == 400
 
 
@@ -171,7 +171,7 @@ def test_override_needs_key_only_when_some_engine_uses_groq(client):
 
 
 def test_invalid_override_rejected(client):
-    resp = client.put("/api/settings", json={"provider_analysis": "openai"})
+    resp = client.put("/api/settings", json={"provider_analysis": "nonsense"})
     assert resp.status_code == 400
     assert "analysis" in resp.json()["detail"]
 

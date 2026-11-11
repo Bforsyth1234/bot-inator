@@ -67,7 +67,7 @@ def test_invalid_override_is_local_with_warning(monkeypatch, caplog):
 
 
 def test_invalid_default_is_local(monkeypatch):
-    s = _settings(monkeypatch, AGENT_PROVIDER="openai")
+    s = _settings(monkeypatch, AGENT_PROVIDER="nonsense")
     assert set(s.engine_providers().values()) == {"local"}
     assert not s.uses_cloud()
 

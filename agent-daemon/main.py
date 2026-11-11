@@ -59,6 +59,7 @@ from ai.open_help import (
 # boots cleanly when ``settings.provider == "local"`` and the optional
 # Groq dependency tree is missing.
 from config import GROQ_DEFAULT_MODELS, settings
+import providers
 from ai.idea_match import DeclinedIdeaMatcher, make_sync_judge
 from ai.friction import (
     FRICTION_JUDGE_SYSTEM_PROMPT,
@@ -138,8 +139,9 @@ def _build_engines() -> tuple[Any, Any, Any]:
     Each engine's provider is :meth:`settings.engine_provider` for its
     role: ``AGENT_PROVIDER_<ROLE>`` when set, else ``AGENT_PROVIDER``
     (#26), so e.g. local main + analysis with Groq drafting is allowed.
-    ``"groq"`` builds a :class:`~ai.groq_engine.GroqEngine` on that role's
-    Groq model; ``"local"`` an :class:`MLXEngine` on its MLX model. Each
+    Any preset (``"groq"``, ``"openai"``, ...) builds an
+    :class:`~ai.groq_engine.OpenAICompatibleEngine` on that role's model
+    (#97); ``"local"`` an :class:`MLXEngine` on its MLX model. Each
     engine is isolated so they can run on different model ids without
     sharing state. Unknown provider names resolve to ``"local"`` with a
     warning (see :func:`config.normalize_provider`) so a typo can neither
@@ -150,21 +152,13 @@ def _build_engines() -> tuple[Any, Any, Any]:
         "analysis": settings.analysis_model_path,
         "drafting": settings.drafting_model_path,
     }
-    groq_models = {
-        "main": settings.groq_main_model,
-        "analysis": settings.groq_analysis_model,
-        "drafting": settings.groq_drafting_model,
-    }
     engines: list[Any] = []
     for role in ("main", "analysis", "drafting"):
-        if settings.engine_provider(role) == "groq":
-            from ai.groq_engine import GroqEngine  # noqa: WPS433
-            engines.append(GroqEngine(
-                groq_models[role],
-                api_key=settings.groq_api_key,
-                api_base=settings.groq_api_base,
-                role=role,
-            ))
+        provider = settings.engine_provider(role)
+        if provider != "local":
+            # Every non-local provider is an OpenAI-compatible preset (#97).
+            from ai.groq_engine import build_engine  # noqa: WPS433
+            engines.append(build_engine(settings, provider, role))
         else:
             engines.append(MLXEngine(local_models[role]))
     return engines[0], engines[1], engines[2]
@@ -648,6 +642,7 @@ from routes import meeting_prep as meeting_prep_routes  # noqa: E402
 from routes import outcomes as outcomes_routes  # noqa: E402
 from routes import permissions as permissions_routes  # noqa: E402
 from routes import preferences as preferences_routes  # noqa: E402
+from routes import providers as providers_routes  # noqa: E402
 from routes.tool_detail import router as tool_detail_router  # noqa: E402
 
 app.include_router(daily_brief_routes.router)
@@ -683,6 +678,8 @@ from routes import rules as rules_routes  # noqa: E402
 app.include_router(rules_routes.router)
 app.include_router(remote_routes.router)
 app.include_router(meeting_notes_routes.router)
+# #97: provider presets (List models, Test).
+app.include_router(providers_routes.router)
 
 
 def _next_seq() -> int:
@@ -863,7 +860,7 @@ class SettingsUpdate(BaseModel):
 
     ``groq_api_key``: omit or ``null`` keeps the saved key, ``""`` clears it.
     ``provider_<role>``: ``""`` (or ``"default"``) means "same as
-    ``provider``"; otherwise ``"local"`` or ``"groq"``.
+    ``provider``"; otherwise ``"local"`` or a preset id (#97).
     """
 
     provider: Optional[str] = None
@@ -876,6 +873,23 @@ class SettingsUpdate(BaseModel):
     groq_drafting_model: Optional[str] = None
     # Let cloud engines see email and message text (#52). Applies at once.
     cloud_personal_text: Optional[bool] = None
+    # #97: per-preset key, base URL and models, keyed by preset id. Groq's
+    # entries are the same settings as the ``groq_*`` fields above.
+    preset_settings: Optional[dict[str, "PresetUpdate"]] = None
+
+
+class PresetUpdate(BaseModel):
+    """One preset's fields in ``PUT /api/settings``. ``None`` keeps the
+    saved value, ``""`` clears it (back to the preset default)."""
+
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    main_model: Optional[str] = None
+    analysis_model: Optional[str] = None
+    drafting_model: Optional[str] = None
+
+
+SettingsUpdate.model_rebuild()
 
 
 # Settings-file key for ``cloud_personal_text`` (same name as the env var).
@@ -929,6 +943,85 @@ def _key_hint(key: str) -> str:
     return f"…{key[-4:]}" if len(key) >= 8 else ""
 
 
+def _preset_fields(preset: providers.Preset) -> tuple[tuple[str, str], ...]:
+    """(field in ``PresetUpdate``, env/settings-file key) for ``preset``."""
+    return (
+        ("api_key", preset.key_env()),
+        ("api_base", preset.base_env()),
+        *((f"{role}_model", preset.model_env(role)) for role in _ENGINE_ROLES),
+    )
+
+
+def _preset_values(
+    preset: providers.Preset, overlay: Optional[dict[str, str]] = None
+) -> dict[str, str]:
+    """The values ``preset`` gets on the next start (blank → its default).
+
+    Precedence: shell export, then ``overlay`` (unsaved updates), then the
+    settings file, then this process's environment (``.env``)."""
+    saved_file = user_settings.read()
+    overlay = overlay or {}
+    out: dict[str, str] = {}
+    for field_name, env_key in _preset_fields(preset):
+        if env_key in user_settings.shell_exported:
+            value = os.environ.get(env_key, "")
+        elif env_key in overlay:
+            value = overlay[env_key]
+        elif env_key in saved_file:
+            value = saved_file[env_key]
+        else:
+            value = os.environ.get(env_key, "")
+        if not value and field_name == "api_base":
+            value = preset.api_base
+        if not value and field_name.endswith("_model"):
+            value = preset.default_models.get(field_name[: -len("_model")], "")
+        out[field_name] = value
+    return out
+
+
+def _preset_problem(preset: providers.Preset, values: dict[str, str], roles: set[str]) -> str:
+    """Why ``preset`` can't run ``roles`` with ``values``; ``""`` if it can."""
+    if preset.key_required and not values["api_key"]:
+        if preset.id == "groq":
+            return "a Groq API key is required for Groq"
+        return f"{preset.label} needs an API key"
+    if not values["api_base"]:
+        return f"{preset.label} needs a base URL"
+    for role in sorted(roles):
+        if not values[f"{role}_model"]:
+            return f"{preset.label} needs a {role} model: pick one in Settings"
+    return ""
+
+
+def _presets_view(saved_engines: dict[str, str]) -> list[dict[str, Any]]:
+    """Every preset as the Settings picker shows it. Never a full key."""
+    out = []
+    for preset in providers.PRESETS.values():
+        values = _preset_values(preset)
+        roles = {r for r, p in saved_engines.items() if p == preset.id}
+        out.append({
+            "id": preset.id,
+            "label": preset.label,
+            "tested": preset.tested,
+            "docs_url": preset.docs_url,
+            "key_required": preset.key_required,
+            "key_set": bool(values["api_key"]),
+            "key_hint": _key_hint(values["api_key"]),
+            "api_base": values["api_base"],
+            "default_api_base": preset.api_base,
+            "cloud": not providers.is_loopback_url(values["api_base"]),
+            "models": {r: values[f"{r}_model"] for r in _ENGINE_ROLES},
+            "default_models": dict(preset.default_models),
+            "in_use": sorted(roles),
+            "problem": _preset_problem(preset, values, roles) if roles else "",
+            "locked_fields": [
+                f for f, k in _preset_fields(preset)
+                if k in user_settings.shell_exported
+            ],
+        })
+    return out
+
+
 def _settings_view() -> dict[str, Any]:
     """What the Settings window shows. Never returns the full API key.
 
@@ -966,6 +1059,7 @@ def _settings_view() -> dict[str, Any]:
         "groq_main_model": saved["groq_main_model"],
         "groq_analysis_model": saved["groq_analysis_model"],
         "groq_drafting_model": saved["groq_drafting_model"],
+        "presets": _presets_view(saved_engines),
         # Read live by ai.privacy, so it is not part of restart_required.
         "cloud_personal_text": personal_text_allowed(),
         "restart_required": saved != running,
@@ -1044,14 +1138,47 @@ async def put_settings(body: SettingsUpdate) -> dict[str, Any]:
             return current[env_key]
         return _running_value(field_name)
 
+    for preset_id, fields in (body.preset_settings or {}).items():
+        preset = providers.PRESETS.get(preset_id)
+        if preset is None:
+            raise HTTPException(status_code=400, detail=f"unknown provider {preset_id!r}")
+        for field_name, env_key in _preset_fields(preset):
+            value = getattr(fields, field_name)
+            if value is None:
+                continue
+            value = value.strip()
+            if field_name == "api_base" and value:
+                if not value.startswith(("http://", "https://")):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{preset.label} base URL must start with http:// or https://",
+                    )
+                if value.rstrip("/") == preset.api_base.rstrip("/"):
+                    value = ""
+            if field_name.endswith("_model") and value == preset.default_models.get(
+                field_name[: -len("_model")]
+            ):
+                value = ""  # don't pin a default, as for Groq below
+            updates[env_key] = value
+
+    # Refuse to save an engine that could not start: a preset in use with
+    # no key, base URL or model for its role (#97; Groq since #26).
     next_values = {f: _next(f, k) for f, k in _SETTING_FIELDS}
-    if (
-        "groq" in _effective_providers(next_values).values()
-        and not next_values["groq_api_key"]
-    ):
-        raise HTTPException(
-            status_code=400, detail="a Groq API key is required for Groq"
-        )
+    next_engines = _effective_providers(next_values)
+    for preset_id in sorted(set(next_engines.values()) - {"local"}):
+        preset = providers.PRESETS[preset_id]
+        values = _preset_values(preset, updates)
+        if preset_id == "groq":
+            values["api_key"] = next_values["groq_api_key"]
+            for role in _ENGINE_ROLES:
+                values[f"{role}_model"] = (
+                    next_values[f"groq_{role}_model"]
+                    or GROQ_DEFAULT_MODELS[f"GROQ_{role.upper()}_MODEL"]
+                )
+        roles = {r for r, p in next_engines.items() if p == preset_id}
+        problem = _preset_problem(preset, values, roles)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
     try:
         await asyncio.to_thread(user_settings.write, updates)
     except (OSError, ValueError) as exc:
