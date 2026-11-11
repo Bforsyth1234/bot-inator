@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #113
+Next ID: #114
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -375,6 +375,50 @@ Verify:
 ⚬ Live: email yourself "Can you send me the report by Friday?" from
   another account → one card with a drafted reply → Approve → a threaded,
   unsent draft in Mail.
+Deviations:
+
+---
+
+#113 — BUG: reply drafts open as a new email instead of a reply in the thread [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-20: "the reply draft should be a reply to the email chain. Not a new email")
+Ask: For a recruiter's email ("26-02884::Agentic AI Engineer /
+Architect::Remote", Nishat Khan) the app opened a NEW Mail message with
+"Re: …" typed into the subject: no quoted original, not threaded.
+Findings (assistant, 2026-11-11, daemon log + code):
+1. `tools/email_draft.py` already makes real threaded replies: with
+   `reply_to_message_id` set it finds the message and runs Mail's `reply
+   … with opening window` (quoted original, In-Reply-To). With 0 it runs
+   `make new outgoing message`.
+2. The agent read the email (`read_email` → `message_id` 449983), then
+   called `draft_email(…, subject="Re: 26-02884::…", reply_to_message_id=0)`.
+   The mail prompt (`Orchestrator._build_mail_prompt`, added for "the
+   agent should read email") tells the agent to read the email but never
+   to pass its id when replying; the model filled in "Re:" by hand.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. DETERMINISTIC, NOT ONLY A PROMPT: in a turn about one email
+   (`mail_received`, or a turn whose `read_email` / `list_recent_emails`
+   returned exactly one message the draft answers), when `draft_email` is
+   called with `reply_to_message_id=0` and its `to` is that email's sender
+   (or its subject is "Re: <that subject>"), the orchestrator sets
+   `reply_to_message_id` to that message's id before the card. The card
+   says "Reply in the thread with <sender>".
+2. PROMPTS: `_build_mail_prompt` and the #70 needs-reply follow-up say
+   "to reply, call draft_email with reply_to_message_id=<id>; don't type
+   Re: yourself".
+3. A reply's subject comes from Mail (`reply` sets "Re: …"); a model-typed
+   subject on a reply is ignored rather than doubled ("Re: Re:").
+4. If the lookup by id fails (message moved/deleted), say so in the result
+   and fall back to a new message only after the card says it will.
+Files: ai/orchestrator.py (the fill-in before the card + mail prompt),
+tools/email_draft.py (subject handling on replies), ai/needs_reply.py
+(#70 prompt), tests.
+Verify:
+⚬ Tests: the logged call (to = sender, subject "Re: …", id 0) in a
+  mail_received turn → `reply_to_message_id` 449983 on the card; a draft
+  to someone else stays a new message; no "Re: Re:". Non-vacuity per
+  rule 5.
+⚬ Live: an email that asks a question arrives → the reply card → Approve
+  → Mail opens a reply under the original, quoted, not a new message.
 Deviations:
 
 ---
