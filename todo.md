@@ -1612,7 +1612,7 @@ Deviations:
 
 ---
 
-#111 — BUG: screenshots refused when a never-watch window is open but fully covered [~]
+#111 — BUG: screenshots refused when a never-watch window is open but fully covered [~] live
 Wave: 21 (slot B) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-20: "show me my screen" from the phone)
 Ask: From the phone, "show me my screen" → the card said "Passwords (on
 the never-watch list) has a window on screen; nothing was captured", while
@@ -1648,7 +1648,63 @@ Verify:
   Non-vacuity per rule 5.
 ⚬ Live: Passwords open behind other windows → "show me my screen" → the
   screenshot arrives; drag Passwords partly into view → refused.
+Results (wave 21 slot B, 2026-11-11):
+⚬ `tools/look_at_screen.py`: `_window_list` now keeps each window's x/y and
+  returns `None` when Quartz fails or returns nothing; `visible_parts(raw, i)`
+  subtracts every covering window in front (`raw[:i]`, front to back) from
+  the window's rectangle (`_subtract`, at most 4 pieces per cut). A window
+  covers when alpha ≥ 1, its layer is ≥ the never-watch window's and below
+  `COVER_LAYER_LIMIT = 20` (kCGDockWindowLevel: Dock, menu bar, status
+  items and Window Server overlays never cover; floating panels do).
+  `resolve("screen")` refuses on a never-watch window only when
+  `visible_parts` is non-empty (any area, a 1 px sliver too); an
+  unreadable list refuses both targets (`WINDOW_LIST_UNREADABLE`). The
+  front-app and front-window checks are unchanged. `take_screenshot`
+  (#102/#110) calls `resolve("screen")` already, so no change there.
+⚬ `events/remote_channel.py` `card_text`: `_is_empty_arg` drops `None`,
+  blank strings, `[]`, `{}` (positional ones keep their numbers); `0` and
+  `false` stay.
+⚬ Mac card: `ApprovalAlert.swift` showed `"path" : null` in the raw JSON
+  arguments view (and the compact card's one-line fallback).
+  `JSONValue.withoutEmptyArgs()` (display only; the approved payload is
+  unchanged) drops empty kwargs and an empty `args` list. Typecheck: 0
+  errors; a scratch build of the helper printed only the non-empty keys.
+⚬ Tests: new `tests/test_never_watch_visibility.py` (17): the user's real
+  2026-11-11 list (Mail, Messages over Passwords, plus Dock/menu bar) →
+  allowed; two windows together cover → allowed; 1 px showing on each edge
+  and a 1 px gap between two covers → refused; translucent cover →
+  refused; Dock/menu bar don't cover; window behind doesn't cover;
+  minimized (absent) → allowed; list `None` → refused (both targets);
+  Quartz returning `None` or raising → `None`; front-app check unchanged;
+  both tools (`look_at_screen_impl` captures / refuses; `take_screenshot`
+  `_sensitive_refusal` and phone `card_note`); geometry; `card_text`.
+  Full suite: 1904 passed.
+⚬ Non-vacuity (each mutation, then restored, files compared): old rule
+  (refuse on any never-watch window) → 5 fail; translucent covers → 1;
+  layer limit lifted (Dock/menu bar cover) → 1; unreadable list allowed →
+  1; `card_text` shows empties → 1.
+⚬ This Mac (window list read once, no capture): Quartz order is front to
+  back (Window Server/Control Center/Dock first, then Mail, …, Passwords
+  at index 47, 900×530 at (510, 297)); `visible_parts` for Passwords = []
+  → the screenshot would now be allowed.
 Deviations:
+⚬ An EMPTY window list also counts as unreadable (a real Mac always lists
+  the menu bar); stricter than "can't be read", same direction.
+⚬ Updated `test_whole_screen_refused_while_a_password_manager_is_visible`:
+  its 1Password fixture sat exactly under Numbers (same bounds), which is
+  "fully covered" and now allowed by decision 1; moved it to x = 1100 so
+  part shows. The assertion is unchanged.
+⚬ Not changed (outside the decisions): for "screen", a PRIVATE browser
+  window still refuses even when fully covered; the same visibility rule
+  could apply there (follow-up if wanted).
+⚬ Known limits, both on the refuse side or flagged: parts under the menu
+  bar or off every display count as visible (conservative); an app's
+  see-through overlay window that reports alpha 1 at layer 0–19 would count
+  as covering (Quartz can't tell drawn from transparent pixels).
+Live check (needs the user): Passwords open behind Mail/Messages → phone
+"show me my screen" → the screenshot arrives; drag a corner of Passwords
+into view → refused naming Passwords; the phone card no longer shows
+`path: null`, nor the Mac card `"path" : null`.
 
 ---
 

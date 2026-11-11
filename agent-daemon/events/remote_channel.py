@@ -896,6 +896,17 @@ def _short(value: Any) -> str:
     return text if len(text) <= MAX_ARG_CHARS else text[:MAX_ARG_CHARS - 1] + "…"
 
 
+def _is_empty_arg(value: Any) -> bool:
+    """No value worth a card line: ``None``, ``""``/blank, ``[]``, ``{}``."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) == 0
+    return False
+
+
 def card_text(
     tool_name: str,
     tool_args: Mapping[str, Any],
@@ -905,15 +916,21 @@ def card_text(
     code: str,
     minutes: int = int(REMOTE_TIMEOUT_S // 60),
 ) -> str:
-    """The card as the Mac shows it: summary (or reasoning), tool, arguments."""
+    """The card as the Mac shows it: summary (or reasoning), tool, arguments.
+
+    Arguments with no value (``None``, an empty or blank string, an empty
+    list or mapping) are left out (#111): ``path: null`` tells the user
+    nothing. ``False`` and ``0`` are values and stay."""
     lines = [f"{PREFIX}Approve? {summary or reasoning or tool_name}".rstrip()]
     lines.append(f"Action: {tool_name}")
     kwargs = tool_args.get("kwargs") if isinstance(tool_args, Mapping) else None
     args = tool_args.get("args") if isinstance(tool_args, Mapping) else None
     for i, value in enumerate(args or []):
-        lines.append(f"  {i + 1}: {_short(value)}")
+        if not _is_empty_arg(value):
+            lines.append(f"  {i + 1}: {_short(value)}")
     for key, value in (kwargs or {}).items():
-        lines.append(f"  {key}: {_short(value)}")
+        if not _is_empty_arg(value):
+            lines.append(f"  {key}: {_short(value)}")
     lines.append(f'Reply "yes {code}" or "no {code}" within {minutes} min.')
     return "\n".join(lines)
 
