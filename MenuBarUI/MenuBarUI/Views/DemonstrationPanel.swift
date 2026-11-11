@@ -365,6 +365,7 @@ final class DemonstrationNSPanel: NSPanel {
 final class DemonstrationPanelController {
     let model: DemonstrationModel
     private var panel: DemonstrationNSPanel?
+    private let placement = PanelPlacement()
 
     init(actions: DemonstrationActions) {
         model = DemonstrationModel(actions: actions)
@@ -380,7 +381,7 @@ final class DemonstrationPanelController {
     func show() {
         let panel = self.panel ?? makePanel()
         self.panel = panel
-        if !panel.isVisible { position(panel) }
+        if !panel.isVisible { placement.placeTopRight(panel, inset: 16, topInset: 16) }
         panel.orderFrontRegardless()
     }
 
@@ -411,14 +412,5 @@ final class DemonstrationPanelController {
         hosting.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hosting
         return panel
-    }
-
-    /// Top-right of the screen with the mouse, out of the way of the task.
-    private func position(_ panel: NSPanel) {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        guard let frame = screen?.visibleFrame else { panel.center(); return }
-        panel.setFrameTopLeftPoint(NSPoint(x: frame.maxX - panel.frame.width - 16,
-                                           y: frame.maxY - 16))
     }
 }

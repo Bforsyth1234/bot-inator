@@ -727,13 +727,16 @@ struct MeetingRecorderPanelView: View {
 final class MeetingRecorderPanelController {
     private unowned let recorder: MeetingRecorder
     private var panel: NSPanel?
+    private let placement = PanelPlacement()
 
     init(recorder: MeetingRecorder) { self.recorder = recorder }
 
     func show() {
         let panel = self.panel ?? makePanel()
         self.panel = panel
-        if !panel.isVisible { position(panel) }
+        // Top-right of the main screen, under the menu bar (#101: sized
+        // first and kept on screen).
+        if !panel.isVisible { placement.placeTopRight(panel, inset: 16, topInset: 8, screen: NSScreen.main) }
         panel.orderFrontRegardless()
     }
 
@@ -758,12 +761,6 @@ final class MeetingRecorderPanelController {
         hosting.sizingOptions = [.preferredContentSize]
         panel.contentViewController = hosting
         return panel
-    }
-
-    /// Top-right of the main screen, under the menu bar.
-    private func position(_ panel: NSPanel) {
-        guard let frame = NSScreen.main?.visibleFrame else { panel.center(); return }
-        panel.setFrameTopLeftPoint(NSPoint(x: frame.maxX - panel.frame.width - 16, y: frame.maxY - 8))
     }
 }
 
