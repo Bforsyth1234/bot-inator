@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #108
+Next ID: #109
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -1497,6 +1497,22 @@ panel with Retry / Delete recording, audio + marker present → turn it on
 → Retry → notes ready + card, audio gone. Later → menu row → Delete
 recording → folder empty. Quit/relaunch with a kept failure → panel
 returns.
+
+---
+
+#108 — Meeting notes: a Whisper failure in the daemon still deletes the audio [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: assistant (wave 19 slot B report on #105)
+Ask: #105 keeps the audio when the app's "apple" transcription fails and
+offers Retry / Delete. With the "whisper" engine the daemon transcribes
+(`events/meeting_notes.py`), and on a failure there the audio is still
+deleted (unchanged by #105), so the meeting is lost the same way.
+Approach: same rule as #105 decision 2 on the daemon side: keep the files
+(0600, marked, purged after 24 h), report the failure to the app, and let
+the panel's Retry re-run the daemon's transcription.
+Verify: a test with mlx-whisper mocked to fail → audio kept, failure
+reported; Retry after the mock succeeds → one card, audio gone.
+Non-vacuity per rule 5.
+Deviations:
 
 ### Approvals and UI
 
