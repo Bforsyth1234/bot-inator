@@ -316,11 +316,10 @@ no LICENSE, no release and 0 stars; install is 11 terminal commands plus
 a 12.7 GB model download; there is no install script and no first-run
 screen, and the app does not start the daemon. So today only a developer
 on Apple Silicon can try it, and that is the right first audience.
-Order: #91, #92, #93, then #94 BEFORE #95 (whether a stranger's first
-hour is useful is not known, small local models over-propose, and people
-who try it and leave rarely come back), #96 later. #91 and #92 both edit
-README.md: one slot, or one after the other. #94 and #95 are the user's
-to do; the assistant can draft. #93 is under "Security and providers",
+Order: #91, #92, #93, #96 later. (#94 "watch five people install it" and
+#95 "launch posts" were deleted by the user on 2026-11-11: "delete those
+todos".) #91 and #92 both edit
+README.md: one slot, or one after the other. #93 is under "Security and providers",
 the rest under "Getting users (launch)". #97 (one OpenAI-compatible
 provider with presets; user, same day: "i want to add more support to
 other apis") sits with #93 and comes before it: #93's Cloud choice offers
@@ -1662,8 +1661,8 @@ Verify:
   choosing writes settings and loads engines; an install with a
   settings.json is not pending. Non-vacuity per rule 5.
 ⚬ Measure before fixing decision 3: peak memory and time to first card
-  with the stock local models on a 16 GB Mac (#94's testers are the
-  source if none can be borrowed).
+  with the stock local models on a 16 GB Mac (borrow one; #94, which
+  would have supplied testers, was deleted 2026-11-11).
 ⚬ Live: on a fresh `~/.bot-inator` the screen shows the recommendation
   for this Mac's memory → pick Cloud → no model download starts.
 Deviations:
@@ -1795,14 +1794,12 @@ permission to use it, and sees no proof that it works.
 Today (2026-11-10, `gh repo view`): description and homepage empty, no
 LICENSE file, no release, 0 stars. The README opens with a one-line pitch
 and goes straight to the build steps.
-USER DECISION NEEDED:
-A. Which licence. Without one, others have no permission to use, change
-   or share the code. MIT or Apache-2.0 for the widest use.
+USER DECISIONS (2026-11-11): A. MIT licence. Also: the assistant may run
+   the `gh repo edit` in decision 1 itself ("Yes, edit the repo").
 DECISIONS (assistant, 2026-11-10; the user can overturn any):
 1. DESCRIPTION: "Local-first macOS agent that watches what you do and
    offers to help. Nothing runs without your approval." Topics: macos,
-   ai-agent, mlx, local-llm. The user runs it, because it changes the
-   public repo:
+   ai-agent, mlx, local-llm. The assistant runs it (user, 2026-11-11):
    `gh repo edit Bforsyth1234/bot-inator --description "<the sentence above>" --add-topic macos,ai-agent,mlx,local-llm`
 2. DEMO: a 30–60 s screen recording of ONE flow from event to card to
    result (a file lands in Downloads → card → Approve → it is moved), as a
@@ -1856,57 +1853,8 @@ Verify:
 ⚬ `shellcheck install.sh run.sh` is clean.
 Deviations:
 
-#94 — Watch five people install it and use it for a day [ ]
-Wave: — (the user's task, after #91–#93) · Agent: _ · Added: 2026-11-10 · Source: assistant (get-users review, user: "add all of this to the todo.md")
-Ask: Before any public post, find out what a stranger's first hour is
-like. As far as this file records, only the author has installed it, so
-whether the first cards are useful or noise on someone else's Mac is not
-known.
-DECISIONS (assistant, 2026-11-10; the user can overturn any):
-1. FIVE PEOPLE with Apple Silicon Macs, at least two with 16 GB or less.
-   The user asks them; the assistant sends nothing on the user's behalf.
-2. WATCH THE INSTALL LIVE (a call, their screen shared), say nothing, and
-   write down every point where they stop, ask or guess.
-3. ONE DAY OF USE, then three questions: which card was useful, which was
-   wrong or annoying, would you keep it running. Plus their numbers from
-   Debug → "Suggestion outcomes" (#79), read out by them. The app
-   collects nothing (7c: no telemetry).
-4. Every problem becomes an item here, or a fix in #92/#93. Bar for #95:
-   3 of 5 would keep it running, and nobody needed help that the README
-   or the first-run screen did not give.
-Files: none (the notes go into this item).
-Verify:
-⚬ Five rows: memory size of their Mac, minutes to the first card, where
-  they got stuck, the three answers.
-⚬ The measurement #93 asks for, from the 16 GB testers.
-Deviations:
-
-#95 — Launch posts: Show HN, r/LocalLLaMA, r/macapps [ ]
-Wave: — (the user's task, after #94 meets its bar) · Agent: _ · Added: 2026-11-10 · Source: assistant (get-users review, user: "add all of this to the todo.md")
-Ask: Put it in front of the people who can install it today: developers
-on Apple Silicon who care about local, private AI.
-DECISIONS (assistant, 2026-11-10; the user can overturn any):
-1. THE USER POSTS, from their own accounts. The assistant drafts; it does
-   not post.
-2. ONE POST PER PLACE, a few days apart. Each leads with the demo (#91)
-   and one sentence: it writes its own tools, you approve every line, and
-   they run sandboxed.
-3. SAY WHAT IS TRUE ABOUT CLOUD: local by default; with a key, event
-   summaries, chat and tool drafts go to Groq (#31); and what #93
-   recommends on small Macs. r/LocalLLaMA will ask.
-4. Read each place's rules on self-promotion first.
-5. Be at the keyboard for the first hours to answer. Install problems
-   reported there become items.
-Files: optional drafts under docs/launch/.
-Verify:
-⚬ Each post links the repo and the demo and names the requirements (macOS
-  14+, Apple Silicon).
-⚬ A week later, recorded in this item: stars, clones
-  (`gh api repos/Bforsyth1234/bot-inator/traffic/clones`), issues opened.
-Deviations:
-
 #96 — A signed, notarized app download for people who do not use a terminal [ ]
-Wave: — (later, after #95 shows demand; one user decision, A) · Agent: _ · Added: 2026-11-10 · Source: assistant (get-users review, user: "add all of this to the todo.md")
+Wave: 17 (prep only; user, 2026-11-11: "Prep, I'll sign"; A answered) · Agent: _ · Added: 2026-11-10 · Source: assistant (get-users review, user: "add all of this to the todo.md")
 Ask: Everything before this reaches developers only. A non-developer
 needs one download that opens without a Gatekeeper warning and starts its
 own daemon.
@@ -1914,10 +1862,11 @@ Today (2026-11-10): the app is built by hand with `swiftc` and signed ad
 hoc (`codesign --sign -`); there is no Xcode project and no release; the
 daemon is a Python venv the user starts in a terminal. An ad-hoc signed
 rebuild may be asked for Calendar access again (README).
-USER DECISION NEEDED:
-A. An Apple Developer account (99 USD a year) for a Developer ID
-   certificate and notarization. The user enrols and holds the
-   credentials; the assistant never enters them.
+USER DECISION (2026-11-11): A. "Prep, I'll sign": the assistant writes
+   the build / sign / notarize script and docs; the user enrols in the
+   Apple Developer Program (99 USD a year), holds the Developer ID
+   certificate and the notarization credentials, and runs the signing.
+   The assistant never enters them.
 DECISIONS (assistant, 2026-11-10; the user can overturn any):
 1. DIRECT DOWNLOAD (a GitHub release: DMG or zip), not the Mac App Store:
    the App Store sandbox does not fit an app that reads `chat.db` and
