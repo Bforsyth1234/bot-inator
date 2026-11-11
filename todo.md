@@ -1698,7 +1698,7 @@ returns.
 
 ---
 
-#108 — Meeting notes: a Whisper failure in the daemon still deletes the audio [~]
+#108 — Meeting notes: a Whisper failure in the daemon still deletes the audio [~] live
 Wave: 20 (slot B) · Agent: subagent · Added: 2026-11-11 · Source: assistant (wave 19 slot B report on #105)
 Ask: #105 keeps the audio when the app's "apple" transcription fails and
 offers Retry / Delete. With the "whisper" engine the daemon transcribes
@@ -1710,7 +1710,75 @@ the panel's Retry re-run the daemon's transcription.
 Verify: a test with mlx-whisper mocked to fail → audio kept, failure
 reported; Retry after the mock succeeds → one card, audio gone.
 Non-vacuity per rule 5.
+Results (wave 20 slot B, 2026-11-11):
+1. DAEMON (`events/meeting_notes.py`). `process()` on the whisper path
+   (audio, no transcript) transcribes both channels before deleting
+   either; on an exception `keep_failed()` keeps the audio (only regular
+   files inside `audio_dir()`, chmod 0600) and writes the app's #105
+   marker `<id>.failed.json` (0600, O_NOFOLLOW) in the app's
+   `FailedRecording` JSON shape (camelCase keys, `failedAt` = seconds since
+   2001-01-01 UTC) plus `"engine": "whisper"`. `failedAt` is carried over
+   from an existing marker (24 h from the first failure, also when #105's
+   "Use Whisper" hands an on-device failure over); a failure ≥ 24 h after
+   the first keeps nothing. Returns `{status: error, reason, kept}`. On
+   success the audio AND the marker are deleted, then the one card is
+   published as before. `transcribe_audio()` now deletes only on success.
+   Unchanged: an app-reported `error`, a bad id, or audio outside the
+   folder still deletes / never keeps.
+2. TELLING THE APP. `meeting_record_stop` gains optional fields
+   (`transcription: "failed"|"done"`, `title`, `error`, `message`, `kept`,
+   `audio_path`, `system_audio_path`, `started_at`, `ended_at`,
+   `stop_reason`, `failed_at`, `expires_at`) in `schemas/ws_messages.py`
+   and Swift `MeetingRecordStopPayload`. "failed" after a kept failure,
+   "done" after any whisper-path result. An old app ignores it (its
+   receiveStop only acts on the meeting it is recording).
+3. APP (`Services/MeetingRecorder.swift`). `FailedRecording.engine`
+   (optional; nil = #105 on-device marker). `receiveStop` routes
+   transcription frames to `receiveDaemonTranscription`: "failed"+kept →
+   added to `failures` (menu row, 10-min expiry loop) and the #105 failed
+   panel (Retry / Delete recording / Later) unless a recording/offer is
+   on screen; not kept → "failed … The recording was deleted."; "done" →
+   the failure is forgotten, "Notes … are ready". Retry on a whisper
+   failure re-sends `meeting_audio_ready` with the kept paths (marker left
+   for the daemon to delete); daemon not connected → the error is shown
+   and nothing is lost. "Use Whisper" is hidden for a whisper failure, and
+   no longer deletes the marker first. Delete recording / Later / the
+   24 h purge are #105's, unchanged.
+Verify (done here):
+⚬ pytest full gate: 1843 passed (new `tests/test_meeting_notes_whisper_retry.py`,
+  9 tests; 3 tests in `tests/test_meeting_notes.py` changed from "audio
+  deleted on failure" to "kept", see Deviations). mlx-whisper is never
+  imported: injected fakes, and `sys.modules["mlx_whisper"]` stubbed.
+⚬ Non-vacuity: (a) finally always deleting (the old behaviour) → 9 fail
+  (7 new + the 2 changed); (b) not deleting the marker on success → 2
+  fail (Retry one-card test, 24 h test). Restored → all pass.
+⚬ `xcrun swiftc -O -parse-as-library -target arm64-apple-macos14` full
+  build to a scratch path: 0 errors.
+⚬ Interop harness (scratch, not committed): the daemon's real
+  `process()` wrote a marker into a scratch HOME; a Swift binary built from
+  MeetingRecorder.swift's own `FailedRecording`/`MeetingFiles` code ran
+  `purgeLeftoverAudio`: 8/8 pass (marker decodes, engine whisper → Retry
+  in daemon, audio + marker kept, crash leftover purged, an #105 marker
+  without `engine` still decodes as on-device, all purged at +25 h).
 Deviations:
+⚬ No new frame: main.py's `_MEETING_FRAMES` (runner-owned) only maps
+  offer/stop, so the result rides on `meeting_record_stop` as optional
+  fields. Runner may split it into its own frame later.
+⚬ Changed 3 existing tests (`test_audio_deleted_when_transcription_fails`,
+  `test_transcribe_audio_deletes_on_its_own`,
+  `test_second_audio_deleted_when_first_fails`) that asserted the bug.
+⚬ main.py `_process_meeting_audio` still shows a "Meeting notes: <error>"
+  notification on a kept failure, alongside the panel (test pins one
+  call). Runner: skip it when `result.get("kept")` if wanted.
+Unverified: the panel flow in the running app (no live daemon/app touched);
+a real mlx-whisper failure.
+Live check: Settings → Meeting notes → Whisper with mlx-whisper NOT
+installed → record 30 s → Stop → "Notes for X failed" panel with Retry /
+Delete recording / Later; `~/.bot-inator/meetings/audio/` has the .m4a +
+`.failed.json` (0600) → install mlx-whisper → Retry → notes ready, one
+card, folder empty. Repeat → Later → menu row → Delete recording → folder
+empty. Quit/relaunch with a kept whisper failure → panel returns, Retry
+goes to the daemon.
 
 ### Approvals and UI
 
