@@ -43,6 +43,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,6 +81,18 @@ def _open_url(url: str) -> None:
     """Open a URL (System Settings pane) with ``/usr/bin/open``."""
     subprocess.run(["/usr/bin/open", url], check=False, timeout=10,
                    capture_output=True)
+
+
+def _launch_hidden(bundle_id: str) -> None:
+    """Start ``bundle_id`` in the background (``open -g -j -b``) and give it
+    a moment to register for Apple Events (#98: the user could not open
+    System Events, a background app with no window)."""
+    subprocess.run(["/usr/bin/open", "-g", "-j", "-b", bundle_id], check=False,
+                   timeout=10, capture_output=True)
+    time.sleep(_LAUNCH_SETTLE_SECONDS)
+
+
+_LAUNCH_SETTLE_SECONDS = 1.5
 
 
 def _quartz() -> Any:
@@ -354,10 +367,15 @@ def request_screen_recording() -> dict[str, Any]:
 
 def request_automation(bundle_id: str, app: str) -> dict[str, Any]:
     code = _ae_determine(bundle_id, ask=True)
+    if code == _AE_PROC_NOT_FOUND:
+        # #98: start the target ourselves and ask once more, so Request
+        # always does something instead of "open X first".
+        _launch_hidden(bundle_id)
+        code = _ae_determine(bundle_id, ask=True)
     if code == _AE_NO_ERR:
         return {"action": "prompted", "detail": "granted"}
     if code == _AE_PROC_NOT_FOUND:
-        return {"action": "none", "detail": f"open {app} first, then click Request"}
+        return {"action": "none", "detail": f"couldn't start {app}; open it, then click Request"}
     return _opened(SETTINGS_URLS["automation"],
                    f"turn on {app} under this process in Automation")
 
@@ -517,7 +535,9 @@ PERMISSIONS: list[Permission] = [
     ),
     # #85 (user, 2026-11-10, answer A): the iPhone remote sends to the
     # user's OWN handle only. tools/send_imessage.py stays unregistered.
-    _automation("automation_messages", "Messages", "com.apple.iChat",
+    # #98: Messages is com.apple.MobileSMS on current macOS (com.apple.iChat
+    # was the old id: no process ever has it, so Request could never ask).
+    _automation("automation_messages", "Messages", "com.apple.MobileSMS",
                 "Send answers and approval cards to your own Messages thread "
                 "(iPhone remote, only when it is on).",
                 ("events/remote_channel.py",)),

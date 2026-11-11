@@ -360,3 +360,29 @@ def test_routes_need_token(client, monkeypatch, method, path) -> None:
         monkeypatch.setattr(perm, "request", lambda: called.append(1) or {})
     assert getattr(client, method)(path).status_code == 401
     assert called == []
+
+
+# ── #98: Messages bundle id, and Request starts a target that isn't running ──
+
+def test_messages_row_targets_mobilesms(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(P, "_ae_determine", lambda b, ask: calls.append(b) or 0)
+    P.request("automation_messages")
+    assert calls and set(calls) == {"com.apple.MobileSMS"}
+
+
+def test_request_automation_launches_target_when_not_running(monkeypatch) -> None:
+    codes = iter([-600, 0])
+    launched = []
+    monkeypatch.setattr(P, "_ae_determine", lambda b, ask: next(codes))
+    monkeypatch.setattr(P, "_launch_hidden", launched.append)
+    out = P.request("automation_system_events")
+    assert launched == ["com.apple.systemevents"]
+    assert out["action"] == "prompted"
+
+
+def test_request_automation_still_not_running_says_so(monkeypatch) -> None:
+    monkeypatch.setattr(P, "_ae_determine", lambda b, ask: -600)
+    monkeypatch.setattr(P, "_launch_hidden", lambda b: None)
+    out = P.request("automation_messages")
+    assert out["action"] == "none" and "couldn't start Messages" in out["detail"]
