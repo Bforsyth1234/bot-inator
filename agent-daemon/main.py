@@ -1589,13 +1589,14 @@ _MEETING_JOBS: set[asyncio.Task[Any]] = set()
 
 async def _process_meeting_audio(meeting_notes: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """#86: transcript / audio -> one card. Anything but a card is told to
-    the user as a notification (the audio is deleted either way)."""
+    the user as a notification, except a failure whose audio was kept
+    (#108): the app's panel already shows it with Retry / Delete."""
     try:
         result = await meeting_notes.process(payload)
     except Exception as exc:
         logger.exception("meeting notes: processing failed")
         result = {"status": "error", "reason": str(exc)[:300]}
-    if result.get("status") != "offered":
+    if result.get("status") != "offered" and not result.get("kept"):
         try:
             from tools.show_notification import show_notification  # noqa: WPS433
 

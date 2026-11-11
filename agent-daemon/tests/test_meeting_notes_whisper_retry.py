@@ -213,11 +213,12 @@ def test_missing_mlx_whisper_is_a_kept_failure(monkeypatch) -> None:
     assert out["status"] == "offered" and not mic.exists()
 
 
-def test_main_still_notifies_once_on_a_kept_failure() -> None:
+def test_main_does_not_notify_on_a_kept_failure() -> None:
+    # The app's panel already shows it with Retry / Delete (#108 runner).
     import main
 
     mic = _audio("m108-me.m4a")
     notes, *_ = make(FlakyWhisper())
     with mock.patch("tools.show_notification.show_notification") as notify:
         out = asyncio.run(main._process_meeting_audio(notes, _payload(mic)))
-    assert out["kept"] is True and mic.exists() and notify.call_count == 1
+    assert out["kept"] is True and mic.exists() and notify.call_count == 0
