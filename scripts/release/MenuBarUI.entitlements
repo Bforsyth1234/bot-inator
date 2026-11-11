@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the Developer ID build (#96). The app is
+  not sandboxed (it reads chat.db / Mail's store via the daemon and runs
+  sandbox-exec), so these are only the hardened runtime's resource switches.
+  Each one matches a usage description in MenuBarUI/MenuBarUI/Info.plist.
+-->
+<plist version="1.0">
+<dict>
+    <!-- Meeting notes (#86): microphone, after "Take notes". -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- CalendarBridge (#60): EventKit for the daemon's calendar tools. -->
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+</dict>
+</plist>
