@@ -43,6 +43,16 @@ AppleScript). Selection uses ``AGENT_REMINDERS_BACKEND``, falling back to
 Reminders come back as ``{id, title, due, all_day, list, notes (first 500
 chars), completed}``; ``due`` is ``""`` (none), ``YYYY-MM-DD`` (all-day) or
 an ISO datetime with offset. Diagnostic: ``--check --reminders``.
+
+Undo (#83): every backend also implements ``get`` / ``delete`` (one event
+by ``event_id``) and ``get_reminder`` / ``delete_reminder``; the app backend
+uses the ``get`` / ``delete`` ops of ``calendar_request``. These are NOT
+tools and the model never reaches them: only ``ai.action_journal`` calls
+the module-level :func:`get_event` / :func:`delete_event` /
+:func:`get_reminder` / :func:`delete_reminder`, with an id the journal
+stored when the agent's approved call created the item. :func:`fingerprint`
+is a short hash of an item's fields, so "edited since" can be checked
+without the journal storing titles or notes.
 """
 
 from __future__ import annotations
@@ -50,7 +60,9 @@ from __future__ import annotations
 import asyncio
 import builtins
 import concurrent.futures
+import hashlib
 import itertools
+import json
 import os
 import subprocess
 import threading
@@ -441,6 +453,47 @@ class EventKitBackend:
         return {"status": "ok", "event_id": str(ev.eventIdentifier() or ""),
                 "calendar": str(cal.title())}
 
+    # undo (#83) ---------------------------------------------------------------
+
+    def _event_by_id(self, store: Any, event_id: str) -> Any:
+        return store.eventWithIdentifier_(event_id) if event_id else None
+
+    def get(self, event_id):
+        store = self._ensure_access("event")
+        ev = self._event_by_id(store, event_id)
+        return self._to_dict(ev) if ev is not None else None
+
+    def delete(self, event_id):
+        ek, _ = _eventkit()
+        store = self._ensure_access("event", write=True)
+        ev = self._event_by_id(store, event_id)
+        if ev is None:
+            raise CalendarAccessError(f"No event with id {event_id!r}.")
+        ok, err = store.removeEvent_span_commit_error_(ev, ek.EKSpanThisEvent, True, None)
+        if not ok:
+            raise CalendarAccessError(f"EventKit could not delete the event: {err}")
+        return {"status": "ok"}
+
+    def _reminder_by_id(self, store: Any, reminder_id: str) -> Any:
+        ek, _ = _eventkit()
+        item = store.calendarItemWithIdentifier_(reminder_id) if reminder_id else None
+        return item if item is not None and item.isKindOfClass_(ek.EKReminder) else None
+
+    def get_reminder(self, reminder_id):
+        store = self._ensure_access("reminder")
+        rem = self._reminder_by_id(store, reminder_id)
+        return self._reminder_to_dict(rem) if rem is not None else None
+
+    def delete_reminder(self, reminder_id):
+        store = self._ensure_access("reminder", write=True)
+        rem = self._reminder_by_id(store, reminder_id)
+        if rem is None:
+            raise CalendarAccessError(f"No reminder with id {reminder_id!r}.")
+        ok, err = store.removeReminder_commit_error_(rem, True, None)
+        if not ok:
+            raise CalendarAccessError(f"EventKit could not delete the reminder: {err}")
+        return {"status": "ok"}
+
     # reminders (#45) ----------------------------------------------------------
 
     def _reminder_calendars(self, store: Any) -> builtins.list[Any]:
@@ -723,6 +776,81 @@ on run argv
 end run
 '''
 
+# Undo (#83). argv: 1 = event uid. Same fields as _LIST_SCRIPT; "" = none.
+_GET_EVENT_SCRIPT = _AS_HELPERS + '''
+on run argv
+    set US to character id 31
+    set wanted to item 1 of argv
+    tell application "Calendar"
+        repeat with c in calendars
+            set found to (every event of c whose uid is wanted)
+            if (count of found) > 0 then
+                set e to item 1 of found
+                set rec to {my txt(uid of e), my txt(summary of e), my isoOf(start date of e), my isoOf(end date of e), (name of c as text), my txt(location of e), my txt(description of e), my txt(url of e), (allday event of e) as text}
+                set AppleScript's text item delimiters to US
+                set s to rec as text
+                set AppleScript's text item delimiters to ""
+                return s
+            end if
+        end repeat
+    end tell
+    return ""
+end run
+'''
+
+# argv: 1 = event uid. Returns "OK" or "NOT_FOUND".
+_DELETE_EVENT_SCRIPT = '''
+on run argv
+    set wanted to item 1 of argv
+    tell application "Calendar"
+        repeat with c in calendars
+            set found to (every event of c whose uid is wanted)
+            if (count of found) > 0 then
+                delete (item 1 of found)
+                return "OK"
+            end if
+        end repeat
+    end tell
+    return "NOT_FOUND"
+end run
+'''
+
+# argv: 1 = reminder id. Same fields as _REMINDERS_LIST_SCRIPT; "" = none.
+_GET_REMINDER_SCRIPT = _AS_HELPERS + '''
+on dOf(v)
+    if v is missing value then return ""
+    return my isoOf(v)
+end dOf
+
+on run argv
+    set US to character id 31
+    set wanted to item 1 of argv
+    tell application "Reminders"
+        set found to (every reminder whose id is wanted)
+        if (count of found) is 0 then return ""
+        set r to item 1 of found
+        set rec to {my txt(id of r), my txt(name of r), my dOf(due date of r), my dOf(allday due date of r), (name of (container of r)) as text, my txt(body of r), (completed of r) as text}
+        set AppleScript's text item delimiters to US
+        set s to rec as text
+        set AppleScript's text item delimiters to ""
+        return s
+    end tell
+end run
+'''
+
+# argv: 1 = reminder id. Returns "OK" or "NOT_FOUND".
+_DELETE_REMINDER_SCRIPT = '''
+on run argv
+    set wanted to item 1 of argv
+    tell application "Reminders"
+        set found to (every reminder whose id is wanted)
+        if (count of found) is 0 then return "NOT_FOUND"
+        delete (item 1 of found)
+    end tell
+    return "OK"
+end run
+'''
+
 _REMINDER_LISTS_SCRIPT = '''
 on run argv
     tell application "Reminders"
@@ -787,17 +915,63 @@ class AppleScriptBackend:
             )
         except Exception as exc:
             raise CalendarAccessError(_osascript_error(exc)) from exc
-        events = []
-        for record in filter(None, out.split(_RS)):
-            f = record.split(_US)
-            if len(f) < 9:
-                continue
-            events.append(make_event(
-                id=f[0], title=f[1], start=parse_local(f[2]), end=parse_local(f[3]),
-                calendar=f[4], location=f[5], notes=f[6], url=f[7],
-                all_day=f[8].strip() == "true",
-            ))
+        events = [ev for ev in map(self._event_record, filter(None, out.split(_RS))) if ev]
         return sorted(events, key=lambda e: e["start"])
+
+    @staticmethod
+    def _event_record(record: str) -> Optional[dict[str, Any]]:
+        f = record.split(_US)
+        if len(f) < 9:
+            return None
+        return make_event(
+            id=f[0], title=f[1], start=parse_local(f[2]), end=parse_local(f[3]),
+            calendar=f[4], location=f[5], notes=f[6], url=f[7],
+            all_day=f[8].strip() == "true",
+        )
+
+    @staticmethod
+    def _reminder_record(record: str) -> Optional[dict[str, Any]]:
+        f = record.split(_US)
+        if len(f) < 7:
+            return None
+        due_s, allday_s = f[2].strip(), f[3].strip()
+        due: Optional[datetime] = None
+        all_day = False
+        if allday_s and (not due_s or due_s.endswith("T00:00:00")):
+            due, all_day = parse_local(allday_s), True
+        elif due_s:
+            due = parse_local(due_s)
+        return make_reminder(
+            id=f[0], title=f[1], due=due, all_day=all_day, list=f[4],
+            notes=f[5], completed=f[6].strip() == "true",
+        )
+
+    # undo (#83) ---------------------------------------------------------------
+
+    @staticmethod
+    def _osa(script: str, *args: str) -> str:
+        try:
+            return _run_osascript(script, *args)
+        except Exception as exc:
+            raise CalendarAccessError(_osascript_error(exc)) from exc
+
+    def get(self, event_id):
+        out = self._osa(_GET_EVENT_SCRIPT, event_id) if event_id else ""
+        return self._event_record(out) if out else None
+
+    def delete(self, event_id):
+        if self._osa(_DELETE_EVENT_SCRIPT, event_id) != "OK":
+            raise CalendarAccessError(f"No event with id {event_id!r}.")
+        return {"status": "ok"}
+
+    def get_reminder(self, reminder_id):
+        out = self._osa(_GET_REMINDER_SCRIPT, reminder_id) if reminder_id else ""
+        return self._reminder_record(out) if out else None
+
+    def delete_reminder(self, reminder_id):
+        if self._osa(_DELETE_REMINDER_SCRIPT, reminder_id) != "OK":
+            raise CalendarAccessError(f"No reminder with id {reminder_id!r}.")
+        return {"status": "ok"}
 
     def create(self, title, start, end, calendar=None, location=None, notes=None):
         try:
@@ -838,21 +1012,7 @@ class AppleScriptBackend:
                 raise CalendarAccessError(_osascript_error(exc)) from exc
             if out == "NO_LIST":
                 raise CalendarAccessError(f"No reminders list named {name!r}.")
-            for record in filter(None, out.split(_RS)):
-                f = record.split(_US)
-                if len(f) < 7:
-                    continue
-                due_s, allday_s = f[2].strip(), f[3].strip()
-                due: Optional[datetime] = None
-                all_day = False
-                if allday_s and (not due_s or due_s.endswith("T00:00:00")):
-                    due, all_day = parse_local(allday_s), True
-                elif due_s:
-                    due = parse_local(due_s)
-                items.append(make_reminder(
-                    id=f[0], title=f[1], due=due, all_day=all_day, list=f[4],
-                    notes=f[5], completed=f[6].strip() == "true",
-                ))
+            items.extend(r for r in map(self._reminder_record, filter(None, out.split(_RS))) if r)
         return sort_reminders(items)
 
     def create_reminder(self, title, due=None, all_day=False, list_name=None, notes=None):
@@ -1068,18 +1228,32 @@ class AppCalendarBackend:
         if calendars:
             args["calendars"] = builtins.list(calendars)
         reply = self._bridge.request("list", args)
-        events = []
-        for ev in reply.get("events") or []:
-            events.append(make_event(
-                id=str(ev.get("id") or ""), title=str(ev.get("title") or ""),
-                start=parse_local(str(ev["start"])), end=parse_local(str(ev["end"])),
-                calendar=str(ev.get("calendar") or ""), location=str(ev.get("location") or ""),
-                notes=str(ev.get("notes") or ""), url=str(ev.get("url") or ""),
-                all_day=bool(ev.get("all_day")),
-                # Absent from apps older than #80: stays absent (unknown).
-                attendees=ev.get("attendees"),
-            ))
+        events = [self._event(ev) for ev in reply.get("events") or []]
         return sorted(events, key=lambda e: e["start"])
+
+    @staticmethod
+    def _event(ev: dict[str, Any]) -> dict[str, Any]:
+        return make_event(
+            id=str(ev.get("id") or ""), title=str(ev.get("title") or ""),
+            start=parse_local(str(ev["start"])), end=parse_local(str(ev["end"])),
+            calendar=str(ev.get("calendar") or ""), location=str(ev.get("location") or ""),
+            notes=str(ev.get("notes") or ""), url=str(ev.get("url") or ""),
+            all_day=bool(ev.get("all_day")),
+            # Absent from apps older than #80: stays absent (unknown).
+            attendees=ev.get("attendees"),
+        )
+
+    # undo (#83): ``get`` answers ``events: []`` (not found) or one event.
+    def get(self, event_id):
+        if not event_id:
+            return None
+        reply = self._bridge.request("get", {"event_id": event_id})
+        found = reply.get("events") or []
+        return self._event(found[0]) if found else None
+
+    def delete(self, event_id):
+        self._bridge.request("delete", {"event_id": event_id})
+        return {"status": "ok"}
 
     def create(self, title, start, end, calendar=None, location=None, notes=None):
         args: dict[str, Any] = {"title": title, "start": iso(start), "end": iso(end)}
@@ -1174,6 +1348,49 @@ def create_reminder(title, due=None, all_day=False, list_name=None, notes=None):
 
 def list(start, end, calendars=None):  # noqa: A001 - interface name from #42
     return get_backend().list(start, end, calendars)
+
+
+# ---- undo (#83): called only by ai.action_journal, never a tool ------------------
+
+_EVENT_KEYS = ("title", "start", "end", "calendar", "location", "notes", "url", "all_day")
+_REMINDER_KEYS = ("title", "due", "all_day", "list", "notes", "completed")
+
+
+def fingerprint(item: Optional[dict[str, Any]], kind: str = "event") -> Optional[str]:
+    """Short hash of the fields a user edit would change; None for no item.
+
+    The journal stores this instead of the title or notes, and compares it
+    before an undo deletes anything ("edited since" means "not undone").
+    """
+    if not item:
+        return None
+    keys = _REMINDER_KEYS if kind == "reminder" else _EVENT_KEYS
+    canon = json.dumps({k: item.get(k) for k in keys}, sort_keys=True, default=str)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:24]
+
+
+def _undo_op(backend: Any, name: str) -> Callable[..., Any]:
+    op = getattr(backend, name, None)
+    if op is None:
+        raise CalendarAccessError(f"The {getattr(backend, 'name', '?')} backend can't {name}.")
+    return op
+
+
+def get_event(event_id: str) -> Optional[dict[str, Any]]:
+    """The event with this id, or None when it no longer exists."""
+    return _undo_op(get_backend(), "get")(event_id)
+
+
+def delete_event(event_id: str) -> dict[str, Any]:
+    return _undo_op(get_backend(), "delete")(event_id)
+
+
+def get_reminder(reminder_id: str) -> Optional[dict[str, Any]]:
+    return _undo_op(get_reminder_backend(), "get_reminder")(reminder_id)
+
+
+def delete_reminder(reminder_id: str) -> dict[str, Any]:
+    return _undo_op(get_reminder_backend(), "delete_reminder")(reminder_id)
 
 
 def create(title, start, end, calendar=None, location=None, notes=None):

@@ -12,13 +12,20 @@ them), so the text shows up literally instead of being read as markup.
 
 Both tools change user data and are approval-gated: neither name belongs in
 ``tools.READ_ONLY_TOOL_NAMES``.
+
+Undo (#83): ``create_note`` returns the new note's ``note_id`` (Notes'
+``x-coredata://`` id). :func:`note_fingerprint` and :func:`delete_note` are
+NOT tools: only ``ai.action_journal`` calls them, with an id it stored when
+an approved ``create_note`` ran. Deleting moves the note to Notes' "Recently
+Deleted" folder.
 """
 
 from __future__ import annotations
 
+import hashlib
 import html
 import subprocess
-from typing import Any
+from typing import Any, Optional
 
 try:
     from smolagents import tool  # type: ignore
@@ -42,11 +49,34 @@ on run argv
     set folderName to item 2 of argv
     tell application "Notes"
         if folderName is "" then
-            make new note with properties {body:noteBody}
+            set newNote to make new note with properties {body:noteBody}
         else
             if not (exists folder folderName) then return "NO_FOLDER"
-            make new note at folder folderName with properties {body:noteBody}
+            set newNote to make new note at folder folderName with properties {body:noteBody}
         end if
+        return "OK" & (character id 31) & (id of newNote)
+    end tell
+end run
+'''
+
+# Undo (#83). argv: 1 = note id. Returns "NOT_FOUND" or "OK" + LF + the body.
+_GET_SCRIPT = '''
+on run argv
+    set noteId to item 1 of argv
+    tell application "Notes"
+        if not (exists note id noteId) then return "NOT_FOUND"
+        return "OK" & linefeed & (body of note id noteId)
+    end tell
+end run
+'''
+
+# argv: 1 = note id. Returns "OK" or "NOT_FOUND".
+_DELETE_SCRIPT = '''
+on run argv
+    set noteId to item 1 of argv
+    tell application "Notes"
+        if not (exists note id noteId) then return "NOT_FOUND"
+        delete note id noteId
     end tell
     return "OK"
 end run
@@ -110,8 +140,8 @@ def create_note(title: str, body: str, folder: str = "") -> dict[str, Any]:
             an error, not created.
 
     Returns:
-        A dict with ``status`` ("ok" or "error"), ``title``, and, on
-        failure, an ``error`` string.
+        A dict with ``status`` ("ok" or "error"), ``title``, ``note_id`` on
+        success, and, on failure, an ``error`` string.
     """
     note_html = f"<div><h1>{html.escape(title, quote=True)}</h1></div>" + _to_html(body)
     try:
@@ -120,7 +150,11 @@ def create_note(title: str, body: str, folder: str = "") -> dict[str, Any]:
         return {"status": "error", "title": title, "error": _error(exc)}
     if out == "NO_FOLDER":
         return {"status": "error", "title": title, "error": f"No Notes folder named {folder!r}."}
-    return {"status": "ok", "title": title}
+    result: dict[str, Any] = {"status": "ok", "title": title}
+    parts = out.split("\x1f", 1)
+    if parts[0] == "OK" and len(parts) == 2 and parts[1].strip():
+        result["note_id"] = parts[1].strip()  # #83: the journal undoes by this id
+    return result
 
 
 @tool
@@ -146,3 +180,26 @@ def append_note(title: str, text: str) -> dict[str, Any]:
         return {"status": "error", "title": title,
                 "error": f"More than one note is titled {title!r}; rename one first."}
     return {"status": "ok", "title": title}
+
+
+# ---- undo (#83): called only by ai.action_journal, never a tool -------------
+
+
+def note_fingerprint(note_id: str) -> Optional[str]:
+    """Short hash of the note's current body; None when it no longer exists.
+
+    The journal stores this, never the body, and an undo deletes the note
+    only while the hash still matches (it was not edited since).
+    """
+    if not note_id:
+        return None
+    out = _run(_GET_SCRIPT, note_id)
+    if not out.startswith("OK"):
+        return None
+    body = out[3:] if out.startswith("OK\n") else ""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:24]
+
+
+def delete_note(note_id: str) -> bool:
+    """Delete the note with this id (to Recently Deleted); False if not found."""
+    return bool(note_id) and _run(_DELETE_SCRIPT, note_id) == "OK"

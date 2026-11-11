@@ -8,6 +8,10 @@ import EventKit
 /// daemon's `calendar_request` frames. Access is requested only when the
 /// daemon first needs it (never at launch). All EventKit work runs on a
 /// private serial queue, off the main thread.
+///
+/// `get` / `delete` (#83) serve the daemon's undo: the action journal reads
+/// an event it created (to check it was not edited) and deletes it by the
+/// id it stored. The model has no delete tool; only the journal sends them.
 final class CalendarBridge: @unchecked Sendable {
     static let notesLimit = 500
 
@@ -47,6 +51,14 @@ final class CalendarBridge: @unchecked Sendable {
                                                    eventId: eventId, calendar: calendar)
             case .requestAccess:
                 try await ensureAccess(write: false)
+                response = CalendarResponsePayload(requestId: request.requestId, ok: true)
+            case .get:
+                try await ensureAccess(write: false)
+                let events = try await get(args: request.args)
+                response = CalendarResponsePayload(requestId: request.requestId, ok: true, events: events)
+            case .delete:
+                try await ensureAccess(write: false)
+                try await delete(args: request.args)
                 response = CalendarResponsePayload(requestId: request.requestId, ok: true)
             }
             response.authorization = Self.authorization()
@@ -154,6 +166,29 @@ final class CalendarBridge: @unchecked Sendable {
             if !notes.isEmpty { event.notes = notes }
             try store.save(event, span: .thisEvent, commit: true)
             return (event.eventIdentifier ?? "", calendar.title)
+        }
+    }
+
+    /// #83: the one event with this id, or `[]` when it no longer exists.
+    private func get(args: JSONValue?) async throws -> [CalendarEventDTO] {
+        guard let eventId = Self.string(args, "event_id"), !eventId.isEmpty else {
+            throw BridgeError(message: "event_id is required.")
+        }
+        return try await onQueue { [store] in
+            store.event(withIdentifier: eventId).map { [Self.dto($0)] } ?? []
+        }
+    }
+
+    /// #83: delete the one event with this id (this occurrence only).
+    private func delete(args: JSONValue?) async throws {
+        guard let eventId = Self.string(args, "event_id"), !eventId.isEmpty else {
+            throw BridgeError(message: "event_id is required.")
+        }
+        try await onQueue { [store] in
+            guard let event = store.event(withIdentifier: eventId) else {
+                throw BridgeError(message: "No event with id '\(eventId)'.")
+            }
+            try store.remove(event, span: .thisEvent, commit: true)
         }
     }
 

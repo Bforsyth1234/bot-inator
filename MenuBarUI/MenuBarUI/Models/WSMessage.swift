@@ -37,6 +37,10 @@ struct ApprovalRequestPayload: Codable, Hashable {
     /// A prepared offer's actions (#76): one approval runs every ticked one.
     /// nil (older daemons, ordinary cards) keeps the one-call card.
     let actions: [ApprovalAction]?
+    /// #83: the daemon's action journal can undo this tool's result. The
+    /// presenter shows such a card as a small panel that does not take focus
+    /// (still a card: Approve / Deny / Edit). nil (older daemons) = false.
+    var reversible: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -47,6 +51,7 @@ struct ApprovalRequestPayload: Codable, Hashable {
         case timeoutSeconds = "timeout_seconds"
         case summary
         case actions
+        case reversible
     }
 }
 
@@ -317,6 +322,11 @@ enum CalendarOp: String, Codable, Hashable {
     case list
     case create
     case requestAccess = "request_access"
+    /// #83 (undo only): `{event_id}`. `get` answers `events` = [] or one
+    /// event; `delete` removes that one event. Only the daemon's action
+    /// journal sends them.
+    case get
+    case delete
 }
 
 /// Server→client: run one EventKit operation for the daemon. `args` is

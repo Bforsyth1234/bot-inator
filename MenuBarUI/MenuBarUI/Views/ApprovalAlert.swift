@@ -334,6 +334,127 @@ struct ApprovalAlert: View {
     }
 }
 
+// MARK: - Light card (#83)
+
+/// The small card for a call the daemon marked `reversible` (the action
+/// journal can undo it). Still a card (invariant 7a): nothing runs until the
+/// user approves. Return approves, Escape denies, "Edit…" opens the full
+/// card with every field. The presenter shows it in a panel that does not
+/// activate the app, so the app the user is typing in keeps focus until the
+/// user clicks the panel.
+struct CompactApprovalCard: View {
+    let payload: ApprovalRequestPayload
+    let onDecision: (_ approved: Bool) -> Void
+    let onEdit: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.uturn.backward.circle.fill")
+                    .foregroundStyle(.orange)
+                    .appFont(.headline)
+                Text(CompactCard.title(payload))
+                    .appFont(.headline)
+                    .lineLimit(1)
+                Spacer()
+                if let timeout = payload.timeoutSeconds {
+                    Text("\(timeout)s")
+                        .appFont(.secondary, design: .monospaced)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ForEach(CompactCard.lines(payload), id: \.label) { row in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(row.label)
+                        .appFont(.secondary, weight: .semibold)
+                        .foregroundStyle(.secondary)
+                    Text(row.value)
+                        .appFont(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+            }
+            Text("You can undo this later in History.")
+                .appFont(.fine)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Edit…", action: onEdit)
+                    .buttonStyle(.borderless)
+                Spacer()
+                Button(role: .destructive) {
+                    onDecision(false)
+                } label: {
+                    Text("Deny")
+                }
+                .keyboardShortcut(.cancelAction)
+                Button {
+                    onDecision(true)
+                } label: {
+                    Text(CompactCard.approveLabel(payload))
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(!CompactCard.isComplete(payload))
+            }
+        }
+        .padding(14)
+        .frame(width: 380)
+    }
+}
+
+/// Pure logic for the light card (#83).
+enum CompactCard {
+    /// A reversible one-call card (not a #76 bundle, not an idea card).
+    static func applies(_ payload: ApprovalRequestPayload) -> Bool {
+        payload.reversible == true && (payload.actions?.isEmpty ?? true)
+            && payload.toolName != "generate_custom_tool"
+    }
+
+    static func title(_ payload: ApprovalRequestPayload) -> String {
+        switch payload.toolName {
+        case "move_file": return "Move a file?"
+        case "create_event": return "Add a calendar event?"
+        case "create_reminder": return "Add a reminder?"
+        case "create_note": return "Create a note?"
+        default: return "Run \(payload.toolName)?"
+        }
+    }
+
+    static func approveLabel(_ payload: ApprovalRequestPayload) -> String {
+        ApprovalEditSpec.spec(for: payload.toolName, toolArgs: payload.toolArgs)?.approveLabel
+            ?? "Approve"
+    }
+
+    /// The card's read-only rows, then every non-empty field, at most four.
+    static func lines(_ payload: ApprovalRequestPayload) -> [ApprovalInfoRow] {
+        guard let spec = ApprovalEditSpec.spec(for: payload.toolName, toolArgs: payload.toolArgs) else {
+            return [ApprovalInfoRow(label: "Arguments",
+                                    value: payload.toolArgs.prettyPrinted()
+                                        .split(whereSeparator: \.isNewline).joined(separator: " "))]
+        }
+        let merged = ApprovalEditSpec.mergedKwargs(payload.toolArgs, params: spec.params)
+        let values = ApprovalEditSpec.initialValues(spec, toolArgs: payload.toolArgs)
+        var rows = spec.fields.compactMap { field -> ApprovalInfoRow? in
+            let value = (values[field.key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return nil }
+            let oneLine = value.split(whereSeparator: \.isNewline).joined(separator: " ")
+            return ApprovalInfoRow(label: field.label, value: oneLine)
+        }
+        rows.append(contentsOf: spec.readOnly(merged))
+        var seen = Set<String>()
+        return Array(rows.filter { seen.insert($0.label).inserted }.prefix(4))
+    }
+
+    /// Approve needs the same required fields as the full card.
+    static func isComplete(_ payload: ApprovalRequestPayload) -> Bool {
+        guard let spec = ApprovalEditSpec.spec(for: payload.toolName, toolArgs: payload.toolArgs) else {
+            return true
+        }
+        return spec.isComplete(ApprovalEditSpec.initialValues(spec, toolArgs: payload.toolArgs))
+    }
+}
+
 // MARK: - Bundled card logic (#76, pure)
 
 enum BundleCard {

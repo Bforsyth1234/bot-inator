@@ -91,9 +91,53 @@ struct ToolDetail: Decodable, Equatable {
     }
 }
 
+/// ``GET /api/tools/<name>/health`` (#90): recent failures of a generated
+/// tool and whether a previous version can be restored.
+struct ToolHealth: Decodable, Equatable {
+    struct Failure: Decodable, Equatable, Hashable {
+        let at: String?
+        let errorClass: String?
+        let message: String?
+        let repairable: Bool
+        let category: String?
+        let reason: String?
+        enum CodingKeys: String, CodingKey {
+            case at, message, repairable, category, reason
+            case errorClass = "error_class"
+        }
+    }
+
+    struct Change: Decodable, Equatable {
+        let kind: String
+        let at: String?
+    }
+
+    let status: String
+    let okRuns: Int
+    let failures7d: Int
+    let recentFailures: [Failure]
+    let lastChange: Change?
+    let repairOfferedUntil: String?
+    let canRestore: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case okRuns = "ok_runs"
+        case failures7d = "failures_7d"
+        case recentFailures = "recent_failures"
+        case lastChange = "last_change"
+        case repairOfferedUntil = "repair_offered_until"
+        case canRestore = "can_restore"
+    }
+}
+
 @MainActor
 final class ToolDetailViewModel: ObservableObject {
     @Published private(set) var detail: ToolDetail?
+    /// nil for built-ins, older daemons, or before the health log is ready.
+    @Published private(set) var health: ToolHealth?
+    @Published private(set) var isRestoring = false
+    @Published var restoreMessage: String?
     @Published private(set) var isLoading = false
     @Published var errorMessage: String?
 
@@ -126,6 +170,47 @@ final class ToolDetailViewModel: ObservableObject {
         } catch {
             errorMessage = "Failed to load \(name): \(error.localizedDescription)"
         }
+        if detail?.isGenerated == true { await loadHealth(name) }
+    }
+
+    /// Best effort: a missing route or log leaves the section hidden.
+    func loadHealth(_ name: String) async {
+        do {
+            let request = try DaemonAuth.request(
+                baseURL.appendingPathComponent("api/tools/\(name)/health")
+            )
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                health = nil
+                return
+            }
+            health = try JSONDecoder().decode(ToolHealth.self, from: data)
+        } catch {
+            health = nil
+        }
+    }
+
+    /// Put back the tool's prior committed version (#90): a user click, no card.
+    func restorePrevious(_ name: String) async {
+        isRestoring = true
+        defer { isRestoring = false }
+        do {
+            let request = try DaemonAuth.request(
+                baseURL.appendingPathComponent("api/tools/\(name)/restore-previous"),
+                method: "POST"
+            )
+            let (data, response) = try await session.data(for: request)
+            try DaemonAuth.checkAuth(response)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["detail"]
+                restoreMessage = "Restore failed: \(detail as? String ?? "HTTP \(http.statusCode)")"
+                return
+            }
+            restoreMessage = "Previous version restored and reloaded."
+        } catch {
+            restoreMessage = "Restore failed: \(error.localizedDescription)"
+        }
+        await load(name)
     }
 }
 
@@ -232,6 +317,9 @@ struct ToolDetailView: View {
                 Text(sandbox.note).appFont(.secondary).foregroundStyle(.secondary)
             }
         }
+        if detail.isGenerated, let health = viewModel.health {
+            healthSection(health)
+        }
         if detail.state == "quarantined" {
             section("Load error") {
                 Text(detail.errorText?.isEmpty == false ? detail.errorText! : "No error text saved.")
@@ -247,6 +335,61 @@ struct ToolDetailView: View {
                     .textSelection(.enabled)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func healthSection(_ health: ToolHealth) -> some View {
+        section("Health") {
+            Label(healthLine(health),
+                  systemImage: health.status == "failing"
+                    ? "exclamationmark.triangle.fill" : "checkmark.seal")
+                .foregroundStyle(health.status == "failing" ? Color.orange : Color.secondary)
+            if let change = health.lastChange {
+                Text("Last \(change.kind == "restored" ? "restored" : "repaired") \(change.at ?? "")")
+                    .appFont(.secondary).foregroundStyle(.secondary)
+            }
+            if health.repairOfferedUntil != nil {
+                Text("A repair was offered recently; the next offer waits a week.")
+                    .appFont(.secondary).foregroundStyle(.secondary)
+            }
+            ForEach(Array(health.recentFailures.prefix(5).enumerated()), id: \.offset) { _, failure in
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(failure.at ?? "") · \(failure.errorClass ?? "error")")
+                        .appFont(.secondary, weight: .semibold)
+                    if let message = failure.message, !message.isEmpty {
+                        Text(message)
+                            .appFont(.secondary, design: .monospaced)
+                            .textSelection(.enabled)
+                            .lineLimit(3)
+                    }
+                    if !failure.repairable, let reason = failure.reason {
+                        Text("Not repairable: \(reason)")
+                            .appFont(.secondary).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if health.canRestore == true {
+                HStack {
+                    Button("Restore previous version") {
+                        Task { await viewModel.restorePrevious(toolName) }
+                    }
+                    .disabled(viewModel.isRestoring)
+                    .help("Put back the version installed before the last change and reload it")
+                    if viewModel.isRestoring { ProgressView().controlSize(.small) }
+                }
+            }
+            if let message = viewModel.restoreMessage {
+                Text(message).appFont(.secondary).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func healthLine(_ health: ToolHealth) -> String {
+        switch health.status {
+        case "failing": return "Failing · \(health.failures7d) failure\(health.failures7d == 1 ? "" : "s") in the last 7 days"
+        case "ok": return "Working · \(health.okRuns) successful run\(health.okRuns == 1 ? "" : "s")"
+        default: return "No runs recorded yet"
         }
     }
 

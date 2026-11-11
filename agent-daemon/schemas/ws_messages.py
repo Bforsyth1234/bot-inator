@@ -59,6 +59,11 @@ class ApprovalRequestPayload(BaseModel):
     # A prepared offer (#76): the actions one approval runs, each with a
     # tick box. ``None`` (the default, and older daemons) is a one-call card.
     actions: list[ApprovalAction] | None = None
+    # #83: the action journal can undo this tool's result (``ai.action_journal
+    # .is_undoable``). The app shows a reversible card as a small panel that
+    # does not take focus; it is still a card (invariant 7a). False (the
+    # default, and older daemons) keeps the full window.
+    reversible: bool = False
 
 
 class ApprovalResponsePayload(BaseModel):
@@ -186,7 +191,7 @@ class ToolsChangedPayload(BaseModel):
 CalendarAuthorization = Literal[
     "not_determined", "restricted", "denied", "full_access", "write_only"
 ]
-CalendarOp = Literal["list", "create", "request_access"]
+CalendarOp = Literal["list", "create", "request_access", "get", "delete"]
 
 
 class CalendarRequestPayload(BaseModel):
@@ -195,6 +200,10 @@ class CalendarRequestPayload(BaseModel):
     ``list`` args: ``{start, end, calendars?}`` (ISO 8601 with offset).
     ``create`` args: ``{title, start, end, calendar?, location?, notes?}``.
     ``request_access`` (a Permissions "Request" click) takes no args.
+    ``get`` / ``delete`` (#83, undo only): ``{event_id}``. ``get`` answers
+    ``events`` = ``[]`` (no such event) or one event; ``delete`` removes that
+    one event (this occurrence) and answers ``ok``. Only the action journal
+    sends them, with an id it stored; the model has no delete tool.
     Sent to ONE connection (the app that advertised ``calendar_status``).
     """
 

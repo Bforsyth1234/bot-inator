@@ -541,8 +541,14 @@ def _draft_with_engine(
     expected_logic: str,
     previous_source: str = "",
     problems: Optional[list[str]] = None,
+    installed_source: str = "",
+    failure_note: str = "",
 ) -> str:
     """Drive the configured drafting engine to write a @tool module synchronously.
+
+    ``installed_source`` + ``failure_note`` make this a repair of an
+    installed tool (#90): every attempt sees the installed code and the
+    error it hit at run time.
 
     Called from the smolagents agent worker thread (spawned by
     ``asyncio.to_thread`` in :meth:`Orchestrator._run_agent`), so we drop
@@ -561,6 +567,8 @@ def _draft_with_engine(
         f"expected_logic: {expected_logic}\n\n"
         "Emit the full module now. Output nothing but the Python source."
     )
+    if installed_source and failure_note:
+        user_msg += _repair_context(installed_source, failure_note)
     if previous_source and problems:
         # Repair turn (Phase 5.1): show the model its own draft and the
         # exact check failures so it fixes them instead of starting over.
@@ -838,8 +846,21 @@ def _git_commit(directory: Path, filename: str, message: str) -> tuple[bool, str
         return False, f"git error: {exc}"
 
 
+def _repair_context(installed_source: str, failure_note: str) -> str:
+    """Repair-turn context (#90): the installed module and its run-time error."""
+    return (
+        "\n\nThis tool is already installed and now FAILS when it runs. "
+        "The installed module:\n" + installed_source +
+        "\n\nThe error it hit:\n- " + failure_note +
+        "\n\nFix the cause of that error. Keep the tool name, its arguments "
+        "and its behaviour. Do not add network access, apps or file paths the "
+        "installed module does not use unless the fix needs them."
+    )
+
+
 def _draft_until_clean(
     engine: Any, tool_name: str, description: str, expected_logic: str,
+    *, installed_source: str = "", failure_note: str = "",
 ) -> tuple[str, int]:
     """Draft, check, critique and repair up to :data:`MAX_DRAFT_ATTEMPTS` times.
 
@@ -865,10 +886,14 @@ def _draft_until_clean(
     soft_notes: list[str] = []
     plan: Optional[DryRunPlan] = None
     plan_attempted = False
+    repair: dict[str, str] = (
+        {"installed_source": installed_source, "failure_note": failure_note}
+        if installed_source and failure_note else {}
+    )
     for attempt in range(1, MAX_DRAFT_ATTEMPTS + 1):
         source = _draft_with_engine(
             engine, tool_name, description, expected_logic,
-            previous_source=source, problems=problems,
+            previous_source=source, problems=problems, **repair,
         )
         problems = check_draft(tool_name, source, static_validator=_validate_source)
         stage = "checks"
@@ -1099,18 +1124,332 @@ def _mark_for_rerun(tool_name: str) -> None:
 
 def _request_code_approval(
     tool_name: str, description: str, source: str,
+    *, previous_code: Optional[str] = None, notice: str = "",
 ):
-    """Cross the async boundary to request review from the UI."""
+    """Cross the async boundary to request review from the UI.
+
+    A repair (#90) passes the installed source as ``previous_code`` (the
+    card shows a diff) and a ``notice`` that leads the summary (the error
+    behind the repair and anything the new code newly touches).
+    """
     assert _ORCHESTRATOR is not None
     loop = _ORCHESTRATOR.event_bus.loop
     if loop is None:
         raise ToolGenerationError("event-loop not bound to orchestrator")
     extra: dict[str, Any] = {}
     summary = _plain_summary(tool_name, description, source)
+    if notice:
+        summary = notice + ("\n\n" + summary if summary else "")
     if summary:
         extra["summary"] = summary
+    if previous_code is not None and _accepts_kwarg(
+        _ORCHESTRATOR.request_code_approval, "previous_code",
+    ):
+        extra["previous_code"] = previous_code
     coro = _ORCHESTRATOR.request_code_approval(
         tool_name=tool_name, description=description, code=source, **extra,
     )
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=_ORCHESTRATOR.code_approval_timeout + 5)
+
+
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+# ---- repair an installed tool (#90) -----------------------------------------
+#
+# OFFER, NEVER AUTO-FIX: ``repair_tool`` drafts a fix through the same
+# checks, dry run and critic as a new tool (``_draft_until_clean``), then
+# asks the code card with the installed source as ``previous_code``. Nothing
+# is written or committed before the card is approved; a denial leaves the
+# file and the nested repo's history as they were. Every repair is a commit,
+# and ``restore_previous_version`` (a user click in Tool detail) puts the
+# file's prior committed version back.
+
+
+def widening(previous: str, new: str) -> list[str]:
+    """What ``new`` touches that ``previous`` did not, as card sentences:
+    an added network import, new apps, new paths (#90 decision 4)."""
+    from ai import tool_summary
+
+    before = tool_summary.touches_from_source(previous)
+    after = tool_summary.touches_from_source(new)
+    out: list[str] = []
+    if after["network"] and not before["network"]:
+        out.append(f"This repair ADDS network access ({after['network']}).")
+    apps = [a for a in after["apps"] if a not in before["apps"]]
+    if apps:
+        out.append("This repair controls apps the tool did not before: " + ", ".join(apps) + ".")
+    paths = [p for p in after["paths"] if p not in before["paths"]]
+    if paths:
+        out.append("This repair touches paths the tool did not before: " + ", ".join(paths) + ".")
+    if after["writes_files"] and not before["writes_files"]:
+        out.append("This repair can change files; the installed tool could not.")
+    return out
+
+
+def _failure_note(failure: dict[str, Any]) -> str:
+    cls = str(failure.get("error_class") or "ToolError")
+    message = str(failure.get("message") or "").strip()
+    note = message if message.startswith(cls) else f"{cls}: {message}".rstrip(": ")
+    try:
+        from ai import privacy
+
+        # A cloud drafting engine gets the error class and message only
+        # (argument values were never stored), with known personal text
+        # scrubbed (#31/#51/#52).
+        note = privacy.scrub_idea_text(note, "drafting")
+    except Exception:
+        logger.debug("failure note scrub failed", exc_info=True)
+    return note
+
+
+def _spec_for(tool_name: str, source: str) -> tuple[str, str]:
+    """``(description, expected_logic)`` from the provenance, else the docstring."""
+    import json
+
+    assert _GENERATED_DIR is not None
+    try:
+        data = json.loads(provenance_path(_GENERATED_DIR, tool_name).read_text(encoding="utf-8"))
+        requested = data.get("requested") or {}
+        desc = str(requested.get("description") or "").strip()
+        logic = str(requested.get("expected_logic") or "").strip()
+        if desc or logic:
+            return desc or logic, logic or desc
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        tree = ast.parse(source)
+        funcs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        funcs.sort(key=lambda n: n.name != tool_name)
+        doc = (ast.get_docstring(funcs[0]) if funcs else None) or ast.get_docstring(tree) or ""
+    except SyntaxError:
+        doc = ""
+    doc = doc.strip() or f"The installed tool {tool_name}."
+    return doc.splitlines()[0].strip(), doc
+
+
+def _note_repair_in_provenance(tool_name: str, failure: dict[str, Any], user_edited: bool) -> None:
+    import json
+    from datetime import datetime, timezone
+
+    if _GENERATED_DIR is None:
+        return
+    path = provenance_path(_GENERATED_DIR, tool_name)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if not isinstance(data, dict):
+            data = {}
+        repairs = data.setdefault("repairs", [])
+        repairs.append({
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "error_class": failure.get("error_class"),
+            "user_edited": bool(user_edited),
+        })
+        del repairs[:-20]
+        _atomic_write(path, json.dumps(data, indent=2, default=str))
+    except Exception:
+        logger.exception("Failed to note the repair of %s in provenance", tool_name)
+
+
+def _health_log() -> Any:
+    return getattr(_ORCHESTRATOR, "tool_health", None)
+
+
+def repair_tool(tool_name: str, failure: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Draft, review and (on approval) install a fix for an installed tool.
+
+    ``failure`` is ``{"error_class", "message"}`` (as recorded by
+    :mod:`ai.tool_health`); ``None`` uses the tool's latest recorded
+    failure. Returns ``status`` "ok" | "denied" | "not_repairable" | "error".
+    """
+    from ai import tool_health
+
+    if _ORCHESTRATOR is None or _ENGINE is None or _GENERATED_DIR is None:
+        return {"status": "error", "tool_name": tool_name,
+                "error": "meta-tool context not initialised"}
+    try:
+        _validate_identifier(tool_name)
+    except ToolGenerationError as exc:
+        return {"status": "error", "tool_name": tool_name, "error": str(exc)}
+    path = _GENERATED_DIR / f"{tool_name}.py"
+    if (_GENERATED_DIR / "disabled" / f"{tool_name}.py").exists() and not path.exists():
+        return {"status": "error", "tool_name": tool_name, "error": "tool is disabled"}
+    if not path.is_file():
+        return {"status": "error", "tool_name": tool_name,
+                "error": "no installed generated tool with that name"}
+    if failure is None:
+        log = _health_log()
+        failure = log.latest_failure(tool_name) if log is not None else None
+    if not failure:
+        return {"status": "error", "tool_name": tool_name,
+                "error": "no recorded failure to repair"}
+    message = str(failure.get("message") or "")
+    cls = str(failure.get("error_class") or tool_health.error_class_of(message))
+    repairable, category, reason = tool_health.classify_failure(message, cls)
+    if not repairable:
+        return {"status": "not_repairable", "tool_name": tool_name,
+                "category": category, "reason": reason}
+    failure = {**failure, "error_class": cls, "message": message}
+
+    installed = path.read_text(encoding="utf-8")
+    description, expected_logic = _spec_for(tool_name, installed)
+    note = _failure_note(failure)
+    _report_progress(f"Drafting a repair of {tool_name} for: {note}")
+    try:
+        source, attempts = _draft_until_clean(
+            _DRAFT_ENGINE or _ENGINE, tool_name, description, expected_logic,
+            installed_source=installed, failure_note=note,
+        )
+    except ToolGenerationError as exc:
+        return {"status": "error", "tool_name": tool_name, "error": str(exc)}
+    except Exception as exc:
+        logger.exception("Repair draft failed")
+        return {"status": "error", "tool_name": tool_name, "error": str(exc)}
+    if source.strip() == installed.strip():
+        return {"status": "error", "tool_name": tool_name,
+                "error": "the repair draft is identical to the installed source"}
+
+    widened = widening(installed, source)
+    notice = "\n".join(
+        [f"⚠ {line}" for line in widened]
+        + [f"REPAIR of the installed tool {tool_name}. It failed with: {message or cls}",
+           "Below: the changes against the installed version. Deny keeps the tool as it is."]
+    )
+    response = _request_code_approval(
+        tool_name, description, source, previous_code=installed, notice=notice,
+    )
+    if not response.approved:
+        return {"status": "denied", "tool_name": tool_name,
+                "user_note": response.user_note}
+
+    final_source = response.edited_code or source
+    if response.edited_code:
+        edit_problems = check_draft(tool_name, final_source, static_validator=_validate_source)
+        if edit_problems:
+            return {"status": "error", "tool_name": tool_name,
+                    "error": "user-edited draft rejected: " + "; ".join(edit_problems)}
+    try:
+        _atomic_write(path, final_source)
+    except Exception as exc:
+        logger.exception("Failed to write the repaired tool")
+        return {"status": "error", "tool_name": tool_name, "error": str(exc)}
+    _note_repair_in_provenance(tool_name, failure, bool(response.edited_code))
+    git_ok, git_summary = _git_commit(
+        _GENERATED_DIR, f"{tool_name}.py", f"Repair tool: {tool_name} ({cls})",
+    )
+    if not git_ok:
+        logger.warning("Nested git commit failed for repair of %s: %s", tool_name, git_summary)
+    log = _health_log()
+    if log is not None:
+        log.note_change(tool_name, "repaired")
+    try:
+        _ORCHESTRATOR.load_dynamic_tools()
+    except Exception as exc:
+        logger.exception("load_dynamic_tools failed after repair")
+        return {"status": "error", "tool_name": tool_name,
+                "error": f"repaired but failed to load: {exc}"}
+    return {
+        "status": "ok", "tool_name": tool_name, "path": str(path),
+        "git": git_summary, "git_ok": git_ok, "draft_attempts": attempts,
+        "widened": widened,
+        "message": (
+            f"Tool {tool_name!r} was repaired and reloaded. Emit final_answer "
+            "with a brief confirmation; do not call the tool in this turn."
+        ),
+    }
+
+
+@tool
+def repair_generated_tool(tool_name: str) -> dict[str, Any]:
+    """Draft a fix for an installed generated tool that keeps failing, and ask the user to review it.
+
+    Call this only when an idea asks to repair a tool. The fix is drafted
+    from the tool's recorded failure and its original spec, checked, dry
+    run, and shown to the user as a diff against the installed code;
+    nothing changes unless the user approves.
+
+    Args:
+        tool_name: Name of the installed generated tool to repair.
+
+    Returns:
+        dict with ``status`` ("ok", "denied", "not_repairable", "error") and ``tool_name``.
+    """
+    return repair_tool(tool_name)
+
+
+def _git_read(directory: Path, *args: str) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run(
+        ["git", *_GIT_ISOLATION_ARGS, *args], cwd=directory, capture_output=True,
+        text=True, timeout=10, stdin=subprocess.DEVNULL,
+    )
+
+
+def previous_version(generated_dir: Path, tool_name: str) -> Optional[tuple[str, str]]:
+    """``(commit, source)``: the newest committed version of
+    ``<tool_name>.py`` that differs from the file on disk, or ``None``."""
+    generated_dir = Path(generated_dir)
+    path = generated_dir / f"{tool_name}.py"
+    if not path.is_file() or not (generated_dir / ".git").exists():
+        return None
+    current = path.read_text(encoding="utf-8").strip()
+    try:
+        log = _git_read(generated_dir, "log", "--format=%H", "-n", "50", "--", f"{tool_name}.py")
+        if log.returncode != 0:
+            return None
+        for sha in log.stdout.split():
+            shown = _git_read(generated_dir, "show", f"{sha}:{tool_name}.py")
+            if shown.returncode == 0 and shown.stdout.strip() != current:
+                return sha, shown.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        logger.exception("reading the history of %s failed", tool_name)
+    return None
+
+
+def restore_previous_version(
+    tool_name: str, *, generated_dir: Optional[Path] = None, orchestrator: Any = None,
+) -> dict[str, Any]:
+    """Put back the file's prior committed version, commit, reload (#90).
+
+    A user click in Tool detail, no card: the prior version was reviewed
+    when it was installed. Returns ``status`` "ok" | "error".
+    """
+    gen = Path(generated_dir) if generated_dir is not None else _GENERATED_DIR
+    orch = orchestrator if orchestrator is not None else _ORCHESTRATOR
+    if gen is None:
+        return {"status": "error", "tool_name": tool_name, "error": "no generated tools dir"}
+    try:
+        _validate_identifier(tool_name)
+    except ToolGenerationError as exc:
+        return {"status": "error", "tool_name": tool_name, "error": str(exc)}
+    found = previous_version(gen, tool_name)
+    if found is None:
+        return {"status": "error", "tool_name": tool_name, "error": "no previous version"}
+    sha, source = found
+    path = gen / f"{tool_name}.py"
+    _atomic_write(path, source)
+    git_ok, git_summary = _git_commit(
+        gen, f"{tool_name}.py", f"Restore previous version: {tool_name} ({sha[:7]})",
+    )
+    log = getattr(orch, "tool_health", None)
+    if log is not None:
+        log.note_change(tool_name, "restored")
+    loaded = None
+    if orch is not None and hasattr(orch, "load_dynamic_tools"):
+        try:
+            loaded = tool_name in orch.load_dynamic_tools()
+        except Exception as exc:
+            logger.exception("load_dynamic_tools failed after restore")
+            return {"status": "error", "tool_name": tool_name,
+                    "error": f"restored but failed to load: {exc}"}
+    return {"status": "ok", "tool_name": tool_name, "restored_commit": sha,
+            "git_ok": git_ok, "git": git_summary, "loaded": loaded}
