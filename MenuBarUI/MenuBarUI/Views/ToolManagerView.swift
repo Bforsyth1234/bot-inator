@@ -128,6 +128,9 @@ struct ToolManagerView: View {
             // DECLINED IDEAS (#56): review and remove remembered denials.
             Divider()
             DeclinedIdeasView()
+            // MCP SERVERS (#69): other apps' local tools, off until enabled.
+            Divider()
+            McpServersView()
         }
         .frame(minWidth: 440, minHeight: 420)
         .sheet(item: $selectedTool) { tool in

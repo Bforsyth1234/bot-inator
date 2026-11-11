@@ -15,6 +15,7 @@ struct DebugView: View {
                 countersSection
                 stagesSection
                 errorsSection
+                SuggestionOutcomesView()
                 placeholderSection
             }
             .padding(12)

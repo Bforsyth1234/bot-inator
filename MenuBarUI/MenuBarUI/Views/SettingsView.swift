@@ -297,6 +297,9 @@ struct SettingsView: View {
             }
 
             DailyBriefSettingsView()
+            MeetingPrepSettingsView()
+            QuickAskSettingsView()
+            ActivityHistorySettingsView()
             PermissionsView()
 
             Section {

@@ -33,8 +33,16 @@ from ai.privacy import personal_text_allowed
 from ai.mlx_engine import MLXEngine
 from ai.orchestrator import Orchestrator
 from ai.pattern_recognizer import PatternRecognizer, make_detection_evaluator
+from ai import activity_store
+from ai.idea_outcomes import (
+    DecisionLog,
+    OutcomeStore,
+    default_decisions_path,
+    default_outcomes_path,
+)
 from ai.idea_sources import (
     CHAT_GAP_SYSTEM_PROMPT,
+    NEEDS_REPLY_JUDGE_SYSTEM_PROMPT,
     NEXT_STEP_SYSTEM_PROMPT,
     ChatGapDetector,
     IdeaState,
@@ -57,6 +65,7 @@ from ai.friction import (
     FRICTION_SYSTEM_PROMPT,
     FrictionDetector,
 )
+from ai.routine_ideas import RoutineIdeaSource
 from ai.setup_scan import (
     SETUP_JUDGE_SYSTEM_PROMPT,
     SETUP_SCAN_SYSTEM_PROMPT,
@@ -70,6 +79,7 @@ from events.file_watcher import FileWatcher
 from events.imessage_watcher import IMessageWatcher
 from events.mac_listeners import MacAppListener
 from events.mail_watcher import MailWatcher
+from events.meeting_prep import MeetingPrepScheduler
 from schemas.ws_messages import (
     ApprovalResponse,
     CalendarRequest,
@@ -275,6 +285,11 @@ async def lifespan(app: FastAPI):
             ),
             state=idea_state,
             feedback=idea_feedback,
+            # #70: reply drafts for mail that asks the user something.
+            reply_judge=make_detection_evaluator(
+                detection_engine, max_tokens=JUDGE_MAX_TOKENS,
+                system_prompt=NEEDS_REPLY_JUDGE_SYSTEM_PROMPT,
+            ),
         ),
         ChatGapDetector(
             event_bus=bus,
@@ -316,6 +331,27 @@ async def lifespan(app: FastAPI):
         feedback=idea_feedback,
         records_feedback=not settings.open_help_enabled,
     ))
+    # #71: ``event_starting_soon`` -> one read-only ``meeting_prep`` event.
+    # An idea source (the orchestrator calls its observe) and a listener
+    # (stopped at shutdown). It only reacts to calendar_watcher events, so
+    # it is harmless without listeners.
+    try:
+        meeting_prep = MeetingPrepScheduler(bus)
+        meeting_prep.start()
+        listeners.append(meeting_prep)
+        listener_names.append("meeting_prep")
+        idea_sources.append(meeting_prep)
+    except Exception:
+        logger.exception("Failed to start meeting_prep")
+    # #79: what happens to each suggestion, and every card decision.
+    idea_outcomes = OutcomeStore(_store_path("AGENT_IDEA_OUTCOMES_PATH", default_outcomes_path()))
+    approval_decisions = DecisionLog(
+        _store_path("AGENT_APPROVAL_DECISIONS_PATH", default_decisions_path())
+    )
+    # Rarely-kept judged sources get a higher judge bar and a longer cooldown.
+    for source in idea_sources:
+        if isinstance(source, (OpenHelpSuggester, FrictionDetector)):
+            source.outcomes = idea_outcomes
     orchestrator = Orchestrator(
         engine=engine,
         event_bus=bus,
@@ -329,6 +365,8 @@ async def lifespan(app: FastAPI):
     orchestrator.declined_matcher = DeclinedIdeaMatcher(
         idea_feedback, judge=make_sync_judge(detection_engine),
     )
+    orchestrator.idea_outcomes = idea_outcomes
+    orchestrator.approval_decisions = approval_decisions
     set_meta_tool_context(
         orchestrator=orchestrator,
         engine=engine,
@@ -339,7 +377,28 @@ async def lifespan(app: FastAPI):
         orchestrator.load_dynamic_tools()
     except Exception:
         logger.exception("load_dynamic_tools at startup failed")
+    # #69: other apps' local MCP servers (stdio). Tools stay off until the
+    # user enables them in Tool Manager, and stay gated unless marked.
+    from ai.mcp_client import McpManager, attach_to_orchestrator  # noqa: WPS433
+
+    mcp_manager = McpManager()
+    try:
+        attach_to_orchestrator(mcp_manager, orchestrator)
+        await asyncio.to_thread(mcp_manager.start, 20)
+    except Exception:
+        logger.exception("MCP manager failed to start")
+    app.state.mcp_manager = mcp_manager
     await orchestrator.start()
+
+    # #75: once a day, mine the activity history for routines and offer
+    # one through the idea pipeline (source "routine").
+    routine_ideas: Optional[RoutineIdeaSource] = None
+    if _listeners_enabled() and os.environ.get("AGENT_ROUTINE_IDEAS", "1") != "0":
+        routine_ideas = RoutineIdeaSource(
+            event_bus=bus, state=idea_state, feedback=idea_feedback,
+            shortcuts=_shortcut_names_or_none,
+        )
+        routine_ideas.start()
 
     setup_scanner: Optional[SetupScanner] = None
     if _listeners_enabled() and os.environ.get("AGENT_SETUP_SCAN", "1") != "0":
@@ -366,6 +425,8 @@ async def lifespan(app: FastAPI):
     app.state.memory = memory
     app.state.orchestrator = orchestrator
     app.state.idea_feedback = idea_feedback
+    app.state.idea_outcomes = idea_outcomes
+    app.state.approval_decisions = approval_decisions
     app.state.pattern_recognizer = pattern_recognizer
     app.state.listeners = listeners
     # #65: the run-now route uses the scheduler when it is running.
@@ -377,6 +438,15 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if routine_ideas is not None:
+            try:
+                await routine_ideas.stop()
+            except Exception:
+                logger.exception("Error stopping routine ideas")
+        try:
+            await asyncio.to_thread(app.state.mcp_manager.stop)
+        except Exception:
+            logger.exception("Error stopping MCP servers")
         if setup_scanner is not None:
             try:
                 await setup_scanner.stop()
@@ -408,8 +478,12 @@ app = FastAPI(title="agent-daemon", version="0.1.0", lifespan=lifespan)
 app.add_middleware(AuthMiddleware)
 # Wave 8 routers (todo rule 12): declined ideas (#56), permissions (#59),
 # tool detail (#61). The app-wide AuthMiddleware covers them.
+from routes import activity as activity_routes  # noqa: E402
 from routes import daily_brief as daily_brief_routes  # noqa: E402
 from routes import ideas as ideas_routes  # noqa: E402
+from routes import mcp as mcp_routes  # noqa: E402
+from routes import meeting_prep as meeting_prep_routes  # noqa: E402
+from routes import outcomes as outcomes_routes  # noqa: E402
 from routes import permissions as permissions_routes  # noqa: E402
 from routes.tool_detail import router as tool_detail_router  # noqa: E402
 
@@ -417,11 +491,30 @@ app.include_router(daily_brief_routes.router)
 app.include_router(ideas_routes.router)
 app.include_router(permissions_routes.router)
 app.include_router(tool_detail_router)
+# Wave 13: outcomes (#79), activity history (#75), meeting prep (#71),
+# MCP servers (#69).
+app.include_router(outcomes_routes.router)
+app.include_router(activity_routes.router)
+app.include_router(meeting_prep_routes.router)
+app.include_router(mcp_routes.router)
 
 
 def _next_seq() -> int:
     app.state.seq += 1
     return app.state.seq
+
+
+def _store_path(env_key: str, default: Path) -> Path:
+    """``env_key`` overrides a ``~/.bot-inator`` store path (tests)."""
+    override = os.environ.get(env_key, "").strip()
+    return Path(override).expanduser() if override else default
+
+
+def _shortcut_names_or_none() -> list[str]:
+    """The user's Shortcut names for routine mapping ([] on any failure)."""
+    from tools.shortcuts import _shortcut_names  # noqa: WPS433
+
+    return _shortcut_names()
 
 
 async def _calendar_reader_if_granted() -> list[Any]:
@@ -497,11 +590,16 @@ async def list_tools() -> list[dict[str, Any]]:
             continue
         seen.add(name)
         is_generated = name in getattr(orchestrator, "_dynamic_tool_names", set())
-        rows.append({
+        row = {
             "name": name,
             "description": _description_for_tool(tool_obj),
             "is_generated": is_generated,
-        })
+        }
+        mcp = getattr(orchestrator, "mcp_manager", None)
+        if mcp is not None and mcp.is_mcp_tool(name):
+            # #69: another app's tool, managed in the MCP servers section.
+            row["kind"] = "mcp"
+        rows.append(row)
 
     generated_dir = settings.generated_tools_dir
     if generated_dir.exists():
@@ -817,6 +915,17 @@ def _commit_tool_paths(generated_dir: Path, rel_paths: list[str], message: str) 
         logger.exception("git commit of %s failed", rel_paths)
 
 
+def _record_outcome(state: Any, method: str, tool_name: str) -> None:
+    """#79: a generated tool was disabled or deleted (best effort)."""
+    store = getattr(state, "idea_outcomes", None)
+    if store is None:
+        return
+    try:
+        getattr(store, method)(tool_name)
+    except Exception:
+        logger.exception("idea_outcomes.%s failed", method)
+
+
 @app.delete("/api/tools/{tool_name}")
 async def delete_tool(tool_name: str) -> dict[str, Any]:
     """Uninstall an agent-authored tool. Refuses to touch built-ins.
@@ -847,6 +956,7 @@ async def delete_tool(tool_name: str) -> dict[str, Any]:
     _commit_tool_paths(
         generated_dir, present, f"Removed generated tool: {tool_name}"
     )
+    _record_outcome(app.state, "record_deleted", tool_name)
     if not unloaded:
         # A disabled or quarantined copy: unload sent no tools_changed (#29).
         orchestrator.notify_tools_changed("deleted", [tool_name])
@@ -880,6 +990,7 @@ async def disable_tool(tool_name: str) -> dict[str, Any]:
         [f"disabled/{tool_name}.py", f"{tool_name}.py"],
         f"Disabled generated tool: {tool_name}",
     )
+    _record_outcome(app.state, "record_disabled", tool_name)
     return {"status": "ok", "tool_name": tool_name, "unloaded": unloaded}
 
 
@@ -956,6 +1067,12 @@ async def _handle_command(app: FastAPI, msg: Command) -> None:
             logger.info("clear_memory removed %s memories", removed)
         except Exception:
             logger.exception("Failed to clear memory")
+        # #75: the activity history is memory too.
+        try:
+            rows = await asyncio.to_thread(activity_store.clear)
+            logger.info("clear_memory removed %s activity rows", rows)
+        except Exception:
+            logger.exception("Failed to clear activity history")
     elif action == "reload_dynamic_tools":
         try:
             app.state.orchestrator.load_dynamic_tools()
@@ -1107,6 +1224,8 @@ async def ws_stream(websocket: WebSocket) -> None:
                         metadata={
                             "event_id": msg.payload.message_id,
                             "text": msg.payload.text,
+                            # #74: quick-ask context, this turn only.
+                            "context": msg.payload.context.model_dump(exclude_none=True) if msg.payload.context else None,
                         },
                     )
                 )

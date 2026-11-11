@@ -56,7 +56,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #80
+Next ID: #81
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -87,8 +87,8 @@ API auth → sandbox for installed tools → live checks.
 | 10 | A: #66 · B: #67 · C: #65 · D: #63 | A `ai/open_help.py`, `ai/friction.py`, `ai/pattern_recognizer.py`, `tests/test_open_help.py`, `tests/fixtures/open_help_windows.json` · B `ai/memory.py`, `tools/remember_preference.py`, `tests/test_memory.py` · C new `events/daily_brief.py`, `user_settings.py`, new `DailyBriefSettingsView.swift` · D new `tools/email_draft.py`, `ai/permissions.py`, `ApprovalAlert.swift` (+ each slot's new test file). Runner at close: `tools/__init__.py`, `main.py`, `ai/orchestrator.py`, `SettingsView.swift`, LIVING_SPEC | [x] closed 2026-11-10 (#63 #65 #66 `[~] live`; #67 no bug, `[~] live`) |
 | 11 | A: #64 (alone) | `ai/orchestrator.py`, `ApprovalAlert.swift`, `CodeReviewAlert.swift`, `tools/meta_tool_generator.py`, `routes/tool_detail.py`, `ToolDetailView.swift`, new `ai/tool_summary.py`, optional `summary` field in `schemas/ws_messages.py` + `WSMessage.swift`. Runner: #68 in `ai/privacy.py` | [x] closed 2026-11-10 (#64 `[~] live`) |
 | 12 | A: #62 (alone, cross-cutting: every Swift view) | `MenuBarUI/MenuBarUI/Views/*.swift`, `MenuBarUIApp.swift`, `ApprovalPresenter.swift`, new `Views/TextSize.swift` | [x] closed 2026-11-10 (#62 `[~] live`) |
-| 13 | A: #75 · B: #79 · C: #70 · D: #71 · E: #69 · F: #74 | A new `ai/activity_store.py`, new `ai/routines.py` · B new `ai/idea_outcomes.py` (also the approval-decision log #72/#78 read), new `routes/outcomes.py` · C `ai/idea_sources.py`, new `ai/needs_reply.py` · D new `events/meeting_prep.py`, `user_settings.py`, new `MeetingPrepSettingsView.swift` · E new `ai/mcp_client.py`, new `routes/mcp.py`, new `McpServersView.swift` · F new `Views/QuickAskPanel.swift`, new `Services/HotKey.swift`, `ai/permissions.py`, new `ai/chat_context.py`, `schemas/ws_messages.py`, `WSMessage.swift` (+ each slot's new test file). Runner at close: `ai/orchestrator.py`, `main.py`, `tools/__init__.py`, `MenuBarUIApp.swift`, `SettingsView.swift`, `ToolManagerView.swift`, `DebugView.swift`, `requirements.txt`, LIVING_SPEC | [ ] |
-| 14 | A: #72 · B: #73 · C: #76 · D: #77 | A `ai/memory.py`, new `ai/preference_learning.py`, new `routes/preferences.py`, new `LearnedPreferencesView.swift` · B new `ai/waiting_on.py` (sent-mail query + offers), `events/mail_watcher.py` (additive sent query) · C new `ai/prepared_offers.py`, `ApprovalAlert.swift` · D new `events/lookahead.py` (+ each slot's new test file). Runner at close: `ai/idea_sources.py`, `events/daily_brief.py`, `ai/orchestrator.py`, `main.py`, `SettingsView.swift`, LIVING_SPEC | [ ] |
+| 13 | A: #75 · B: #79 · C: #70 · D: #71 · E: #69 · F: #74 | A new `ai/activity_store.py`, new `ai/routines.py` · B new `ai/idea_outcomes.py` (also the approval-decision log #72/#78 read), new `routes/outcomes.py` · C `ai/idea_sources.py`, new `ai/needs_reply.py` · D new `events/meeting_prep.py`, `user_settings.py`, new `MeetingPrepSettingsView.swift` · E new `ai/mcp_client.py`, new `routes/mcp.py`, new `McpServersView.swift` · F new `Views/QuickAskPanel.swift`, new `Services/HotKey.swift`, `ai/permissions.py`, new `ai/chat_context.py`, `schemas/ws_messages.py`, `WSMessage.swift` (+ each slot's new test file). Runner at close: `ai/orchestrator.py`, `main.py`, `tools/__init__.py`, `MenuBarUIApp.swift`, `SettingsView.swift`, `ToolManagerView.swift`, `DebugView.swift`, `requirements.txt`, LIVING_SPEC | [x] closed 2026-11-10 (all `[~] live`) |
+| 14 | A: #72 · B: #73 · C: #76 · D: #77 · E: #80 | A `ai/memory.py`, new `ai/preference_learning.py`, new `routes/preferences.py`, new `LearnedPreferencesView.swift` · B new `ai/waiting_on.py` (sent-mail query + offers), `events/mail_watcher.py` (additive sent query) · C new `ai/prepared_offers.py`, `ApprovalAlert.swift` · D new `events/lookahead.py` · E `CalendarBridge.swift`, `tools/calendar_access.py`, `events/calendar_watcher.py` (+ each slot's new test file). Runner at close: `ai/idea_sources.py`, `events/daily_brief.py`, `ai/orchestrator.py`, `main.py`, `SettingsView.swift`, LIVING_SPEC | [ ] |
 | 15 | A: #78 (alone; needs #75 + #79 data) | new `ai/standing_rules.py`, new `routes/rules.py`, new `RulesView.swift`, approval path in `ai/orchestrator.py`, `main.py`, `SettingsView.swift`, LIVING_SPEC §1 | [ ] |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
@@ -125,9 +125,14 @@ pass-rate measurement is a live check · #38 a second
 
 ## Live checks
 
-None open. All live checks were marked done by the user on 2026-11-10; the
-list is in DONE.md ("Live checks — marked done 2026-11-10"). New `[~] live`
-items add their line here.
+None open from waves 1–12 (marked done by the user 2026-11-10; list in DONE.md). Wave 13:
+
+- #79 Outcomes: approve or decline a few idea cards → Debug → "Suggestion outcomes" shows per-source shown / approved / declined and approval rate; `~/.bot-inator/idea_outcomes.json` and `approval_decisions.json` exist (0600).
+- #75 Activity: use the Mac for a while → `cd agent-daemon && .venv/bin/python -m ai.routines --report` shows events and any candidates; Settings → Activity history shows the toggle and count; Clear empties it. After ~3 weeks of a real routine, a card "Routine: … (seen on N of the last M Mondays)".
+- #70 Reply drafts: set `AGENT_USER_EMAILS` if iCloud mail lacks `Delivered-To`. Email yourself "Can you send me the report by Friday?" from another account → one draft_email reply card → Approve → threaded unsent draft. A newsletter or CC-only mail → no card.
+- #71 Meeting prep: Settings → Meeting prep on. Event 12 min out with a Zoom/Meet link → ~10 min before, one "Meeting prep: <title>" notification + thought, no approval card. (Attendee mail needs #80.)
+- #74 Quick ask: rebuild the app; grant Accessibility; in Safari select a paragraph → ⌥Space → "summarize this" → summary in the panel. Without Accessibility the panel offers the clipboard.
+- #69 MCP: Tool Manager → MCP servers → add a stdio server → tools listed, all off → enable one → ask for it in Chat → approval card names the server → it runs. "Runs without asking" → no card. Kill the server → `mcp_server_down` notice.
 
 ---
 
@@ -256,8 +261,8 @@ needs #75 and #79 first (their data decides when a rule is offered).
 
 ### Idea quality (Phase 5)
 
-#70 — Offer a reply draft when an email needs one [ ]
-Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: assistant (usefulness review, user asked to add)
+#70 — Offer a reply draft when an email needs one [~] live
+Wave: 13 · Agent: subagent · Added: 2026-11-10 · Source: assistant (usefulness review, user asked to add)
 Ask: Connect what exists. `mail_received` events, `read_email` and
 `draft_email` (#63) are all there, but a draft only happens when the user
 asks in Chat. When a person emails a question or request, a card should
@@ -293,8 +298,8 @@ Deviations:
 
 ---
 
-#71 — Meeting prep card before a meeting starts [ ]
-Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: assistant (usefulness review, user asked to add)
+#71 — Meeting prep card before a meeting starts [~] live
+Wave: 13 · Agent: subagent · Added: 2026-11-10 · Source: assistant (usefulness review, user asked to add)
 Ask: Ten minutes before a meeting, show what the user needs for it without
 being asked: who is in it, the last emails with them, files that match.
 Approach (to decide when scheduled):
@@ -325,8 +330,8 @@ Deviations:
 
 ---
 
-#75 — Activity history and routine detection across days [ ]
-Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: assistant (anticipation review, user asked to add)
+#75 — Activity history and routine detection across days [~] live
+Wave: 13 · Agent: subagent · Added: 2026-11-10 · Source: assistant (anticipation review, user asked to add)
 Ask: Let the app notice what the user repeats over days and weeks, and
 offer the routine before they think to ask. Today (2026-11-10)
 `PatternRecognizer` keeps 50 events and `OpenHelp` 20, in memory only;
@@ -412,8 +417,8 @@ Deviations:
 
 ---
 
-#79 — Track what happens to each suggestion and use it [ ]
-Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: assistant (anticipation review, user asked to add)
+#79 — Track what happens to each suggestion and use it [~] live
+Wave: 13 · Agent: subagent · Added: 2026-11-10 · Source: assistant (anticipation review, user asked to add)
 Ask: The app should stop offering what the user ignores and lean toward
 what they keep using. `idea_feedback.json` records approve/decline only.
 Approach (to decide when scheduled):
@@ -437,6 +442,16 @@ Verify:
   a low kept rate raises that source's threshold; an unused tool is
   listed for removal after the fake clock passes 30 days.
 ⚬ Live: Debug tab shows per-source approval and kept rates.
+Deviations:
+
+---
+
+#80 — Attendees in the calendar layer (for #71 meeting prep) [ ]
+Wave: 14 · Agent: _ · Added: 2026-11-10 · Source: assistant (gap found building #71)
+Ask: #71 reads `attendees` from `event_starting_soon`, but no calendar backend reports attendees, so meeting prep can't look up mail with the people in a meeting and skips meetings with no call link.
+Approach: Swift `CalendarBridge` list DTO adds `attendees` from `EKEvent.attendees` (name, mailto url → email, `isCurrentUser` → is_self); `calendar_access.make_event`, `AppCalendarBackend.list`, the EventKit and AppleScript backends pass them through; `calendar_watcher` adds `attendees`, `end` and `id` to `event_starting_soon`. `events/meeting_prep.py` already accepts the shape.
+Files: MenuBarUI/MenuBarUI/Services/CalendarBridge.swift, tools/calendar_access.py, events/calendar_watcher.py, tests.
+Verify: tests: attendees flow from a fake backend into `event_starting_soon` and into the meeting-prep payload; no-attendee events unchanged. Live: event with one attendee you emailed → prep card lists their recent mail.
 Deviations:
 
 ### Generated tools
@@ -534,8 +549,8 @@ Deviations:
 
 ### Approvals and UI
 
-#74 — Quick-ask hotkey with the current context [ ]
-Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: assistant (usefulness review, user asked to add)
+#74 — Quick-ask hotkey with the current context [~] live
+Wave: 13 · Agent: subagent · Added: 2026-11-10 · Source: assistant (usefulness review, user asked to add)
 Ask: Asking the agent should take one keystroke from any app, and it should
 already know what the user is looking at.
 Approach (to decide when scheduled):
@@ -639,8 +654,8 @@ Deviations:
 
 ### Security and providers
 
-#69 — MCP client: use other apps' MCP servers as tools [ ]
-Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: user
+#69 — MCP client: use other apps' MCP servers as tools [~] live
+Wave: 13 · Agent: subagent · Added: 2026-11-10 · Source: user
 Ask: "Should I add an MCP server to this app so it can communicate with
 other apps easier?" Answer given: the app should be an MCP CLIENT (it
 connects to other apps' servers: Slack, GitHub, Notion, Linear, Drive) so

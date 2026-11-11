@@ -44,7 +44,8 @@ from schemas.ws_messages import (
 )
 from tools import READ_ONLY_TOOL_NAMES
 
-from . import privacy, tool_summary
+from . import activity_store, chat_context, privacy, tool_summary
+from .idea_outcomes import edit_facts, trigger_kind_of
 
 from .mlx_engine import MLXEngine
 from .memory import Memory
@@ -146,6 +147,10 @@ _PATTERN_SOURCE_INTROS: dict[str, str] = {
         "In chat, the user asked for something no existing tool could do, "
         "and a new tool was suggested so it works next time."
     ),
+    "routine": (
+        "The user's local activity history shows the same routine on many "
+        "separate days, and a tool would do it in one step."
+    ),
     "open_help": (
         "While watching recent activity, the assistant asked how it could "
         "help the user, and a reviewed tool idea passed its quality bar."
@@ -239,6 +244,22 @@ class Orchestrator:
         # Plain-language summaries of approved tool ideas by tool name
         # (#64, ``ai.tool_summary``), reused by the code-review card.
         self._idea_summaries: dict[str, Any] = {}
+        # #79: suggestion outcomes (``ai.idea_outcomes.OutcomeStore``) and
+        # the approval-card decision log (``DecisionLog``), set by main.py.
+        self.idea_outcomes: Optional[Any] = None
+        self.approval_decisions: Optional[Any] = None
+        # The idea offer the last idea card recorded (#79), so a successful
+        # generate_custom_tool links the installed name to it.
+        self._last_offer_id: Optional[str] = None
+        # The ``pattern_detected`` metadata driving the current turn (any
+        # source, built-in or not) and the current event's type (#79).
+        self._current_idea: Optional[dict[str, Any]] = None
+        self._current_event_type: str = ""
+        # The tool the post-install auto-rerun is calling: that run is not
+        # counted as a use of the tool (#79).
+        self._rerun_tool_name: Optional[str] = None
+        # #69: ``ai.mcp_client.McpManager`` (set by attach_to_orchestrator).
+        self.mcp_manager: Optional[Any] = None
         self._agent: Any = None
 
     def mark_tool_ready_for_rerun(self, tool_name: str) -> None:
@@ -765,10 +786,18 @@ class Orchestrator:
             except Exception:
                 logger.exception("Invalid notice dropped: %r", event.metadata)
             return
+        # #75: what kind of thing happened and when (never content), for
+        # routine detection. Never raises; a no-op when the switch is off.
+        try:
+            activity_store.record(event)
+        except Exception:
+            logger.exception("activity_store.record failed")
         event_id = event.metadata.get("event_id") or f"evt_{uuid.uuid4().hex[:12]}"
         self._turn_tool_calls = set()
         self._turn_done = {}
         self._turn_kind = "event"
+        self._current_event_type = event.event_type
+        self._current_idea = None
         # Personal text an idea may quote later (#51).
         privacy.note_personal_event(event)
         await self._emit_thought(event_id, "event_received", self._describe_event(event))
@@ -794,6 +823,7 @@ class Orchestrator:
             )
             meta = event.metadata or {}
             self._current_builtin_idea = meta if meta.get("builtin_tool") else None
+            self._current_idea = meta
             self._turn_kind = "pattern"
             # #61: a tool installed this turn records which idea led to it.
             from tools import meta_tool_generator
@@ -803,6 +833,7 @@ class Orchestrator:
                 result = await self._run_agent(event_id, prompt, max_steps=4)
             finally:
                 self._current_builtin_idea = None
+                self._current_idea = None
             await self._emit_thought(event_id, "complete", str(result)[:500])
             return
 
@@ -812,6 +843,10 @@ class Orchestrator:
 
         if event.event_type == "daily_brief":
             await self._handle_daily_brief(event, event_id)
+            return
+
+        if event.event_type == "meeting_prep":
+            await self._handle_meeting_prep(event, event_id)
             return
 
         # Signal-only events (e.g. ``app_activated``) feed pattern detection
@@ -868,7 +903,13 @@ class Orchestrator:
                 event_id, "memory", "Recalled: " + " | ".join(memories)
             )
 
-        prompt = self._build_chat_prompt(event, memories=memories)
+        # #74: the quick-ask panel's context (front app, window, and the
+        # selection only when the user included it) for this turn only.
+        prompt = chat_context.with_context(
+            self._build_chat_prompt(event, memories=memories),
+            chat_context.context_from_metadata(event.metadata),
+            redact_selection=privacy.should_redact("main"),
+        )
         await self._emit_thought(
             event_id, "reasoning", f"Prompt: {prompt[:200]}"
         )
@@ -901,7 +942,11 @@ class Orchestrator:
                 event_id, "reasoning",
                 f"Auto-rerun with {pending}: {rerun_prompt[:160]}",
             )
-            result = await self._run_agent(event_id, rerun_prompt, max_steps=6)
+            self._rerun_tool_name = pending
+            try:
+                result = await self._run_agent(event_id, rerun_prompt, max_steps=6)
+            finally:
+                self._rerun_tool_name = None
             reply = str(result) if result is not None else reply
 
         await self._emit_thought(event_id, "complete", reply[:500])
@@ -1031,6 +1076,40 @@ class Orchestrator:
         except Exception:
             logger.exception("daily brief notification failed")
 
+    async def _handle_meeting_prep(self, event: ContextEvent, event_id: str) -> None:
+        """#71: word the gathered meeting prep in a few lines.
+
+        The data was gathered read-only by ``events.meeting_prep``; the
+        model only words it. If the model returns nothing, the
+        deterministic text is shown instead.
+        """
+        from events import meeting_prep
+
+        prompt = meeting_prep.build_prompt(event)
+        await self._emit_thought(event_id, "reasoning", f"Prompt: {prompt[:200]}")
+        meta = event.metadata or {}
+        fallback = str(meta.get("text") or "")
+        try:
+            result = await self._run_agent(event_id, prompt, max_steps=2)
+        except Exception:
+            logger.exception("meeting prep turn failed; using the gathered text")
+            result = ""
+        card = str(result or "").strip() or fallback
+        await self._emit_thought(event_id, "complete", card[:1500])
+        title = str(meta.get("title") or "your meeting")
+        try:
+            await asyncio.to_thread(self._notify_meeting_prep, title, card)
+        except Exception:
+            logger.exception("meeting prep notification failed")
+
+    @staticmethod
+    def _notify_meeting_prep(title: str, card: str) -> None:
+        """The user turned meeting prep on in Settings (``AGENT_MEETING_PREP``),
+        so the read-only card needs no approval."""
+        from tools.show_notification import show_notification
+
+        show_notification("Meeting prep: " + title, card[:240])
+
     @staticmethod
     def _notify_brief(brief: str) -> None:
         """Post the brief as a notification. The user turned the brief on
@@ -1116,7 +1195,11 @@ class Orchestrator:
             getattr(tool, "forward", None) or getattr(tool, "__call__", None)
         )
         tool_name = getattr(tool, "name", getattr(tool, "__name__", "tool"))
-        is_read_only = tool_name in READ_ONLY_TOOL_NAMES
+        # #69: an MCP tool the user marked "runs without asking" is the only
+        # other bypass; the server's own readOnlyHint never is.
+        mcp = getattr(orchestrator, "mcp_manager", None)
+        is_read_only = tool_name in READ_ONLY_TOOL_NAMES or bool(mcp is not None and mcp.is_user_marked_read_only(tool_name))
+        mcp_server = mcp.server_of(tool_name) if mcp is not None else None
 
         def gated_forward(*args: Any, **kwargs: Any) -> Any:
             loop = orchestrator.event_bus.loop or asyncio.get_event_loop()
@@ -1199,11 +1282,22 @@ class Orchestrator:
                     )
                     if idea_summary is not None:
                         extra["summary"] = idea_summary.text()
+                card_text = Orchestrator._idea_card_text(orchestrator, tool_name)
+                if card_text:
+                    # A routine idea's evidence (#75), shown on the card only.
+                    extra["summary"] = card_text + (
+                        "\n" + extra["summary"] if extra.get("summary") else ""
+                    )
+                reasoning = f"Agent wants to call {tool_name}"
+                if mcp_server:
+                    reasoning += f" (a tool from the MCP server {mcp_server!r})"
+                # Plain attribute set: tests drive this wrapper with fakes.
+                orchestrator._last_offer_id = None
                 coro = orchestrator._request_approval(
                     event_id=event_id,
                     tool_name=tool_name,
                     tool_args={"args": list(args), "kwargs": kwargs},
-                    reasoning=f"Agent wants to call {tool_name}",
+                    reasoning=reasoning,
                     **extra,
                 )
                 approved, edited = asyncio.run_coroutine_threadsafe(
@@ -1225,6 +1319,9 @@ class Orchestrator:
             )
             if tool_name == "generate_custom_tool":
                 result = orchestrator._flag_quarantined_install(result)
+                Orchestrator._link_installed_tool(orchestrator, result)
+            elif tool_name in getattr(orchestrator, "_dynamic_tool_names", ()):
+                Orchestrator._record_dynamic_run(orchestrator, tool_name)
             done_store = getattr(orchestrator, "_turn_done", None)
             if done_key and done_store is not None:
                 done_store[done_key] = result
@@ -1244,6 +1341,40 @@ class Orchestrator:
             wrapped.forward = gated_forward  # type: ignore[attr-defined]
             return wrapped
         return gated_forward
+
+    def _idea_card_text(self, tool_name: str) -> str:
+        """Local-only card text (``card_text``) of the current turn's idea,
+        when ``tool_name`` is the call that idea asked for."""
+        idea = getattr(self, "_current_idea", None) or {}
+        text = idea.get("card_text")
+        if not text:
+            return ""
+        wanted = idea.get("builtin_tool") or "generate_custom_tool"
+        return str(text) if tool_name == wanted else ""
+
+    def _link_installed_tool(self, result: Any) -> None:
+        """#79: an approved idea installed OK -> record its installed name."""
+        outcomes = getattr(self, "idea_outcomes", None)
+        offer_id = getattr(self, "_last_offer_id", None)
+        if outcomes is None or not offer_id:
+            return
+        if not isinstance(result, dict) or result.get("status") != "ok":
+            return
+        try:
+            outcomes.link_tool(offer_id, str(result.get("tool_name") or ""))
+        except Exception:
+            logger.exception("idea_outcomes.link_tool failed")
+
+    def _record_dynamic_run(self, tool_name: str) -> None:
+        """#79: a generated tool ran. The post-install auto-rerun is not a
+        sign the user wants the tool, so it is not counted."""
+        outcomes = getattr(self, "idea_outcomes", None)
+        if outcomes is None or tool_name == getattr(self, "_rerun_tool_name", None):
+            return
+        try:
+            outcomes.record_tool_run(tool_name)
+        except Exception:
+            logger.exception("idea_outcomes.record_tool_run failed")
 
     def _flag_quarantined_install(self, result: Any) -> Any:
         """Turn an "ok" install whose tool was quarantined into an error.
@@ -1324,6 +1455,7 @@ class Orchestrator:
                 timeout_seconds=int(self.approval_timeout),
             ),
         )
+        offer_id = self._record_offer_shown(tool_name, tool_args)
         await self._send(msg)
 
         try:
@@ -1331,7 +1463,12 @@ class Orchestrator:
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
             logger.info("Approval %s timed out", request_id)
+            self._record_offer_verdict(offer_id, "timed_out")
             return False, None
+        self._record_offer_verdict(
+            offer_id, "approved" if resp.approved else "declined"
+        )
+        self._record_decision(tool_name, tool_args, bool(resp.approved), resp.edited_args)
         if tool_name == "generate_custom_tool":
             self._record_idea_feedback(tool_args, bool(resp.approved))
         idea = self._current_builtin_idea
@@ -1346,6 +1483,69 @@ class Orchestrator:
                 bool(resp.approved),
             )
         return bool(resp.approved), resp.edited_args
+
+    # ---- suggestion outcomes + decision log (#79) ------------------------
+
+    def _record_offer_shown(self, tool_name: str, tool_args: dict[str, Any]) -> Optional[str]:
+        """Record an idea card (build card or built-in follow-up); its offer id."""
+        outcomes = getattr(self, "idea_outcomes", None)
+        if outcomes is None:
+            return None
+        idea = getattr(self, "_current_builtin_idea", None)
+        builtin = idea is not None and tool_name == idea.get("builtin_tool")
+        if not builtin and tool_name != "generate_custom_tool":
+            return None
+        meta = idea if builtin else (getattr(self, "_current_idea", None) or {})
+        source = meta.get("source") or (
+            "chat" if getattr(self, "_turn_kind", "") == "chat" else ""
+        )
+        name = tool_name
+        if not builtin:
+            kwargs = tool_args.get("kwargs") or {}
+            args = tool_args.get("args") or []
+            name = str(kwargs.get("tool_name") or (args[0] if args else "") or meta.get("tool_name") or tool_name)
+        try:
+            offer_id = outcomes.record_shown(
+                source, name, idea_kind=str(meta.get("trigger") or ""), one_shot=builtin,
+            )
+        except Exception:
+            logger.exception("idea_outcomes.record_shown failed")
+            return None
+        self._last_offer_id = offer_id
+        return offer_id
+
+    def _record_offer_verdict(self, offer_id: Optional[str], verdict: str) -> None:
+        outcomes = getattr(self, "idea_outcomes", None)
+        if outcomes is None or not offer_id:
+            return
+        try:
+            outcomes.record_verdict(offer_id, verdict)
+        except Exception:
+            logger.exception("idea_outcomes.record_verdict failed")
+
+    def _record_decision(
+        self, tool_name: str, tool_args: dict[str, Any], approved: bool,
+        edited_args: Optional[dict[str, Any]],
+    ) -> None:
+        """Log an approve / deny (with edited field facts, never values)."""
+        log = getattr(self, "approval_decisions", None)
+        if log is None:
+            return
+        original = tool_args.get("kwargs") or {}
+        edited = (edited_args or {}).get("kwargs") if edited_args else None
+        facts = edit_facts(original, edited) if approved and isinstance(edited, dict) else {}
+        try:
+            log.record(
+                tool_name,
+                trigger_kind_of(
+                    getattr(self, "_current_event_type", "") or "",
+                    getattr(self, "_current_idea", None) or {},
+                ),
+                "approved" if approved else "denied",
+                facts,
+            )
+        except Exception:
+            logger.exception("approval_decisions.record failed")
 
     def _previously_declined(self, args: list[Any], kwargs: dict[str, Any]) -> str:
         """Name of a declined tool idea this generate_custom_tool call
@@ -1660,6 +1860,10 @@ class Orchestrator:
             from events import daily_brief
 
             return daily_brief.describe(event)
+        if event.event_type == "meeting_prep":
+            from events import meeting_prep
+
+            return meeting_prep.describe(event)
         if event.event_type == "mail_received":
             return (
                 f"Email from {meta.get('sender', 'unknown')}: "

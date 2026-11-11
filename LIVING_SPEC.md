@@ -132,6 +132,13 @@ Client → server: `approval_response`, `code_approval_response`,
 `clear_memory`, `reload_dynamic_tools`).
 Calendar (#60): server → client `calendar_request`; client → server
 `calendar_response`, `calendar_status` (see the Calendar flow below).
+Chat: client → server `user_message` `{message_id, text, context?}`.
+`context` (#74, quick-ask panel only; absent from the Chat window and older
+clients) is `{front_app?, window_title?, selection?, selection_source?
+"selection" | "clipboard"}`. `ai/chat_context.py` appends it to that one
+turn's prompt; it is never stored (not in `memory.log_chat`, not in the
+recall query), and under a cloud main engine without the personal-text
+opt-in the selection is replaced by a "kept on this Mac" line (7c).
 
 Thought stages: `event_received` → `analysis` (optional) → `memory`
 (optional) → `reasoning` → `plan` → `tool_result` → `complete`. The
@@ -213,9 +220,21 @@ the bearer token (see Auth above):
 | GET    | `/health`                 | Liveness probe: `{"status":"ok","version":...}`. |
 | GET    | `/api/tools`              | List of every tool the agent knows about.        |
 | DELETE | `/api/tools/{tool_name}`  | Uninstall an agent-authored tool.                |
+| GET    | `/api/outcomes/stats`     | Per-source / per-kind approval + kept rates, each source's adjustment, card-decision summary (#79). |
+| GET    | `/api/outcomes/removal-candidates` | Tools approved ≥ 30 days ago, never run since (#79). |
+| POST   | `/api/outcomes/removal-candidates/{name}/keep` | Stop listing one (#79).      |
+| GET    | `/api/activity`           | Activity-history stats, switch, current routine candidates (#75). |
+| PUT    | `/api/activity`           | `{enabled}`: the history switch (#75).            |
+| DELETE | `/api/activity`           | Forget every activity row (#75).                  |
+| GET/PUT| `/api/meeting-prep`       | `{enabled, minutes_before 1..10, locked_fields}` (#71). |
+| GET    | `/api/mcp/servers`        | MCP servers, their tools and flags, the load cap (#69). |
+| POST   | `/api/mcp/servers`        | Add `{name, command, args, env}` (stdio only) (#69). |
+| DELETE | `/api/mcp/servers/{name}` | Stop and forget a server (#69).                   |
+| POST   | `/api/mcp/servers/{name}/restart` | Restart a server (#69).                   |
+| PATCH  | `/api/mcp/servers/{name}/tools/{tool}` | `{enabled?, runs_without_asking?}` (#69). |
 
 `GET /api/tools` returns a plain JSON array `[{"name","description",
-"is_generated"}, …]`. The handler walks the orchestrator's live tools
+"is_generated"}, …]`; a loaded MCP tool also has `"kind": "mcp"` (#69). The handler walks the orchestrator's live tools
 list first (built-ins and currently-loaded generated modules together,
 deduplicated by `name`), then scans `agent-daemon/tools/generated/`
 for any cold `.py` files that aren't yet loaded so the Manage Tools
@@ -284,6 +303,54 @@ restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 |                               | review/remove via `routes/ideas.py` (#56).         |
 | `routes/tool_detail.py`       | `GET /api/tools/{name}`: summary, when it runs,    |
 |                               | gate, inputs, sandbox, source (#61).               |
+| `ai/idea_outcomes.py`         | `OutcomeStore` (`~/.bot-inator/idea_outcomes.json`,|
+|                               | `AGENT_IDEA_OUTCOMES_PATH`): per idea card source, |
+|                               | kind, verdict, runs, disabled/deleted; rates,      |
+|                               | `judge_threshold` / `cooldown_multiplier`, removal |
+|                               | candidates. `DecisionLog`                          |
+|                               | (`~/.bot-inator/approval_decisions.json`,          |
+|                               | `AGENT_APPROVAL_DECISIONS_PATH`): every non-timeout|
+|                               | card decision, edited field names + facts only     |
+|                               | (#79). Hooks: `_request_approval`, gated runs of   |
+|                               | generated tools, tool disable/delete routes.       |
+|                               | `routes/outcomes.py`; Debug tab section.           |
+| `ai/activity_store.py`        | `~/.bot-inator/activity.db` (0600,                 |
+|                               | `AGENT_ACTIVITY_DB`): allow-listed event kind/time |
+|                               | fields, never content; 90 days. Every event is     |
+|                               | recorded from `_handle_event`; switch              |
+|                               | `AGENT_ACTIVITY_HISTORY` (settings key, default 1).|
+|                               | Cleared by `clear_memory` and `DELETE /api/activity`|
+|                               | (`routes/activity.py`) (#75).                      |
+| `ai/routines.py`              | Deterministic routine mining over the history;     |
+|                               | `python -m ai.routines --report` (#75).            |
+| `ai/routine_ideas.py`         | `RoutineIdeaSource` (source `routine`): mines once |
+|                               | a day, publishes `pattern_detected` (time routine →|
+|                               | built-in `open_app`/`run_shortcut` in its slot;    |
+|                               | else `generate_custom_tool`); cooldown per         |
+|                               | candidate id (30 d); prompts see only `summary`;   |
+|                               | `card_text` (evidence) is card-only.               |
+|                               | `AGENT_ROUTINE_IDEAS=0` turns it off (#75).        |
+| `ai/needs_reply.py`           | Deterministic "this mail asks the user something"; |
+|                               | `NextStepSuggester(reply_judge=…)` turns it into a |
+|                               | `draft_email` reply idea. User addresses: delivery |
+|                               | headers + `AGENT_USER_EMAILS`. Notice              |
+|                               | `needs_reply:personal_text_off` (info) under a     |
+|                               | cloud engine with personal text off (#70).         |
+| `events/meeting_prep.py`      | `MeetingPrepScheduler` (idea source + listener):   |
+|                               | `event_starting_soon` → one read-only              |
+|                               | `meeting_prep` event `AGENT_MEETING_PREP_MINUTES`  |
+|                               | (1..10, default 10) before; `AGENT_MEETING_PREP`   |
+|                               | (default 1). Orchestrator words it (≤6 lines) and  |
+|                               | posts "Meeting prep: <title>" (#71).               |
+| `ai/chat_context.py`          | Quick-ask context block for one chat prompt (#74). |
+| `ai/mcp_client.py`            | `McpManager`: stdio MCP servers from               |
+|                               | `~/.bot-inator/mcp_servers.json` (0600,            |
+|                               | `AGENT_MCP_CONFIG_PATH`), logs in                  |
+|                               | `~/.bot-inator/mcp_logs/`; tools named             |
+|                               | `<server>__<tool>`, off until enabled, ≤15 loaded, |
+|                               | gated unless the user marks one "runs without      |
+|                               | asking". Notice `mcp_server_down:<server>:<n>`.    |
+|                               | `routes/mcp.py` (#69).                             |
 | `ai/orchestrator.py`          | Event loop, tool gating, subscriber fan-out,       |
 |                               | dynamic-tool hot-reload (`load_dynamic_tools`).    |
 | `ai/pattern_recognizer.py`    | Rolling 50-event deque fed by the orchestrator;    |
@@ -418,11 +485,21 @@ bypass the approval gate and run inline; all other tools still emit an
 |                    |           | calendar unless one is named).                    |
 | `list_reminders`   | ✅         | Reminders (EventKit/AppleScript), soonest first.  |
 | `create_reminder`  |           | Adds a reminder (optional due date, list, notes). |
+| `<server>__<tool>` |           | An MCP server's tool (#69): listed in Tool        |
+|                    |           | Manager, off until enabled, gated unless the user |
+|                    |           | marked it "runs without asking" (the server's     |
+|                    |           | `readOnlyHint` never changes the gate). Results   |
+|                    |           | are untrusted data; redacted for cloud engines.   |
 | `generate_custom_tool`|         | Meta-tool: drafts a new `@tool` module on the     |
 |                    |           | main engine, runs static safety checks, emits a   |
 |                    |           | `code_approval_request` for human review, and —   |
 |                    |           | on approval — installs it into                    |
 |                    |           | `tools/generated/` and hot-loads it.              |
+
+**Accessibility (#74).** The quick-ask hotkey reads the front app's
+selected text through Accessibility (`AXIsProcessTrusted`, never the
+prompting variant) only when the user chose to include it;
+`ai/permissions.py` lists it as the `accessibility` row.
 
 `tool_result` thoughts emitted for read-only invocations are prefixed
 with ``"<name> (read-only)"`` so the MenuBar stream still reflects

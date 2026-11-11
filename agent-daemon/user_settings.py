@@ -38,6 +38,9 @@ ALLOWED_KEYS = frozenset({
     # meeting, 1..10 (default 10). Read live by events.meeting_prep.
     "AGENT_MEETING_PREP",
     "AGENT_MEETING_PREP_MINUTES",
+    # Activity history (#75): "1"/"0" (default on). Read live by
+    # ai.activity_store through os.environ (routes/activity.py updates it).
+    "AGENT_ACTIVITY_HISTORY",
 })
 PROVIDERS = ("local", "groq")
 

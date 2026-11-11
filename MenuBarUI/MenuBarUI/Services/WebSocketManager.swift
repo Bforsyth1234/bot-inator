@@ -200,14 +200,14 @@ final class WebSocketManager: ObservableObject {
     /// caller can immediately render a local user bubble keyed by the
     /// same id the daemon will echo back on every `thought` frame.
     @discardableResult
-    func sendUserMessage(_ text: String) -> String {
+    func sendUserMessage(_ text: String, context: ChatContextPayload? = nil) -> String {
         let messageId = "msg_" + UUID().uuidString
             .replacingOccurrences(of: "-", with: "")
             .prefix(12).lowercased()
         let msg = WSMessage.userMessage(
             seq: nextSeq(),
             timestamp: Date(),
-            payload: UserMessagePayload(messageId: messageId, text: text)
+            payload: UserMessagePayload(messageId: messageId, text: text, context: context)
         )
         send(msg)
         return messageId

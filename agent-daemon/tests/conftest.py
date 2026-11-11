@@ -40,3 +40,13 @@ os.environ.setdefault(
 # A developer's .env opt-in to sending personal text to the cloud (#31) must
 # not change test expectations; tests that need it set it themselves.
 os.environ.setdefault("AGENT_CLOUD_PERSONAL_TEXT", "0")
+# Wave 13: keep the developer's real ~/.bot-inator stores out of tests:
+# activity history (#75), MCP servers (#69), suggestion outcomes and the
+# approval-decision log (#79).
+_wave13_tmp = _tempfile.mkdtemp(prefix="bot-inator-w13-")
+os.environ.setdefault("AGENT_ACTIVITY_DB", os.path.join(_wave13_tmp, "activity.db"))
+os.environ.setdefault("AGENT_MCP_CONFIG_PATH", os.path.join(_wave13_tmp, "mcp_servers.json"))
+os.environ.setdefault("AGENT_IDEA_OUTCOMES_PATH", os.path.join(_wave13_tmp, "idea_outcomes.json"))
+os.environ.setdefault(
+    "AGENT_APPROVAL_DECISIONS_PATH", os.path.join(_wave13_tmp, "approval_decisions.json")
+)

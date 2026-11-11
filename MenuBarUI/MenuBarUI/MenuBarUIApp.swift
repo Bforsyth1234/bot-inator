@@ -75,11 +75,19 @@ struct ActivityWindowView: View {
 final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let ws = WebSocketManager()
     private let approvalPresenter = ApprovalPresenter()
+    /// Quick-ask panel (#74), opened by the global hotkey.
+    private var quickAsk: QuickAskPanelController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ws.connect()
         approvalPresenter.attach(to: ws)
         observeWindowsForActivationPolicy()
+        let ws = self.ws
+        let quickAsk = QuickAskPanelController(ws: ws) { text, context in
+            ws.sendUserMessage(text, context: context)
+        }
+        self.quickAsk = quickAsk
+        QuickAskHotKeyController.shared.start { quickAsk.toggle() }
     }
 
     // MARK: Cmd-Tab / Dock while a window is open
