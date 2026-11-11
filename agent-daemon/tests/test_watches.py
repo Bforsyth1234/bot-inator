@@ -180,7 +180,11 @@ def test_mail_idea_is_a_builtin_follow_up_with_redacted_copy(monkeypatch) -> Non
     watch = _watch(MAIL_SPEC)
     event = _mail("Pat <pat@acme-cpa.com>", "Invoice 42 overdue")
     idea = w.to_idea(watch, event, w.event_fields(watch["spec"]["trigger"], event, NOW))
-    assert po.PREPARED_KEY not in idea  # draft_email is not a bundle tool
+    # Runner (wave 15): draft_email is a bundle tool, so the card carries
+    # the exact arguments and no model runs.
+    card = po.PreparedOffer.from_dict(idea[po.PREPARED_KEY]).to_card()
+    assert card["tool_name"] == "draft_email"
+    assert card["tool_args"]["kwargs"] == idea["arguments"]
     assert idea["arguments"] == {"to": "pat@acme-cpa.com", "subject": "Re: Invoice 42 overdue", "body": "Thanks, got it."}
     assert "Invoice 42 overdue" in idea["event_details"]
     assert "Invoice 42" not in idea["event_details_redacted"]

@@ -64,6 +64,10 @@ class ApprovalRequestPayload(BaseModel):
     # does not take focus; it is still a card (invariant 7a). False (the
     # default, and older daemons) keeps the full window.
     reversible: bool = False
+    # #81: lines saying the card was shaped by outside text this turn read
+    # ("Read this turn: email from ...", "to: from the email, not from
+    # you"). ``None`` (the default, and every unmarked turn) shows nothing.
+    origin_notes: list[str] | None = None
 
 
 class ApprovalResponsePayload(BaseModel):
@@ -94,6 +98,9 @@ class CodeApprovalRequestPayload(BaseModel):
     # Plain-language summary shown above the code (#64): what the tool
     # does, when it runs, what the drafted source touches, that it asks.
     summary: str | None = None
+    # #90: a repair's review card shows a diff against the installed source.
+    # ``None`` for a new tool (and older daemons).
+    previous_code: str | None = None
 
 
 class CodeApprovalResponsePayload(BaseModel):
@@ -126,6 +133,13 @@ class StatusPayload(BaseModel):
     # True when ``AGENT_CLOUD_PERSONAL_TEXT=1`` lets personal text reach
     # cloud engines; False when it is replaced by a placeholder (#31).
     cloud_personal_text: bool | None = None
+    # #87 right-moment delivery: Pause state (``paused_until`` is an ISO
+    # time, or "indefinite"), offers held until the user is free, and the
+    # Inbox (offers past the daily cap). ``None`` from older daemons.
+    paused: bool | None = None
+    paused_until: str | None = None
+    held_count: int | None = None
+    inbox_count: int | None = None
 
 
 NoticeLevel = Literal["info", "warning", "error"]
@@ -246,8 +260,14 @@ CommandAction = Literal[
 ]
 
 
+# #87: how long ``pause_listeners`` pauses (default: until resumed).
+PauseDuration = Literal["1h", "tomorrow", "indefinite"]
+
+
 class CommandPayload(BaseModel):
     action: CommandAction
+    # Only for ``pause_listeners`` (#87); ``None`` means "indefinite".
+    duration: PauseDuration | None = None
 
 
 SelectionSource = Literal["selection", "clipboard"]

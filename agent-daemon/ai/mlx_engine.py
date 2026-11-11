@@ -214,8 +214,12 @@ class MLXEngine:
                 "mlx-lm is not installed; cannot load model"
             ) from exc
 
+        from . import egress_log
+
         def _do_load() -> tuple[Any, Any]:
-            return load(model_name)
+            # #82: a first load downloads the weights from Hugging Face.
+            with egress_log.model_download(model_name):
+                return load(model_name)
 
         self._model, self._tokenizer = await asyncio.to_thread(_do_load)
         self._loaded = True

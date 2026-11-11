@@ -241,6 +241,8 @@ final class SettingsViewModel: ObservableObject {
 
 struct SettingsView: View {
     @StateObject private var viewModel = SettingsViewModel()
+    /// #87: shared with the menu and the Inbox (MenuBarUIApp).
+    @EnvironmentObject private var delivery: DeliveryViewModel
 
     var body: some View {
         Form {
@@ -301,6 +303,19 @@ struct SettingsView: View {
             QuickAskSettingsView()
             ActivityHistorySettingsView()
             PermissionsView()
+
+            // Wave 15: watches (#88), right-moment delivery (#87), what the
+            // assistant did with Undo (#83), what left this Mac (#82).
+            Section("Watch for…") {
+                WatchesView()
+            }
+            Section("Delivery") {
+                DeliverySettingsView(viewModel: delivery)
+            }
+            Section("History") {
+                ActionHistoryView()
+            }
+            PrivacyLedgerView()
 
             Section {
                 if let error = viewModel.errorMessage {

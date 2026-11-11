@@ -66,7 +66,9 @@ MAX_LABEL = 80
 MAX_NOTE = 200
 MAX_PATTERN_KEYS = 8
 
-VERDICTS = ("approved", "declined", "timed_out")
+# "expired": a held offer (#87) that ran out of shelf life unseen; never
+# counted as shown or decided.
+VERDICTS = ("approved", "declined", "timed_out", "expired")
 DECISIONS = ("approved", "denied", "edited")
 
 _SOURCE_ALIASES = {"open-help": "open_help", "next-step": "next_step",
@@ -315,10 +317,14 @@ class OutcomeStore(_JsonStore):
 
     def _summarize(self, offers: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         row = {"shown": 0, "approved": 0, "declined": 0, "timed_out": 0,
-               "kept": 0, "not_kept": 0, "pending": 0}
+               "kept": 0, "not_kept": 0, "pending": 0, "expired": 0}
         for offer in offers:
-            row["shown"] += 1
             verdict = offer.get("verdict")
+            if verdict == "expired":
+                # #87: never shown to the user; not a decision either.
+                row["expired"] += 1
+                continue
+            row["shown"] += 1
             if verdict in VERDICTS:
                 row[verdict] += 1
             if verdict == "approved":

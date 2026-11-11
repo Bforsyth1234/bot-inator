@@ -1,7 +1,6 @@
 """Privacy ledger (#82): the store, the route, the hook helpers and the guard.
 
-Tests marked "until wired" skip until the wave runner adds the hook at that
-egress site; once any site is hooked, :func:`test_every_hook_point_records`
+Every egress site is hooked (wave 15): :func:`test_every_hook_point_records`
 requires all of them, so removing one fails (the item's non-vacuity guard).
 """
 from __future__ import annotations
@@ -273,8 +272,6 @@ def test_route_needs_auth_once_registered(ledger):
 
     bare = TestClient(main.app)
     authed = bare.get("/api/egress", headers=auth_header())
-    if authed.status_code == 404:
-        pytest.skip("until wired: runner adds app.include_router(egress_routes.router)")
     assert authed.status_code == 200
     assert bare.get("/api/egress").status_code == 401
 
@@ -400,10 +397,8 @@ def test_guard_catches_a_new_site_and_a_removed_hook(tmp_path):
 
 
 def test_every_hook_point_records():
-    """Until wired: skips while no site is hooked; then every site must be."""
+    """Every egress site has its ledger hook (wired in wave 15)."""
     missing = unhooked(DAEMON, HOOK_POINTS)
-    if len(missing) == len(HOOK_POINTS):
-        pytest.skip("until wired: runner adds the egress_log hooks (#82)")
     assert not missing, f"egress sites without a ledger hook: {missing}"
 
 
@@ -412,8 +407,7 @@ def _hooked(rel: str) -> bool:
 
 
 def test_groq_engine_one_row_per_call(ledger, monkeypatch):
-    if not _hooked("ai/groq_engine.py"):
-        pytest.skip("until wired: GroqEngine._chat_completion hook")
+    assert _hooked("ai/groq_engine.py")
     from ai import privacy
     from ai.groq_engine import GroqEngine
 
@@ -437,8 +431,7 @@ def test_groq_engine_one_row_per_call(ledger, monkeypatch):
 
 
 def test_agent_loop_model_one_row_per_call(ledger, monkeypatch):
-    if not _hooked("ai/orchestrator.py"):
-        pytest.skip("until wired: _make_groq_model_class hook")
+    assert _hooked("ai/orchestrator.py")
     from smolagents.models import ChatMessage, OpenAIServerModel
 
     from ai.orchestrator import _make_groq_model_class
@@ -468,8 +461,7 @@ def test_local_engine_records_nothing(ledger, monkeypatch):
 
 
 def test_open_url_records_host_only(ledger, monkeypatch):
-    if not _hooked("tools/open_url.py"):
-        pytest.skip("until wired: open_url hook")
+    assert _hooked("tools/open_url.py")
     import subprocess
 
     from tools.open_url import open_url
@@ -483,8 +475,7 @@ def test_open_url_records_host_only(ledger, monkeypatch):
 
 
 def test_sandboxed_tool_records_only_with_network(ledger, monkeypatch):
-    if not _hooked("tools/tool_sandbox.py"):
-        pytest.skip("until wired: SandboxedTool.forward hook")
+    assert _hooked("tools/tool_sandbox.py")
     from tools import tool_sandbox
 
     monkeypatch.setattr(tool_sandbox, "_spawn", lambda *a, **k: {"result": "r"})

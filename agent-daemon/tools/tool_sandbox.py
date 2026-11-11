@@ -901,6 +901,14 @@ class SandboxedTool(_Tool):  # type: ignore[misc,valid-type]
         super().__init__()
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
+        if self.network_allowed:
+            # #82: the tool may send its arguments anywhere; log the run.
+            from ai import egress_log
+
+            egress_log.record_tool_run(
+                egress_log.KIND_SANDBOXED_TOOL, self.name,
+                {"args": list(args), "kwargs": kwargs}, note=self.sandbox_note,
+            )
         out = _spawn(
             "call", self.source_path, self.name,
             {"args": list(args), "kwargs": kwargs},

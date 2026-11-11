@@ -10,7 +10,7 @@ from .create_event import create_event
 from .email_draft import draft_email
 from .find_files import find_files
 from .list_events import list_events
-from .meta_tool_generator import generate_custom_tool
+from .meta_tool_generator import generate_custom_tool, repair_generated_tool
 from .move_file import move_file
 from .notes import append_note, create_note
 from .open_url import open_url
@@ -51,6 +51,9 @@ AVAILABLE_TOOLS = [
     list_reminders,
     create_reminder,
     generate_custom_tool,
+    # #90: drafts a fix for a failing generated tool; NOT read-only (the
+    # repair idea card, then the code-review diff card).
+    repair_generated_tool,
 ]
 
 # Tools whose side-effects are limited to reading local state (no file
@@ -98,6 +101,7 @@ __all__ = [
     "list_reminders",
     "create_reminder",
     "generate_custom_tool",
+    "repair_generated_tool",
     "AVAILABLE_TOOLS",
     "READ_ONLY_TOOL_NAMES",
 ]

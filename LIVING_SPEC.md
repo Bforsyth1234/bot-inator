@@ -34,6 +34,37 @@ limits:
 Everything outside these limits still needs an approval card. Until #78
 is built, no standing rules exist and every side-effecting call is gated.
 
+**Undo is a user click, not a bypass (#83).** History (`ai/action_journal.py`)
+records every side-effecting call that ran after its card (and each action of
+an approved prepared offer). Undo reverses `move_file`, `create_event`,
+`create_reminder` and `create_note` only after checking the item is unchanged
+since ("Changed since, not undone" otherwise); it is the user's click, with
+no card, and never runs a tool the model chose.
+
+**The injection shield (#81).** Text the agent reads (an email, a web page,
+a file, an iMessage, an invite, an MCP result, quick-ask's selected or
+clipboard text) can hold instructions. `ai/taint.py` marks a turn,
+deterministically and with no model, when its event carries outside text
+(`mail_received`, `imessage_received`, a `pattern_detected` idea built from
+one: `mail_*`, `tracking_number`, `plan_with_time`, `lookahead_*`,
+`meeting_with_video_link`, or an idea whose `source_event_type` is mail /
+iMessage / calendar) or when a tool that returns outside text ran in it
+(`read_email`, `read_active_tab_text`, `summarize_file`, `read_clipboard`,
+`list_events`, `read_front_window`, any MCP tool). In a marked turn a
+read-only tool that writes state (`remember_preference`, an MCP tool the
+user marked "runs without asking") loses its bypass and raises a card. The
+shield can only ADD a card, never remove one. Every card in a marked turn
+carries `origin_notes`: what was read, and for each target argument (`to`,
+`path`, `url`, `preference`, ...) whether it came "from you", "from the
+email, not from you", or was written by the assistant. The text kept for
+matching is a bounded in-memory copy, dropped at the next turn.
+
+**Never-watch apps (#87).** Nothing observes an app on the never-watch list
+(`ai.delivery.is_never_watched`; password managers by default, editable in
+Settings > Delivery): no `app_activated` event, no `clipboard_changed`
+event, and `read_active_tab_text` refuses it. #89's `read_front_window`
+must consult the same list.
+
 **Guiding question.** For every event, or window of events, the LLM asks:
 *"How could I possibly help the user here?"* That question is always
 asked. It is never gated on repetition or on a fixed list of event kinds.
@@ -59,6 +90,19 @@ Inference runs on-device (MLX) by default. Groq cloud inference is an
 opt-in alternative (`AGENT_PROVIDER=groq`, Phase 4.7). With Groq selected,
 event summaries, chat and tool drafts leave the machine; nothing else
 about the consent model changes.
+
+**The egress ledger (#82).** Everything that leaves the Mac is recorded in
+`~/.bot-inator/egress.db` (`ai/egress_log.py`, override `AGENT_EGRESS_DB`,
+0600, 90 days): one row per cloud completion (`GroqEngine._chat_completion`
+and the agent loop's Groq client: host, role, model, bytes, tokens, whether
+personal text was sent or replaced), per MCP tool call, per network-enabled
+sandboxed tool run, per `open_url` (host only), and per model download
+(Hugging Face cache growth on an MLX or sentence-transformers load). What
+was sent is kept only with `AGENT_EGRESS_KEEP_TEXT=1` (7 days). A guard test
+(`tests/test_egress_log.py`) fails when a daemon file imports a network
+module without a ledger hook. Settings > Privacy ledger lists it; the menu
+and Debug show today's one-line summary ("Nothing left this Mac today").
+`clear_memory` empties it.
 
 ## 2. Topology
 
@@ -130,6 +174,15 @@ Server → client: `status`, `thought`, `approval_request`,
 Client → server: `approval_response`, `code_approval_response`,
 `command` (`pause_listeners`, `resume_listeners`, `reload_model`,
 `clear_memory`, `reload_dynamic_tools`).
+Wave 15 fields (all optional, absent from older daemons):
+`approval_request.origin_notes` `[str]` (#81) and `reversible` (#83);
+`code_approval_request.previous_code` (#90: a repair's diff base);
+`command.duration` `"1h" | "tomorrow" | "indefinite"` (#87, for
+`pause_listeners`); `status.paused`, `paused_until` (ISO or "indefinite"),
+`held_count`, `inbox_count` (#87; a status frame is broadcast whenever they
+change). `pause_listeners` is a real Pause: listeners keep running, the
+delivery gate holds agent work and drops the rest; `resume_listeners`
+resumes with no restart.
 Calendar (#60): server → client `calendar_request`; client → server
 `calendar_response`, `calendar_status` (see the Calendar flow below).
 Chat: client → server `user_message` `{message_id, text, context?}`.
@@ -167,13 +220,35 @@ Approval flow:
    `{"actions": [...]}` back (or plain `{"args","kwargs"}` edits for a
    one-action card). The bundle card IS the approval: only the ticked
    actions run, after Approve, through the normal tool functions, and only
-   tools the offer listed (`move_file`, `create_reminder`, `create_event`).
+   tools the offer listed (`prepared_offers.BUNDLE_TOOLS`: `move_file`,
+   `create_reminder`, `create_event`, and for #88 watches `draft_email`,
+   `create_note`, `open_app`, `open_url`, `run_shortcut`).
    Deny or timeout runs nothing. The #79 offer and decision records happen
    as for any card.
 6. Learned preferences (#72): a call whose tool + trigger kind the user
    denied 3 times in a row (no approval between) is refused before its card
    with `user_declined_before`; a `pattern_detected` idea for it is not
    offered. A preference never lets a call run without its card (7a).
+7. Injection shield (#81, §1): in a marked turn `remember_preference` and
+   user-marked MCP tools raise a card, and every card carries
+   `origin_notes`, shown first on the card in orange ("Shaped by text it
+   read"). A prepared offer built from outside text carries them too.
+8. History (#83): every call that ran after its card is journaled
+   (`ai/action_journal.py`). `reversible` is true for an undoable tool's
+   one-call card (not a bundle, not a card with `origin_notes`); the app
+   shows it as a small panel that keeps the front app's focus.
+9. Right-moment delivery (#87): `Orchestrator._handle_event` asks
+   `ai.delivery.Delivery.decide` before anything else (no thought, no
+   observer, no model call, no activity row while paused). Agent-initiated
+   events (`pattern_detected`, `mail_received`, `imessage_received`, `file`)
+   are held during a timed calendar event, screen sharing, typing (key in the
+   last 3 s) or Pause, and released one at a time when free; a held offer
+   expires after its shelf life (recorded as `expired` in #79, never
+   `timed_out`). Past the daily cap (default 8 cards) an idea goes to the
+   Inbox instead of a window. Chat and quick-ask always run.
+10. Watches (#88): a watch idea (source `watch`, trigger `watch:<id>`)
+   carries a one-action prepared offer with its exact arguments, so the card
+   is filled in and no model runs. Every watch action still needs its card.
 
 Calendar flow (#60): the menu bar app owns EventKit (the daemon's Python
 is silently denied it), and the daemon asks it over this WebSocket.
@@ -250,6 +325,25 @@ the bearer token (see Auth above):
 | DELETE | `/api/mcp/servers/{name}` | Stop and forget a server (#69).                   |
 | POST   | `/api/mcp/servers/{name}/restart` | Restart a server (#69).                   |
 | PATCH  | `/api/mcp/servers/{name}/tools/{tool}` | `{enabled?, runs_without_asking?}` (#69). |
+| GET    | `/api/actions`            | History: journaled actions, newest first, with what can still be undone (#83). |
+| POST   | `/api/actions/{id}/undo`  | Undo one (the user's click; refused when the item changed since) (#83). |
+| GET    | `/api/egress`             | Privacy ledger rows + today's totals + `keep_text` (#82). |
+| GET    | `/api/egress/stats`       | One day's totals (`day=YYYY-MM-DD`) (#82).         |
+| PUT    | `/api/egress`             | `{keep_text}`; off also erases kept text (#82).   |
+| DELETE | `/api/egress`             | Forget every ledger row (#82).                    |
+| GET    | `/api/delivery`           | Pause, held offers, Inbox, cards today, busy checks, `debug_line` (#87). |
+| POST   | `/api/delivery/pause`     | `{duration}` (`1h`, `tomorrow` or `indefinite`) or `{minutes}` (#87). |
+| POST   | `/api/delivery/resume`    | End Pause (#87).                                  |
+| GET    | `/api/delivery/inbox`     | Offers over today's cap (#87).                    |
+| POST   | `/api/delivery/inbox/{id}/open` | Show it now (user-caused: no cap, no hold) (#87). |
+| DELETE | `/api/delivery/inbox/{id}` | Dismiss it (#87).                                |
+| GET/PUT| `/api/delivery/settings`  | `{daily_cap, never_watch}` (#87).                 |
+| POST   | `/api/watches/preview`    | Sentence (one detection-engine call) or spec → `{spec, words, backtest}`; saves nothing (#88). |
+| GET/POST | `/api/watches`          | List / save watches (≤ 20; denied 3× in a row switches one off) (#88). |
+| PATCH/DELETE | `/api/watches/{id}` | `{enabled?, daily_limit?, cooldown_minutes?}` / delete (#88). |
+| GET    | `/api/tool-health`        | Every logged generated tool's health (#90).       |
+| GET    | `/api/tools/{name}/health` | One tool: status, recent failures, ok runs, repair cooldown, `can_restore` (#90). |
+| POST   | `/api/tools/{name}/restore-previous` | Put back the prior committed version (user click) (#90). |
 
 `GET /api/tools` returns a plain JSON array `[{"name","description",
 "is_generated"}, …]`; a loaded MCP tool also has `"kind": "mcp"` (#69). The handler walks the orchestrator's live tools
@@ -437,6 +531,35 @@ restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 |                               | drafted module (DONE.md #11).                      |
 | `tools/draft_critic.py`       | Grounded logic review of a draft against its spec; |
 |                               | advisory, `AGENT_DRAFT_CRITIC=0` disables.         |
+| `ai/taint.py`                 | #81 injection shield: `TurnTaint` per turn         |
+|                               | (`begin_turn`, `mark_read`, `mark_context`,        |
+|                               | `requires_card`, `notes_for` → `origin_notes`).    |
+| `ai/action_journal.py`        | #83 History + Undo: `~/.bot-inator/actions.db`     |
+|                               | (`AGENT_ACTIONS_DB`, 30 days); `routes/actions.py`.|
+| `ai/egress_log.py`            | #82 privacy ledger: `~/.bot-inator/egress.db`      |
+|                               | (`AGENT_EGRESS_DB`); hooks in `groq_engine`,       |
+|                               | `orchestrator` (agent-loop client), `mlx_engine`,  |
+|                               | `memory`, `mcp_client`, `tool_sandbox`, `open_url`;|
+|                               | `routes/egress.py`.                                |
+| `ai/delivery.py`              | #87 right-moment delivery: busy gate, held offers  |
+|                               | + Inbox `~/.bot-inator/held_offers.json`           |
+|                               | (`AGENT_HELD_OFFERS_PATH`), settings               |
+|                               | `delivery_settings.json`                           |
+|                               | (`AGENT_DELIVERY_SETTINGS_PATH`), Pause, daily     |
+|                               | cap, never-watch list; release loop task in        |
+|                               | `main.py`; `routes/delivery.py`. Tests set         |
+|                               | `AGENT_DELIVERY_BUSY_CHECKS=0`.                    |
+| `ai/watches.py`               | #88 "Watch for…": `WatchStore`                     |
+|                               | `~/.bot-inator/watches.json` (`AGENT_WATCHES_PATH`),|
+|                               | `WatchSource` (idea source + time-watch listener,  |
+|                               | source `watch`, trigger `watch:<id>`), `Compiler`  |
+|                               | (sentence → spec, detection engine), backtest;     |
+|                               | `routes/watches.py`.                               |
+| `ai/tool_health.py`           | #90 generated-tool health: `tool_health.json`      |
+|                               | (`AGENT_TOOL_HEALTH_PATH`); recorded in            |
+|                               | `gated_forward` for every dynamic-tool call (raise |
+|                               | or `status: error`); 2 repairable failures in a    |
+|                               | week → a repair idea; `routes/tool_health.py`.     |
 
 ## 5. Inference engines
 
@@ -509,7 +632,8 @@ bypass the approval gate and run inline; all other tools still emit an
 | `send_imessage`    |           | AppleScript `tell application "Messages"` → send  |
 |                    |           | to a buddy on the iMessage service.               |
 | `remember_preference`| ✅       | Persists a user preference string into the shared |
-|                    |           | `Memory` at `~/.bot-inator/memory.db`.            |
+|                    |           | `Memory` at `~/.bot-inator/memory.db`. Asks first |
+|                    |           | in a turn that read outside text (#81).           |
 | `find_files`       | ✅         | Spotlight (`mdfind`) by name or content, optional |
 |                    |           | folder and kind; newest first, ≤50 results.       |
 | `list_shortcuts`   | ✅         | `shortcuts list` → the user's Shortcut names.     |
@@ -542,6 +666,11 @@ bypass the approval gate and run inline; all other tools still emit an
 |                    |           | marked it "runs without asking" (the server's     |
 |                    |           | `readOnlyHint` never changes the gate). Results   |
 |                    |           | are untrusted data; redacted for cloud engines.   |
+| `repair_generated_tool`|        | #90: drafts a fix for a failing generated tool    |
+|                    |           | from its recorded failure and spec (checks + dry  |
+|                    |           | run), then a code-review card with a diff         |
+|                    |           | (`previous_code`); installs only on approval      |
+|                    |           | (provenance `source="repair"`). Needs approval.   |
 | `generate_custom_tool`|         | Meta-tool: drafts a new `@tool` module on the     |
 |                    |           | main engine, runs static safety checks, emits a   |
 |                    |           | `code_approval_request` for human review, and —   |
@@ -588,7 +717,18 @@ SwiftUI MenuBar app with an AppKit shell:
   is a `TabView` with two tabs: "Thoughts" and "Debug". A `WindowGroup`
   scene named `tool-manager` hosts `ToolManagerView`; the status-bar
   popover shows a gear button that calls `openWindow(id: "tool-manager")`
-  to bring it forward.
+  to bring it forward. Wave 15: the popover and "Open in window" also have an
+  "Inbox" tab (`OfferInboxView`, badge = Inbox count), the button bar has
+  `PauseMenu` (1 h / until tomorrow / until I resume) and a
+  `PrivacyLedgerTodayLabel` line; the menu bar icon shows a pause glyph
+  while paused and the Inbox count. One `DeliveryViewModel` (owned by
+  `AppDelegate`, refreshed on every status frame) is shared by the menu, the
+  Inbox, Settings > Delivery and Debug. Settings embeds `WatchesView`
+  ("Watch for…", #88), `DeliverySettingsView` (#87), `ActionHistoryView`
+  (History + Undo, #83) and `PrivacyLedgerView` (#82); Debug shows the
+  delivery state, busy checks and today's ledger line; `ApprovalAlert`
+  shows `originNotesSection` first (#81); `CodeReviewAlert` diffs against
+  `previousCode` for a repair (#90).
 - `Services/WebSocketManager.swift` — publishes `@Published messages`,
   `pendingApproval`, `lastStatus`, and a `DebugStats` struct (frame
   counts by type, thought counts by stage, decode-error ring buffer,

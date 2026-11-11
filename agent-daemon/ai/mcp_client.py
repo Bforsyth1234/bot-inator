@@ -575,6 +575,10 @@ class McpManager:
             return f"Error: MCP tool {name} is not available (switched off or its server is down)."
         server, tool = entry
         args = {k: v for k, v in (arguments or {}).items() if v is not None}
+        # #82: what this MCP tool was handed (the server may send it on).
+        from ai import egress_log
+
+        egress_log.record_tool_run(egress_log.KIND_MCP_TOOL, name, args)
         fut = asyncio.run_coroutine_threadsafe(self._call(server, tool, args), self._loop)
         try:
             text = fut.result(timeout=self.call_timeout + 5)

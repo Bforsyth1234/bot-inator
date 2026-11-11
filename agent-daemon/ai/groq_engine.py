@@ -43,8 +43,12 @@ class GroqEngine:
         api_key: Optional[str] = None,
         api_base: str = DEFAULT_API_BASE,
         request_timeout: float = 60.0,
+        role: Optional[str] = None,
     ) -> None:
         self.model_name: str = model_name
+        # #82: which engine this is (main / analysis / drafting / detection),
+        # for the privacy ledger's rows.
+        self.role: Optional[str] = role
         self.api_key: Optional[str] = api_key
         self.api_base: str = api_base
         self.request_timeout: float = request_timeout
@@ -160,13 +164,28 @@ class GroqEngine:
         client = self._client
         if client is None:
             raise RuntimeError("Groq client not initialised; call load() first")
+        from . import egress_log
+
+        # #82: one privacy-ledger row per call (what was sent, to where).
+        request = {"model": self.model_name, "messages": messages, "max_tokens": max_tokens}
         with self.generation_lock:
-            resp = client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                max_tokens=max_tokens,
-                timeout=self.request_timeout,
-            )
+            try:
+                resp = client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    timeout=self.request_timeout,
+                )
+            except Exception as exc:
+                egress_log.record_completion(
+                    role=self.role, model=self.model_name, api_base=self.api_base,
+                    request=request, error=exc,
+                )
+                raise
+        egress_log.record_completion(
+            role=self.role, model=self.model_name, api_base=self.api_base,
+            request=request, response=resp,
+        )
         try:
             return resp.choices[0].message.content or ""
         except (AttributeError, IndexError):

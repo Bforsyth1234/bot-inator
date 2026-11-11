@@ -62,6 +62,18 @@ WRITING_READ_ONLY_TOOLS: frozenset[str] = frozenset({"remember_preference"})
 # (``idea_sources._MESSAGE_KINDS``). Every ``mail_*`` trigger comes from a
 # received email (invite, shipping, deadline, needs_reply, waiting_on).
 MESSAGE_TRIGGERS: frozenset[str] = frozenset({"tracking_number", "plan_with_time"})
+# Triggers built from calendar text someone else may have written (an
+# invite's title, location, notes or video link): the look-ahead's
+# ``lookahead_*`` offers (#77) and the meeting-link follow-up (runner, wave 15).
+CALENDAR_TRIGGERS: frozenset[str] = frozenset({"meeting_with_video_link"})
+CALENDAR_TRIGGER_PREFIX = "lookahead_"
+# An idea's ``source_event_type`` (e.g. a #88 watch on mail) -> the kind of
+# outside text it was built from.
+SOURCE_EVENT_KINDS: Mapping[str, str] = {
+    "mail_received": "email",
+    "imessage_received": "message",
+    "event_starting_soon": "calendar",
+}
 
 # How the card names each kind of outside text: "from <phrase>".
 KIND_PHRASES: Mapping[str, str] = {
@@ -73,6 +85,7 @@ KIND_PHRASES: Mapping[str, str] = {
     "calendar": "the calendar",
     "window": "the window",
     "mcp": "an MCP tool",
+    "selection": "the selected text",
 }
 
 FROM_YOU = "from you"
@@ -117,6 +130,8 @@ def is_outside_trigger(trigger: Any) -> Optional[str]:
         return "email"
     if t in MESSAGE_TRIGGERS:
         return "message"
+    if t in CALENDAR_TRIGGERS or t.startswith(CALENDAR_TRIGGER_PREFIX):
+        return "calendar"
     return None
 
 
@@ -281,14 +296,32 @@ class TurnTaint:
             return True
         if event_type == "pattern_detected":
             kind = is_outside_trigger(meta.get("trigger"))
-            if kind is None and meta.get("source_event_type") in OUTSIDE_TEXT_EVENTS:
-                kind = "email" if meta.get("source_event_type") == "mail_received" else "message"
+            if kind is None:
+                kind = SOURCE_EVENT_KINDS.get(str(meta.get("source_event_type") or ""))
             if kind is None:
                 return False
-            label = f"the {'email' if kind == 'email' else 'message'} behind this idea"
-            self._add(kind, label, [meta.get("event_details"), meta.get("sender")])
+            noun = {"email": "email", "calendar": "calendar event"}.get(kind, "message")
+            label = f"the {noun} behind this idea"
+            parts = [meta.get("event_details"), meta.get("sender")]
+            if kind == "calendar":
+                parts.append(meta.get("arguments"))
+            self._add(kind, label, parts)
             return True
         return False
+
+    def mark_context(self, context: Optional[Mapping[str, Any]]) -> bool:
+        """A quick-ask turn (#74) that carries selected or clipboard text:
+        that text is someone else's words, not the user's request, so it
+        marks the turn like any other read. Returns whether it marked."""
+        ctx = context if isinstance(context, Mapping) else {}
+        selection = ctx.get("selection")
+        if not isinstance(selection, str) or not selection.strip():
+            return False
+        if ctx.get("selection_source") == "clipboard":
+            self._add("clipboard", "text on the clipboard", [selection])
+        else:
+            self._add("selection", "the selected text", [selection])
+        return True
 
     def mark_read(
         self,

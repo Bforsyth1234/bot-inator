@@ -629,7 +629,9 @@ _DUP_STOPWORDS: frozenset[str] = frozenset({
 _DUP_SIMILARITY = 0.5
 
 # Tools that are never "the same" as a requested tool.
-_DUP_EXEMPT_TOOLS: frozenset[str] = frozenset({"generate_custom_tool"})
+# The meta-tools (incl. #90's repair tool, registered in wave 15) are never
+# "a similar existing tool" for a new idea.
+_DUP_EXEMPT_TOOLS: frozenset[str] = frozenset({"generate_custom_tool", "repair_generated_tool"})
 
 
 def _dup_stem(token: str) -> str:

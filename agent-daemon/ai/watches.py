@@ -627,6 +627,8 @@ def to_idea(watch: Mapping[str, Any], event: ContextEvent, fields: Mapping[str, 
         "trigger": TRIGGER_PREFIX + str(watch["id"]),
         "watch_id": watch["id"],
         "arguments": args,
+        # #81: an idea built from an email / message / invite marks its turn.
+        "source_event_type": event.event_type,
     }
     if tool in prepared_offers.BUNDLE_TOOLS:
         offer = prepared_offers.PreparedOffer(

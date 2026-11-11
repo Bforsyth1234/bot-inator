@@ -44,6 +44,9 @@ ALLOWED_KEYS = frozenset({
     # Waiting on (#73): whole days a sent question may go unanswered before
     # the brief lists it, 1..14 (default 3). Read live by ai.waiting_on.
     "AGENT_WAITING_ON_DAYS",
+    # Privacy ledger (#82): "1" keeps what was sent (7 days) next to each
+    # row; default "0" keeps metadata only. Read live by ai.egress_log.
+    "AGENT_EGRESS_KEEP_TEXT",
 })
 PROVIDERS = ("local", "groq")
 

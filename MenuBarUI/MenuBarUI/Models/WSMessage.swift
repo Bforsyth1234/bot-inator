@@ -41,6 +41,10 @@ struct ApprovalRequestPayload: Codable, Hashable {
     /// presenter shows such a card as a small panel that does not take focus
     /// (still a card: Approve / Deny / Edit). nil (older daemons) = false.
     var reversible: Bool? = nil
+    /// #81: the card was shaped by outside text this turn read ("Read this
+    /// turn: email from ...", "to: from the email, not from you"). nil on
+    /// unmarked turns and from older daemons.
+    var originNotes: [String]? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -52,6 +56,7 @@ struct ApprovalRequestPayload: Codable, Hashable {
         case summary
         case actions
         case reversible
+        case originNotes = "origin_notes"
     }
 }
 
@@ -113,12 +118,20 @@ struct StatusPayload: Codable, Hashable {
     /// True when personal text may reach cloud engines
     /// (`AGENT_CLOUD_PERSONAL_TEXT=1`), #31.
     let cloudPersonalText: Bool?
+    /// #87 delivery: Pause, offers held for a better moment, and the Inbox.
+    /// `pausedUntil` is ISO 8601 or "indefinite". nil from older daemons.
+    let paused: Bool?
+    let pausedUntil: String?
+    let heldCount: Int?
+    let inboxCount: Int?
 
     init(state: DaemonState, modelLoaded: String? = nil,
          listenersActive: [String]? = nil, version: String? = nil,
          listenerHealth: [String: ListenerHealth]? = nil,
          engineProviders: [String: String]? = nil,
-         cloudPersonalText: Bool? = nil) {
+         cloudPersonalText: Bool? = nil,
+         paused: Bool? = nil, pausedUntil: String? = nil,
+         heldCount: Int? = nil, inboxCount: Int? = nil) {
         self.state = state
         self.modelLoaded = modelLoaded
         self.listenersActive = listenersActive
@@ -126,6 +139,10 @@ struct StatusPayload: Codable, Hashable {
         self.listenerHealth = listenerHealth
         self.engineProviders = engineProviders
         self.cloudPersonalText = cloudPersonalText
+        self.paused = paused
+        self.pausedUntil = pausedUntil
+        self.heldCount = heldCount
+        self.inboxCount = inboxCount
     }
 
     enum CodingKeys: String, CodingKey {
@@ -136,6 +153,10 @@ struct StatusPayload: Codable, Hashable {
         case listenerHealth = "listener_health"
         case engineProviders = "engine_providers"
         case cloudPersonalText = "cloud_personal_text"
+        case paused
+        case pausedUntil = "paused_until"
+        case heldCount = "held_count"
+        case inboxCount = "inbox_count"
     }
 }
 
@@ -198,6 +219,14 @@ enum DaemonState: String, Codable, Hashable {
 
 struct CommandPayload: Codable, Hashable {
     let action: CommandAction
+    /// Only for `pause_listeners` (#87); nil means "until I resume".
+    /// `PauseDuration` lives in `OfferInboxView.swift`.
+    let duration: PauseDuration?
+
+    init(action: CommandAction, duration: PauseDuration? = nil) {
+        self.action = action
+        self.duration = duration
+    }
 }
 
 enum CommandAction: String, Codable, Hashable {
@@ -221,6 +250,9 @@ struct CodeApprovalRequestPayload: Codable, Hashable {
     /// Plain-language summary shown above the code (#64); nil from older
     /// daemons.
     let summary: String?
+    /// #90: the installed source a repair replaces; the review card shows a
+    /// diff against it. nil for a new tool and from older daemons.
+    var previousCode: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -230,6 +262,7 @@ struct CodeApprovalRequestPayload: Codable, Hashable {
         case code
         case timeoutSeconds = "timeout_seconds"
         case summary
+        case previousCode = "previous_code"
     }
 }
 

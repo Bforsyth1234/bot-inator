@@ -54,6 +54,7 @@ struct ApprovalAlert: View {
             // larger text can never push Approve/Deny out of the window.
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    originNotesSection
                     if let summary = toolIdeaSummary {
                         toolIdeaCard(summary)
                     } else if let actions = bundleActions {
@@ -101,6 +102,26 @@ struct ApprovalAlert: View {
                 Text("\(timeout)s")
                     .appFont(.secondary, design: .monospaced)
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// #81: this turn read outside text (an email, a page, a message), so
+    /// say where the card's targets came from. Empty on unmarked turns.
+    @ViewBuilder
+    private var originNotesSection: some View {
+        if let notes = payload.originNotes, !notes.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Shaped by text it read", systemImage: "exclamationmark.triangle.fill")
+                    .appFont(.label)
+                    .foregroundStyle(.orange)
+                ForEach(Array(notes.enumerated()), id: \.offset) { _, note in
+                    Text(note)
+                        .appFont(.secondary)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }

@@ -44,7 +44,12 @@ from schemas.ws_messages import (
 )
 from tools import READ_ONLY_TOOL_NAMES
 
-from . import activity_store, chat_context, preference_learning, prepared_offers, privacy, tool_summary
+from . import (
+    activity_store, chat_context, preference_learning, prepared_offers, privacy, taint,
+    tool_health, tool_summary,
+)
+from . import watches as watches_mod
+from .action_journal import is_undoable
 from .idea_outcomes import edit_facts, trigger_kind_of
 
 from .mlx_engine import MLXEngine
@@ -172,6 +177,10 @@ _PATTERN_SOURCE_INTROS: dict[str, str] = {
 }
 
 
+# #88: a watch the user wrote (``ai.watches``).
+_PATTERN_SOURCE_INTROS["watch"] = watches_mod.PATTERN_SOURCE_INTRO
+
+
 class Orchestrator:
     """Drives the agent loop on top of an :class:`MLXEngine`."""
 
@@ -274,6 +283,14 @@ class Orchestrator:
         self._rerun_tool_name: Optional[str] = None
         # #69: ``ai.mcp_client.McpManager`` (set by attach_to_orchestrator).
         self.mcp_manager: Optional[Any] = None
+        # #81 injection shield: what outside text the current turn read.
+        self._taint = taint.TurnTaint()
+        # #83: ``ai.action_journal.ActionJournal`` (set by main.py).
+        self.action_journal: Optional[Any] = None
+        # #90: ``ai.tool_health.ToolHealthLog`` (set by main.py).
+        self.tool_health: Optional[Any] = None
+        # #87: ``ai.delivery.Delivery`` (set by main.py): hold / cap / pause.
+        self.delivery: Optional[Any] = None
         self._agent: Any = None
 
     def mark_tool_ready_for_rerun(self, tool_name: str) -> None:
@@ -409,6 +426,7 @@ class Orchestrator:
         code: str,
         event_id: Optional[str] = None,
         summary: Optional[str] = None,
+        previous_code: Optional[str] = None,
     ) -> CodeApprovalResponsePayload:
         """Prompt the user to review AI-generated Python source.
 
@@ -435,6 +453,7 @@ class Orchestrator:
                 description=description,
                 code=code,
                 summary=summary or None,
+                previous_code=previous_code or None,
                 timeout_seconds=int(self.code_approval_timeout),
             ),
         )
@@ -800,15 +819,37 @@ class Orchestrator:
             except Exception:
                 logger.exception("Invalid notice dropped: %r", event.metadata)
             return
+        # #87: right-moment delivery decides first, before any turn starts:
+        # a held / capped / paused event costs no model call, no thought, no
+        # observer and (while paused) no activity-history row.
+        record_activity = True
+        delivery = getattr(self, "delivery", None)
+        if delivery is not None:
+            try:
+                decision = await asyncio.to_thread(delivery.decide, event)
+            except Exception:
+                logger.exception("delivery.decide failed; handling the event")
+                decision = None
+            if decision is not None:
+                if decision.action != "run":
+                    logger.info("delivery: %s %s (%s)", decision.action,
+                                event.event_type, decision.reason)
+                    return
+                record_activity = decision.record_activity
         # #75: what kind of thing happened and when (never content), for
         # routine detection. Never raises; a no-op when the switch is off.
-        try:
-            activity_store.record(event)
-        except Exception:
-            logger.exception("activity_store.record failed")
+        if record_activity:
+            try:
+                activity_store.record(event)
+            except Exception:
+                logger.exception("activity_store.record failed")
         event_id = event.metadata.get("event_id") or f"evt_{uuid.uuid4().hex[:12]}"
         self._turn_tool_calls = set()
         self._turn_done = {}
+        # #81: a new turn; an event carrying outside text marks it now.
+        shield = getattr(self, "_taint", None)
+        if shield is not None:
+            shield.begin_turn("event", event_type=event.event_type, metadata=event.metadata)
         self._turn_kind = "event"
         self._current_event_type = event.event_type
         self._current_idea = None
@@ -953,6 +994,13 @@ class Orchestrator:
         self._pending_rerun_tool = None
         self._turn_tool_calls = set()
         self._turn_done = {}
+        # #81: a chat turn starts unmarked; what the user typed is "from
+        # you". Quick-ask's selected / clipboard text is not typed by the
+        # user, so it marks the turn like any other outside read.
+        shield = getattr(self, "_taint", None)
+        if shield is not None:
+            shield.begin_turn("chat", user_text=text)
+            shield.mark_context(chat_context.context_from_metadata(event.metadata))
         self._turn_kind = "chat"
         result = await self._run_agent(event_id, prompt, max_steps=6)
         reply = str(result) if result is not None else ""
@@ -1234,12 +1282,22 @@ class Orchestrator:
         # #69: an MCP tool the user marked "runs without asking" is the only
         # other bypass; the server's own readOnlyHint never is.
         mcp = getattr(orchestrator, "mcp_manager", None)
-        is_read_only = tool_name in READ_ONLY_TOOL_NAMES or bool(mcp is not None and mcp.is_user_marked_read_only(tool_name))
+        user_marked = bool(mcp is not None and mcp.is_user_marked_read_only(tool_name))
+        is_read_only = tool_name in READ_ONLY_TOOL_NAMES or user_marked
         mcp_server = mcp.server_of(tool_name) if mcp is not None else None
+        param_names = list(getattr(tool, "inputs", None) or {})
 
         def gated_forward(*args: Any, **kwargs: Any) -> Any:
             loop = orchestrator.event_bus.loop or asyncio.get_event_loop()
             event_id = getattr(orchestrator, "_current_event_id", "evt_unknown")
+            # #81: in a turn that read outside text, a read-only tool that
+            # writes state (remember_preference, a user-marked MCP tool)
+            # loses its no-card bypass. This can only ADD a card.
+            shield = getattr(orchestrator, "_taint", None)
+            bypass = is_read_only and not (
+                shield is not None
+                and shield.requires_card(tool_name, user_marked_mcp=user_marked)
+            )
             call_args: list[Any] = list(args)
             # Models (GPT-OSS on Groq) send null for optional parameters;
             # drop them so the tool's own defaults apply.
@@ -1284,12 +1342,12 @@ class Orchestrator:
                             "ask again; reply 'no action' or answer without it."
                         ),
                     }
-            if refusal is None and not is_read_only:
+            if refusal is None and not bypass:
                 # #72: a learned "don't offer <tool> for <trigger>" refuses
                 # the call before its card; it never runs a call without one.
                 refusal = Orchestrator._learned_refusal(orchestrator, tool_name)
             done_key = ""
-            if not is_read_only and refusal is None:
+            if not bypass and refusal is None:
                 done_key = tool_name + json.dumps(
                     {"a": call_args, "k": call_kwargs}, sort_keys=True, default=str,
                 )
@@ -1311,7 +1369,7 @@ class Orchestrator:
                 )
                 return refusal
             orchestrator._turn_tool_calls.add(tool_name)
-            if not is_read_only:
+            if not bypass:
                 extra: dict[str, Any] = {}
                 idea_summary = None
                 if tool_name == "generate_custom_tool":
@@ -1331,6 +1389,18 @@ class Orchestrator:
                 reasoning = f"Agent wants to call {tool_name}"
                 if mcp_server:
                     reasoning += f" (a tool from the MCP server {mcp_server!r})"
+                if shield is not None:
+                    # #81: where the target arguments came from.
+                    notes = shield.notes_for(
+                        tool_name, call_args, call_kwargs, param_names=param_names,
+                    )
+                    if notes:
+                        extra["origin_notes"] = notes
+                if is_read_only:
+                    reasoning += (
+                        "; it usually runs without asking, but this turn read "
+                        "outside text, so it asks first"
+                    )
                 # Plain attribute set: tests drive this wrapper with fakes.
                 orchestrator._last_offer_id = None
                 coro = orchestrator._request_approval(
@@ -1352,23 +1422,52 @@ class Orchestrator:
                 tool_summary.remember(
                     orchestrator, idea_summary, call_args, call_kwargs
                 )
-            result = (
-                original_forward(*call_args, **call_kwargs)
-                if original_forward
-                else None
-            )
+            is_dynamic = tool_name in getattr(orchestrator, "_dynamic_tool_names", ())
+            try:
+                result = (
+                    original_forward(*call_args, **call_kwargs)
+                    if original_forward
+                    else None
+                )
+            except Exception as exc:
+                if is_dynamic:
+                    # #90: a generated tool that raised counts toward repair.
+                    tool_health.record_call(
+                        orchestrator, tool_name, exc=exc, args=call_args, kwargs=call_kwargs,
+                    )
+                raise
+            if shield is not None:
+                # #81: what this call returned marks the turn. Before the
+                # read_email redaction below: the shield matches the real
+                # text (a bounded in-memory copy, dropped next turn).
+                try:
+                    shield.mark_read(
+                        tool_name, result, is_mcp=bool(mcp_server), server=mcp_server,
+                    )
+                except Exception:
+                    logger.exception("taint.mark_read failed")
             if tool_name == "generate_custom_tool":
                 result = orchestrator._flag_quarantined_install(result)
                 Orchestrator._link_installed_tool(orchestrator, result)
-            elif tool_name in getattr(orchestrator, "_dynamic_tool_names", ()):
+            elif is_dynamic:
                 Orchestrator._record_dynamic_run(orchestrator, tool_name)
+                # #90: per-tool health; two failures in a week offer a repair.
+                tool_health.record_call(
+                    orchestrator, tool_name, result=result, args=call_args, kwargs=call_kwargs,
+                )
+            if not bypass:
+                # #83: every side-effecting call that ran goes in History.
+                Orchestrator._journal_action(
+                    orchestrator, tool_name, {"args": call_args, "kwargs": call_kwargs},
+                    result, event_id,
+                )
             done_store = getattr(orchestrator, "_turn_done", None)
             if done_key and done_store is not None:
                 done_store[done_key] = result
             if tool_name == "read_email":
                 # The result goes back into the main engine's prompt (#31).
                 result = privacy.redact_email_result(result, "main")
-            label = f"{tool_name} (read-only)" if is_read_only else tool_name
+            label = f"{tool_name} (read-only)" if bypass else tool_name
             asyncio.run_coroutine_threadsafe(
                 orchestrator._emit_thought(event_id, "tool_result", f"{label}: {result}"),
                 loop,
@@ -1404,6 +1503,25 @@ class Orchestrator:
             outcomes.link_tool(offer_id, str(result.get("tool_name") or ""))
         except Exception:
             logger.exception("idea_outcomes.link_tool failed")
+
+    def _journal_action(
+        self, tool_name: str, call: dict[str, Any], result: Any, event_id: str,
+    ) -> None:
+        """#83: journal one call that ran (worker thread). Never raises."""
+        journal = getattr(self, "action_journal", None)
+        if journal is None:
+            return
+        try:
+            journal.record(
+                tool_name, call, result, event_id=event_id or "",
+                offer_id=getattr(self, "_last_offer_id", None),
+                why=trigger_kind_of(
+                    getattr(self, "_current_event_type", "") or "",
+                    getattr(self, "_current_idea", None) or {},
+                ),
+            )
+        except Exception:
+            logger.exception("action_journal.record failed for %s", tool_name)
 
     def _record_dynamic_run(self, tool_name: str) -> None:
         """#79: a generated tool ran. The post-install auto-rerun is not a
@@ -1470,6 +1588,7 @@ class Orchestrator:
         reasoning: str,
         summary: Optional[str] = None,
         actions: Optional[list[dict[str, Any]]] = None,
+        origin_notes: Optional[list[str]] = None,
     ) -> tuple[bool, dict[str, Any] | None]:
         """Return ``(approved, edited_args)`` from the user.
 
@@ -1495,9 +1614,23 @@ class Orchestrator:
                 summary=summary or None,
                 timeout_seconds=int(self.approval_timeout),
                 actions=actions or None,
+                # #83: History can undo it -> the small no-focus panel. A
+                # card shaped by outside text (#81) keeps the full window.
+                reversible=bool(
+                    getattr(self, "action_journal", None) is not None
+                    and is_undoable(tool_name) and not actions and not origin_notes
+                ),
+                origin_notes=origin_notes or None,
             ),
         )
         offer_id = self._record_offer_shown(tool_name, tool_args)
+        delivery = getattr(self, "delivery", None)
+        if delivery is not None and getattr(self, "_turn_kind", "") == "event":
+            # #87: an ambient turn's card counts toward the daily cap.
+            try:
+                delivery.note_ambient_card()
+            except Exception:
+                logger.exception("delivery.note_ambient_card failed")
         await self._send(msg)
 
         try:
@@ -1647,12 +1780,30 @@ class Orchestrator:
         # The card's tool is what the user decides on (one tool, or the bundle).
         self._current_builtin_idea = {**meta, "builtin_tool": card["tool_name"]}
         self._current_idea = meta
+        shield = getattr(self, "_taint", None)
+        if shield is not None and offer.actions:
+            # #81: an offer built from an email / message / invite says
+            # where its target arguments came from.
+            notes: list[str] = []
+            for action in offer.actions:
+                for line in shield.notes_for(action.tool, kwargs=action.args):
+                    if line not in notes:
+                        notes.append(line)
+            if notes:
+                card["origin_notes"] = notes
+        self._last_offer_id = None
         approved, edited = await self._request_approval(event_id=event_id, **card)
         if not approved:
             await self._emit_thought(event_id, "complete", "Prepared offer not approved; nothing ran.")
             return
         table = {getattr(t, "name", getattr(t, "__name__", "")): t for t in (self.tools or [])} or None
         results = await asyncio.to_thread(prepared_offers.run_approved_actions, offer, edited, table)
+        # #83: each action that ran goes in History, like any approved call.
+        for item in results:
+            await asyncio.to_thread(
+                self._journal_action, item["tool"], {"args": [], "kwargs": item["args"]},
+                item["result"], event_id,
+            )
         for item in results:
             self._turn_tool_calls.add(item["tool"])
             await self._emit_thought(event_id, "tool_result", f"{item['tool']}: {item['result']}")
@@ -2207,6 +2358,19 @@ def _make_groq_model_class(base: type) -> type:
     """
 
     class _GroqServerModel(base):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            # #82: every agent-loop completion leaves a privacy-ledger row.
+            from . import egress_log
+
+            client = getattr(self, "client", None)
+            if client is not None:
+                self.client = egress_log.wrap_openai_client(
+                    client, role="main",
+                    api_base=(getattr(self, "client_kwargs", None) or {}).get("base_url"),
+                    model=getattr(self, "model_id", None),
+                )
+
         def _prepare_completion_kwargs(self, *args, **kwargs):
             completion = super()._prepare_completion_kwargs(*args, **kwargs)
             tools = completion.get("tools") or []

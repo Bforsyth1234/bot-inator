@@ -82,7 +82,12 @@ def _load_st_model(model_name: str = DEFAULT_ST_MODEL) -> Any:
             model_name,
             device,
         )
-        _st_model = SentenceTransformer(model_name, device=device)
+        # #82: a first load downloads the model from Hugging Face.
+        from ai import egress_log
+
+        repo = model_name if "/" in model_name else "sentence-transformers/" + model_name
+        with egress_log.model_download(repo):
+            _st_model = SentenceTransformer(model_name, device=device)
     return _st_model
 
 

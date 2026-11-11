@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @main
@@ -9,10 +10,10 @@ struct MenuBarUIApp: App {
         MenuBarExtra {
             RootPopoverView()
                 .environmentObject(delegate.ws)
+                .environmentObject(delegate.delivery)
                 .appTextSize()
         } label: {
-            // Brain/robot SF Symbol for the menu bar icon.
-            Image(systemName: "brain.head.profile")
+            MenuBarIconLabel(ws: delegate.ws)
         }
         .menuBarExtraStyle(.window)
 
@@ -33,6 +34,7 @@ struct MenuBarUIApp: App {
 
         Window("Settings", id: "settings") {
             SettingsView()
+                .environmentObject(delegate.delivery)
                 .appTextSize()
         }
         .defaultSize(width: 540, height: 560)
@@ -44,6 +46,7 @@ struct MenuBarUIApp: App {
         Window("bot-inator", id: "activity") {
             ActivityWindowView()
                 .environmentObject(delegate.ws)
+                .environmentObject(delegate.delivery)
                 .appTextSize()
         }
         .defaultSize(width: 500, height: 680)
@@ -51,14 +54,49 @@ struct MenuBarUIApp: App {
     }
 }
 
+/// The menu bar icon: a pause glyph while paused, and the Inbox count
+/// (#87) as a badge. Reads the status frames the daemon sends on change.
+struct MenuBarIconLabel: View {
+    @ObservedObject var ws: WebSocketManager
+
+    var body: some View {
+        let inbox = ws.lastStatus?.inboxCount ?? 0
+        HStack(spacing: 2) {
+            // Brain/robot SF Symbol for the menu bar icon.
+            Image(systemName: ws.lastStatus?.paused == true ? "pause.circle" : "brain.head.profile")
+            if inbox > 0 {
+                Text("\(inbox)")
+            }
+        }
+    }
+}
+
+/// The Inbox tab (#87): offers over today's cap and offers held for later.
+struct InboxTab: View {
+    @EnvironmentObject private var delivery: DeliveryViewModel
+
+    var body: some View {
+        ScrollView {
+            OfferInboxView(viewModel: delivery)
+                .padding(12)
+        }
+        .task { await delivery.refresh() }
+    }
+}
+
 /// Thoughts + Debug in a regular, resizable window ("Open in window").
 struct ActivityWindowView: View {
+    @EnvironmentObject private var delivery: DeliveryViewModel
+
     var body: some View {
         VStack(spacing: 0) {
             NoticeBanner()
             TabView {
                 ThoughtStreamView()
                     .tabItem { Label("Thoughts", systemImage: "brain") }
+                InboxTab()
+                    .tabItem { Label("Inbox", systemImage: "tray") }
+                    .badge(delivery.inboxCount)
                 DebugView()
                     .tabItem { Label("Debug", systemImage: "ladybug") }
             }
@@ -74,6 +112,10 @@ struct ActivityWindowView: View {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let ws = WebSocketManager()
+    /// #87: one delivery model (Pause, Inbox, settings) shared by the menu,
+    /// the Inbox tab, Settings and Debug.
+    let delivery = DeliveryViewModel()
+    private var deliveryRefresh: AnyCancellable?
     private let approvalPresenter = ApprovalPresenter()
     /// Quick-ask panel (#74), opened by the global hotkey.
     private var quickAsk: QuickAskPanelController?
@@ -81,6 +123,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ws.connect()
         approvalPresenter.attach(to: ws)
+        // The daemon sends a status frame whenever Pause, held offers or the
+        // Inbox change; refresh the shared delivery model then.
+        let delivery = self.delivery
+        deliveryRefresh = ws.$lastStatus
+            .compactMap { $0 }
+            .removeDuplicates()
+            .sink { _ in Task { await delivery.refresh() } }
         observeWindowsForActivationPolicy()
         let ws = self.ws
         let quickAsk = QuickAskPanelController(ws: ws) { text, context in
@@ -137,6 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 /// diagnostics. New diagnostic panes can be added as additional tabs.
 struct RootPopoverView: View {
     @EnvironmentObject private var ws: WebSocketManager
+    @EnvironmentObject private var delivery: DeliveryViewModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -145,6 +195,9 @@ struct RootPopoverView: View {
             TabView {
                 ThoughtStreamView()
                     .tabItem { Label("Thoughts", systemImage: "brain") }
+                InboxTab()
+                    .tabItem { Label("Inbox", systemImage: "tray") }
+                    .badge(delivery.inboxCount)
                 DebugView()
                     .tabItem { Label("Debug", systemImage: "ladybug") }
             }
@@ -153,7 +206,20 @@ struct RootPopoverView: View {
             .frame(maxHeight: .infinity)
             .layoutPriority(-1)
             Divider()
+            // #82: what left this Mac today, one line.
             HStack {
+                PrivacyLedgerTodayLabel()
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                // #87: Pause / Resume for real (listeners keep running).
+                PauseMenu(viewModel: delivery)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                Spacer()
                 Button {
                     presentWindow(id: "activity")
                 } label: {

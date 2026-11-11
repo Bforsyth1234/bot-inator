@@ -33,7 +33,7 @@ from ai.privacy import personal_text_allowed
 from ai.mlx_engine import MLXEngine
 from ai.orchestrator import Orchestrator
 from ai.pattern_recognizer import PatternRecognizer, make_detection_evaluator
-from ai import activity_store
+from ai import activity_store, egress_log
 from ai.idea_outcomes import (
     DecisionLog,
     OutcomeStore,
@@ -147,6 +147,7 @@ def _build_engines() -> tuple[Any, Any, Any]:
                 groq_models[role],
                 api_key=settings.groq_api_key,
                 api_base=settings.groq_api_base,
+                role=role,
             ))
         else:
             engines.append(MLXEngine(local_models[role]))
@@ -360,6 +361,24 @@ async def lifespan(app: FastAPI):
     approval_decisions = DecisionLog(
         _store_path("AGENT_APPROVAL_DECISIONS_PATH", default_decisions_path())
     )
+    # #88: the user's own "watch for X, offer Y" rules: an idea source (the
+    # orchestrator calls its observe) and a listener (time watches tick).
+    from ai import watches as watches_mod  # noqa: WPS433
+
+    watch_store = watches_mod.WatchStore()
+    try:
+        watch_source = watches_mod.WatchSource(bus, watch_store, decisions=approval_decisions)
+        watch_source.start()
+        listeners.append(watch_source)
+        listener_names.append("watches")
+        idea_sources.append(watch_source)
+    except Exception:
+        logger.exception("Failed to start watches")
+    app.state.watches = watch_store
+    app.state.watch_compiler = watches_mod.Compiler(
+        make_detection_evaluator(detection_engine, system_prompt=watches_mod.COMPILE_SYSTEM_PROMPT),
+        role="detection",
+    )
     # Rarely-kept judged sources get a higher judge bar and a longer cooldown.
     for source in idea_sources:
         if isinstance(source, (OpenHelpSuggester, FrictionDetector)):
@@ -379,6 +398,36 @@ async def lifespan(app: FastAPI):
     )
     orchestrator.idea_outcomes = idea_outcomes
     orchestrator.approval_decisions = approval_decisions
+    # #83: every approved side-effecting call, with Undo where it can.
+    from ai import action_journal  # noqa: WPS433
+
+    app.state.action_journal = action_journal.ActionJournal(
+        _store_path("AGENT_ACTIONS_DB", action_journal.default_path()), outcomes=idea_outcomes,
+    )
+    orchestrator.action_journal = app.state.action_journal
+    # #90: generated-tool health; repeated failures offer a repair.
+    from ai import tool_health  # noqa: WPS433
+
+    app.state.tool_health = tool_health.ToolHealthLog(
+        _store_path("AGENT_TOOL_HEALTH_PATH", tool_health.default_path()), state=idea_state,
+    )
+    orchestrator.tool_health = app.state.tool_health
+    # #87: hold offers at bad moments, the daily cap, the Inbox and a real
+    # Pause (listeners keep running).
+    from ai.delivery import Delivery, default_held_path, default_settings  # noqa: WPS433
+
+    def _broadcast_status() -> None:
+        try:
+            orchestrator._schedule(orchestrator._send(_status_frame()))
+        except Exception:
+            logger.exception("status broadcast after a delivery change failed")
+
+    delivery = Delivery(
+        default_held_path(), settings=default_settings(), outcomes=idea_outcomes,
+        gate=_delivery_gate(), on_change=_broadcast_status,
+    )
+    orchestrator.delivery = delivery
+    app.state.delivery = delivery
     set_meta_tool_context(
         orchestrator=orchestrator,
         engine=engine,
@@ -401,6 +450,7 @@ async def lifespan(app: FastAPI):
         logger.exception("MCP manager failed to start")
     app.state.mcp_manager = mcp_manager
     await orchestrator.start()
+    delivery_task = asyncio.create_task(delivery.run_release_loop(bus), name="delivery-release")
 
     # #75: once a day, mine the activity history for routines and offer
     # one through the idea pipeline (source "routine").
@@ -454,6 +504,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        delivery_task.cancel()
+        try:
+            await delivery_task
+        except (asyncio.CancelledError, Exception):
+            pass
         if routine_ideas is not None:
             try:
                 await routine_ideas.stop()
@@ -478,6 +533,10 @@ async def lifespan(app: FastAPI):
             memory.close()
         except Exception:
             logger.exception("Error closing memory")
+        try:
+            app.state.action_journal.close()
+        except Exception:
+            logger.exception("Error closing the action journal")
         set_default_memory(None)
         try:
             import tools.meta_tool_generator as _mg  # noqa: WPS433
@@ -516,11 +575,34 @@ app.include_router(meeting_prep_routes.router)
 app.include_router(mcp_routes.router)
 # Wave 14 (#72): learned preferences.
 app.include_router(preferences_routes.router)
+# Wave 15: History + Undo (#83), privacy ledger (#82), delivery / Inbox /
+# Pause (#87), watches (#88), tool health + repair (#90).
+from routes import actions as actions_routes  # noqa: E402
+from routes import delivery as delivery_routes  # noqa: E402
+from routes import egress as egress_routes  # noqa: E402
+from routes import tool_health as tool_health_routes  # noqa: E402
+from routes import watches as watch_routes  # noqa: E402
+
+app.include_router(actions_routes.router)
+app.include_router(egress_routes.router)
+app.include_router(delivery_routes.router)
+app.include_router(watch_routes.router)
+app.include_router(tool_health_routes.router)
 
 
 def _next_seq() -> int:
     app.state.seq += 1
     return app.state.seq
+
+
+def _delivery_gate() -> Any:
+    """#87's busy checks; ``AGENT_DELIVERY_BUSY_CHECKS=0`` (tests) turns off
+    the calendar / screen-share / typing checks (Pause still works)."""
+    if os.environ.get("AGENT_DELIVERY_BUSY_CHECKS", "1").strip() != "0":
+        return None
+    from ai.delivery import BusyGate  # noqa: WPS433
+
+    return BusyGate(calendar=lambda now: [], processes=set, seconds_since_key=lambda: 1e9)
 
 
 def _store_path(env_key: str, default: Path) -> Path:
@@ -1065,16 +1147,18 @@ async def _handle_command(app: FastAPI, msg: Command) -> None:
     action = msg.payload.action
     logger.info("Received command: %s", action)
     if action == "pause_listeners":
-        for listener in app.state.listeners:
-            try:
-                listener.stop()
-            except Exception:
-                logger.exception("Failed to pause listener")
-        app.state.listeners = []
-        app.state.listener_names = []
-        app.state.mac_listener = None
+        # #87: a real Pause. Listeners keep running (Resume needs no
+        # restart); the delivery gate holds agent work and drops the rest.
+        duration = getattr(msg.payload, "duration", None) or "indefinite"
+        try:
+            app.state.delivery.pause(duration)
+        except Exception:
+            logger.exception("Failed to pause")
     elif action == "resume_listeners":
-        logger.info("resume_listeners requested; no-op in Phase 1")
+        try:
+            app.state.delivery.resume()
+        except Exception:
+            logger.exception("Failed to resume")
     elif action == "reload_model":
         try:
             await app.state.engine.load()
@@ -1092,6 +1176,12 @@ async def _handle_command(app: FastAPI, msg: Command) -> None:
             logger.info("clear_memory removed %s activity rows", rows)
         except Exception:
             logger.exception("Failed to clear activity history")
+        # #82: the privacy ledger is a record of what left; Clear empties it.
+        try:
+            rows = await asyncio.to_thread(egress_log.clear)
+            logger.info("clear_memory removed %s privacy-ledger rows", rows)
+        except Exception:
+            logger.exception("Failed to clear the privacy ledger")
     elif action == "reload_dynamic_tools":
         try:
             app.state.orchestrator.load_dynamic_tools()
@@ -1123,8 +1213,27 @@ def _status_frame() -> Status:
             listener_health=_listener_health(),
             engine_providers=settings.engine_providers(),
             cloud_personal_text=personal_text_allowed(),
+            **_delivery_status(),
         ),
     )
+
+
+def _delivery_status() -> dict[str, Any]:
+    """#87: Pause, held and Inbox counts for the status frame ({} if unset)."""
+    delivery = getattr(app.state, "delivery", None)
+    if delivery is None:
+        return {}
+    try:
+        st = delivery.status()
+    except Exception:
+        logger.exception("delivery.status() failed")
+        return {}
+    return {
+        "paused": bool(st.get("paused")),
+        "paused_until": st.get("paused_until"),
+        "held_count": int(st.get("held_count") or 0),
+        "inbox_count": int(st.get("inbox_count") or 0),
+    }
 
 
 # Fields that make a listener-health change worth a new status frame

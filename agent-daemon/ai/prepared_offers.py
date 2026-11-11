@@ -68,7 +68,14 @@ PREPARED_KEY = "prepared_offer"
 BUDGET_SECONDS = 10.0
 MAX_MODEL_CALLS = 1
 # The only tools an offer may bundle (all gated; they run after approval).
-BUNDLE_TOOLS: frozenset[str] = frozenset({"move_file", "create_reminder", "create_event"})
+# Runner (wave 15, #88): a watch's one action may also be any of its other
+# gated built-ins, so every watch card carries its exact arguments and no
+# model runs. ``run_approved_actions`` calls each the same way (the tool's
+# own function with the card's kwargs, after the card was approved).
+BUNDLE_TOOLS: frozenset[str] = frozenset({
+    "move_file", "create_reminder", "create_event",
+    "draft_email", "create_note", "open_app", "open_url", "run_shortcut",
+})
 
 # New trigger kind for idea_sources (runner wiring): a document in Downloads.
 DOCUMENT_TRIGGER = "document_downloaded"

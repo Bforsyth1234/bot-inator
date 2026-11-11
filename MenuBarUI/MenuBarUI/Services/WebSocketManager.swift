@@ -187,11 +187,11 @@ final class WebSocketManager: ObservableObject {
         }
     }
 
-    func sendCommand(_ action: CommandAction) {
+    func sendCommand(_ action: CommandAction, duration: PauseDuration? = nil) {
         let msg = WSMessage.command(
             seq: nextSeq(),
             timestamp: Date(),
-            payload: CommandPayload(action: action)
+            payload: CommandPayload(action: action, duration: duration)
         )
         send(msg)
     }

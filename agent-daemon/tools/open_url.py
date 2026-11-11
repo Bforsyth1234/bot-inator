@@ -29,4 +29,8 @@ def open_url(url: str) -> dict[str, Any]:
         subprocess.run(["open", url], check=True, timeout=5)
     except Exception as exc:
         return {"url": url, "status": "error", "error": str(exc)}
+    # #82: the browser makes the request; the ledger keeps the host.
+    from ai import egress_log
+
+    egress_log.record_open_url(url)
     return {"url": url, "status": "ok"}

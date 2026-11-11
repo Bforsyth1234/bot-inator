@@ -93,7 +93,10 @@ struct CodeReviewAlert: View {
     // MARK: Repair diff (#90)
 
     /// The installed source a repair replaces; nil for a new tool.
-    private var previousCode: String? { payload.reviewPreviousCode }
+    private var previousCode: String? {
+        guard let text = payload.previousCode, !text.isEmpty else { return nil }
+        return text
+    }
 
     /// Network imports in the draft whose module the installed code did
     /// not import: a repair may not quietly widen what the tool touches.
@@ -204,18 +207,6 @@ struct CodeReviewAlert: View {
             .disabled(draft.trimmingCharacters(
                 in: .whitespacesAndNewlines).isEmpty)
         }
-    }
-}
-
-extension CodeApprovalRequestPayload {
-    /// `previous_code` (#90): the installed source a repair replaces. Read by
-    /// reflection so this file compiles before and after the schema owner
-    /// adds `let previousCode: String?` to the payload; nil until then.
-    var reviewPreviousCode: String? {
-        for child in Mirror(reflecting: self).children where child.label == "previousCode" {
-            if let text = child.value as? String, !text.isEmpty { return text }
-        }
-        return nil
     }
 }
 
