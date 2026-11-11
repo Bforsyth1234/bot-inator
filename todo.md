@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #98
+Next ID: #102
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -1186,6 +1186,75 @@ Deviations:
 
 ---
 
+#98 — BUG: Automation → Messages "Request" does nothing [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-13 build)
+Ask: "Nothing happens when I request Messages." In Settings → Permissions,
+the Automation → Messages row stays grey after clicking Request and keeps
+saying "open Messages first, then click Request", with Messages open.
+Reported twice (2026-11-11), the second time with Messages open in front
+and a conversation showing. Blocks #85 (iPhone remote).
+Cause (assistant, 2026-11-11, CONFIRMED on this Mac: the running Messages
+process is `com.apple.MobileSMS`; `lsappinfo find
+bundleid=com.apple.iChat` finds nothing): `ai/permissions.py`
+registers the row as `_automation("automation_messages", "Messages",
+"com.apple.iChat", …)`. Messages' bundle id on current macOS is
+`com.apple.MobileSMS` (the daemon's own log: `app_activated … app=Messages
+bundle=com.apple.MobileSMS`). `AEDeterminePermissionToAutomateTarget` on a
+bundle id with no running process returns -600 (procNotFound), which
+`request_automation` maps to "open Messages first", so the macOS prompt
+never appears. Check whether `events/remote_channel.py` / any AppleScript
+sending to Messages has the same stale id.
+Files:
+⚬ OWNED: agent-daemon/ai/permissions.py, agent-daemon/tests/test_permissions.py
+Approach: use `com.apple.MobileSMS`; when the target is running and the
+answer is still not "granted", open the Automation pane instead of
+returning silently, so Request always does something visible.
+Also: when the target isn't running (-600), launch it (`open -b
+<bundle id>`, hidden) and retry once instead of saying "open X first".
+The user didn't know how to open System Events (a background app with no
+window); after `open -a "System Events"` its Request worked and showed
+the prompt (2026-11-11).
+Verify:
+⚬ Live: open Messages → Settings → Permissions → Request → the macOS
+  "control Messages" prompt appears → Allow → the row turns green; System
+  Settings → Automation lists Messages under Claude.
+⚬ Test: the Messages row's bundle id is `com.apple.MobileSMS`;
+  non-vacuity: put back `com.apple.iChat` → test fails.
+Deviations:
+
+#99 — bot-inator never appears in System Settings → Microphone [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-13 build)
+Ask: "Nothing shows up to select" for voice: bot-inator (MenuBarUI) is not
+listed in Privacy & Security → Microphone, so there is nothing to turn on,
+and meeting notes (#86) can't record.
+Findings (assistant, 2026-11-11): Info.plist has
+`NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription`.
+The only `AVCaptureDevice.requestAccess(for: .audio)` call is in
+`MeetingRecorder.start` (`Services/MeetingRecorder.swift:371`), reached
+only after clicking "Take notes for <title>?". Meeting notes settings
+(`Views/MeetingNotesSettingsView.swift`) show status but have no button
+that requests access, so an app never asked never shows in the list.
+To confirm: whether the ad-hoc signed `build/MenuBarUI.app` gets the
+prompt at all (a rebuilt binary changes its code identity, so a past
+grant may not carry over).
+Files:
+⚬ OWNED: MenuBarUI/MenuBarUI/Views/MeetingNotesSettingsView.swift,
+  MenuBarUI/MenuBarUI/Services/MeetingRecorder.swift
+⚬ EDITED (additive): agent-daemon/ai/permissions.py (a Microphone /
+  Speech Recognition row in Settings → Permissions, request via the app).
+Approach: add "Allow microphone" and "Allow speech recognition" buttons to
+Meeting notes settings (and a Permissions row) that call the existing
+request functions; when the status is `.denied`, open
+`x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone`.
+Verify:
+⚬ Live: rebuild the app → Settings → Meeting notes → Allow microphone →
+  macOS prompt → Allow → bot-inator listed and on in Microphone; same for
+  Speech Recognition; then "Take notes" records without a prompt.
+⚬ swiftc build; pytest gate if permissions.py changes.
+Deviations:
+
+---
+
 #87 — Right-moment delivery: hold offers at bad times, cap them, real pause [~] live
 Wave: 15 · Agent: subagent  · Added: 2026-11-10 · Source: assistant (differentiation review, user: "Add all 10")
 Ask: An offer that interrupts at the wrong moment costs more than it
@@ -1256,6 +1325,87 @@ Verify:
 ⚬ Live: start a calendar event now → mail yourself a deadline → no card
   until the event ends, then one card. Pause for 1 hour → the Thoughts
   tab stays quiet → Resume → events flow again.
+Deviations:
+
+---
+
+#100 — BUG: popped-out window is missing the bottom button bar [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-13 build)
+Ask: "When you pop out the window the buttons at the bottom are missing."
+The window opened with "Open in window" (⇧⌘B) shows the Thoughts / Inbox /
+Debug tabs with only Pause and Quit at the bottom (ThoughtStreamView's own
+footer, Thoughts tab only).
+Cause (assistant, 2026-11-11, from the code): `ActivityWindowView`
+(`MenuBarUIApp.swift`, the "activity" Window scene) copies only
+`NoticeBanner` + the `TabView` from `RootPopoverView`. It leaves out the
+popover's three bars under the tabs:
+1. the privacy ledger line (`PrivacyLedgerTodayLabel`, #82);
+2. "Watch me…" (#84) and the meeting-notes items
+   (`MeetingRecorderMenuItems`, #86);
+3. `PauseMenu` (#87), Chat…, Settings…, Manage Tools….
+So from the window there is no way to reach Chat, Settings, Manage Tools,
+Watch me or Take notes, and Pause appears only on the Thoughts tab.
+Files:
+⚬ OWNED: MenuBarUI/MenuBarUI/MenuBarUIApp.swift
+Approach: move the popover's bottom bars into one shared view (e.g.
+`PanelFooter(watchMe:showOpenInWindow:)`) and use it in both
+`RootPopoverView` and `ActivityWindowView`; the window hides the
+"Open in window" button (it is already the window). Pass `watchMe`
+through from the scene the same way the MenuBarExtra does. Check whether
+ThoughtStreamView's own Pause/Quit footer then duplicates Pause in both
+places, and drop one.
+Verify:
+⚬ Live: rebuild the app → ⇧⌘B → the window shows the ledger line,
+  Watch me…, meeting notes, Pause, Chat…, Settings…, Manage Tools… on
+  every tab; each opens its window; resizing the window never hides them.
+  The menu bar popover looks unchanged.
+⚬ swiftc build.
+Deviations:
+
+---
+
+#101 — BUG: Watch me and meeting-notes panels open off the right edge of the screen [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-13 build)
+Ask: "Nothing happens when I record besides the icon changing." (⌃⌥⌘R /
+Watch me…, #84.) Also, same day: "Nothing happens when I click record
+meetings" (Take notes now, #86): the meeting panel was still at x=1712
+afterwards. The Microphone / Speech prompts and the Stop button live in
+that panel's flow, so #99 may resolve partly once this is fixed.
+Findings (assistant, 2026-11-11, measured on this Mac):
+⚬ The daemon side works: 4 recordings 10:09–10:10, each
+  `demonstration_start` / `demonstration_stop` received and a
+  `demonstration_trace` sent back (that is what changes the icon).
+⚬ The panel IS shown: `CGWindowList` lists a floating MenuBarUI window at
+  x=1712, y=49, 529×217 on a single 1728-pt-wide display, so ~16 pt of it
+  is on screen. A second floating window, 360×207 at x=1712, y=41, is the
+  meeting-notes panel (#86), stuck the same way.
+Cause: both `position(_:)` functions compute
+`frame.maxX - panel.frame.width - 16` before the panel has a size.
+The panels use `defer: true` and an `NSHostingController` with
+`sizingOptions = [.preferredContentSize]`, so `panel.frame.width` is still
+0 at that point: x = 1728 − 0 − 16 = 1712, and the content then grows to
+the right, off screen.
+⚬ `Views/DemonstrationPanel.swift` `DemonstrationPanelController.position`
+⚬ `Services/MeetingRecorder.swift` (meeting panel) `position`
+`Services/ApprovalPresenter.swift` `placeTopRight` calls
+`panel.layoutIfNeeded()` first and is not affected. Probably related to
+#99 (the user saw nothing for meeting notes / voice).
+Files:
+⚬ OWNED: MenuBarUI/MenuBarUI/Views/DemonstrationPanel.swift,
+  MenuBarUI/MenuBarUI/Services/MeetingRecorder.swift
+Approach: size the panel before placing it (`panel.layoutIfNeeded()` or
+`hosting.view.fittingSize` → `setContentSize`), then clamp the origin so
+the whole frame is inside `visibleFrame`. Re-place it when the content
+size changes while it is still at its default spot (the steps list grows
+after Stop). Put the place-and-clamp in one helper the three panels share.
+Workaround until fixed: drag the sliver at the top-right corner, under
+the menu bar, to the left.
+Verify:
+⚬ Live: rebuild the app → ⌃⌥⌘R → the panel is fully visible at the
+  top-right with the 5:00 countdown → do a task → ⌃⌥⌘R → the steps list
+  stays on screen. Take notes now → the meeting panel is fully visible.
+  Repeat with a second display to the right, and with the mouse on it.
+⚬ swiftc build; `CGWindowList` bounds inside the screen frame.
 Deviations:
 
 ### Memory
