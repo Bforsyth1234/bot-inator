@@ -48,7 +48,6 @@ import logging
 import os
 import re
 import sqlite3
-import subprocess
 import threading
 import time
 from collections import deque
@@ -187,13 +186,11 @@ def _seconds_since_any_input() -> float:
 
 
 def applescript_send(handle: str, body: str) -> bool:
-    """Send ``body`` to ``handle`` with ``tools/send_imessage``'s template."""
-    from tools.send_imessage import _SCRIPT_TEMPLATE
+    """Send ``body`` to ``handle``; both go to osascript as argv, never as script text."""
+    from tools.send_imessage import osascript_send
 
-    script = _SCRIPT_TEMPLATE.format(buddy=json.dumps(handle), message=json.dumps(body))
     try:
-        subprocess.run(["osascript", "-e", script], check=True,
-                       capture_output=True, text=True, timeout=10)
+        osascript_send(handle, body)
         return True
     except Exception as exc:
         logger.warning("remote channel: send failed: %s", getattr(exc, "stderr", None) or exc)

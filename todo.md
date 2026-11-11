@@ -1627,7 +1627,7 @@ Deviations:
 
 ---
 
-#106 — BUG: iPhone remote never replies (AppleScript breaks on ’, → and other non-ASCII) [~]
+#106 — BUG: iPhone remote never replies (AppleScript breaks on ’, → and other non-ASCII) [~] live
 Wave: 19 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user ("send the responses back via imessage when the user messages the app")
 Ask: The user wants the app's answers sent back by iMessage when they text
 it. That is #85, built and turned on (`/api/remote`: enabled, handle
@@ -1656,7 +1656,33 @@ Verify:
 ⚬ Live: Mac idle 1 min → text the app "what's on my calendar tomorrow?"
   from the phone → the answer arrives in the same thread, with any ’ or →
   intact.
-Deviations:
+Results (wave 19 slot A, 2026-11-11): one helper,
+`tools/send_imessage.osascript_argv` / `osascript_send`, builds
+`osascript -e 'on run argv' … -e 'end run' -- <handle> <body>`. The script
+lines (`_SCRIPT_LINES`, replaces `_SCRIPT_TEMPLATE`) hold no data. Both
+`remote_channel.applescript_send` and the `send_imessage` built-in call it
+(unused `json`/`subprocess` imports dropped). `--` keeps a body that starts
+with "-" from being read as an osascript option. Reply text can no longer
+inject AppleScript. New `tests/test_imessage_send.py` (4): the argv carries
+’ → " \ newline emoji and an injection attempt unchanged and the script
+text never contains them (remote channel and tool); a failed send still
+reports; a real `osascript` echo script (`return item 2 of argv`, no
+Messages) gets the body back byte for byte. Full suite: 1780 passed.
+Non-vacuity: old `remote_channel.py` + `send_imessage.py` → 3 of 4 fail;
+helper mutated back to json.dumps-in-script → the same 3 fail (the
+failure-path test passes on both, as intended). By hand: `osascript -e
+'return "it’s…"'` → -2741, the argv form returns the text intact, and
+`osacompile` of the real send script succeeds (compiled only, never run,
+nothing sent).
+NOTE for the user: your generated `tools/generated/send_imessage.py` (not
+in git, not touched) has the same json.dumps bug. Repair or regenerate it,
+or have it call `tools.send_imessage.osascript_send`.
+Deviations: the tests went in a new `tests/test_imessage_send.py` rather
+than `tests/test_remote_channel.py` (they cover both callers);
+`test_remote_channel.py` is unchanged (25 pass).
+Live check: needs a daemon restart on this code. Mac idle 1 min → text the
+app "what's on my calendar tomorrow?" from the phone → the answer arrives
+in the thread with ’ / → intact. Not done by the agent.
 
 ---
 
