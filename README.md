@@ -67,12 +67,20 @@ adds no login item: run it again after a restart.
 
 ### Pick a model provider
 
-Click the brain icon → **Settings…** (⌘,):
+On the first start the app opens **Set up bot-inator**: it reads how much
+memory this Mac has, marks one choice "Recommended for this Mac", and
+waits for you to pick. No model downloads and nothing reaches a cloud
+provider before you choose.
 
-- **Local (MLX)**: everything stays on your Mac. Default.
-- **Groq (cloud)**: faster and stronger models. Paste your API key, click
-  **Save**, then **Restart Daemon**. With Groq, event summaries, chat and
-  tool drafts are sent to Groq.
+- **Local (MLX)**: everything stays on your Mac.
+- **Cloud key**: faster and stronger models with your own key from any
+  OpenAI-compatible provider. Presets fill in OpenAI, Anthropic, Gemini,
+  xAI, Groq and OpenRouter. Event summaries, chat and tool drafts go to
+  that provider.
+- **Mixed**: local for everything except writing new tools.
+
+Change it later in **Settings…** (⌘,), then **Restart Daemon**. Provider
+setup, presets and model lists: [docs/providers.md](docs/providers.md).
 
 Settings are saved to `~/.bot-inator/settings.json` (readable only by you).
 They override `.env`, and variables exported in the daemon's shell override
