@@ -63,7 +63,12 @@ ALLOWED_KEYS = frozenset({
     # the first-run screen. Informational; its presence is not the gate
     # (the settings file existing is).
     "AGENT_FIRST_RUN_CHOICE",
-}) | providers.preset_env_keys()  # <PRESET>_API_KEY / _API_BASE / _<ROLE>_MODEL (#97)
+    # Vision (#107): "local" (default) or a preset id, and the local MLX
+    # vision model. A cloud preset also needs <PREFIX>_VISION_MODEL (below)
+    # and AGENT_CLOUD_PERSONAL_TEXT=1. Read live by ai.vision_engine.
+    "AGENT_VISION_PROVIDER",
+    "MLX_VISION_MODEL",
+}) | providers.vision_env_keys() | providers.preset_env_keys()  # <PRESET>_API_KEY / _API_BASE / _<ROLE>_MODEL (#97)
 PROVIDERS = providers.PROVIDERS
 
 

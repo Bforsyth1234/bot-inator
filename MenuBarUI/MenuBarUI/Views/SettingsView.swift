@@ -402,6 +402,8 @@ struct SettingsView: View {
             RecordShortcutSettingsView()
             RemoteSettingsView()
             ActivityHistorySettingsView()
+            // #107: which model look_at_screen asks.
+            VisionSettingsView()
             PermissionsView()
 
             // #78: "always do this" rules the user turned on.

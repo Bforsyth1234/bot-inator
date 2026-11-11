@@ -626,6 +626,39 @@ def record_tool_run(
         return False
 
 
+def record_image(
+    *, model: Optional[str], api_base: Optional[str], image_bytes: int,
+    question: str, response: Any = None, error: Optional[BaseException] = None,
+    tool: str = "look_at_screen", log: Optional[EgressLog] = None,
+) -> bool:
+    """One screenshot sent to a cloud vision model (#107 decision 3). Never raises.
+
+    ``bytes_out`` is the image plus the question; the note gives the image
+    size. Only the question is kept as text (while keep-text is on), never
+    the image. A loopback ``api_base`` never left the Mac: no row.
+    """
+    try:
+        import providers as _providers  # noqa: WPS433
+
+        if _providers.is_loopback_url(api_base or ""):
+            return False
+        size = max(0, int(image_bytes or 0))
+        q = str(question or "")
+        tokens_out, tokens_in = _usage(response)
+        note = f"one screenshot ({_human_bytes(size)})"
+        if error is not None:
+            note += f"; failed: {type(error).__name__}"
+        return (log or default_log()).record(
+            KIND_INFERENCE, host_of(api_base), "vision", model,
+            size + len(q.encode("utf-8")), payload_size(response),
+            PERSONAL_SENT, q or None,
+            tool=tool, note=note, tokens_out=tokens_out, tokens_in=tokens_in,
+        )
+    except Exception:
+        logger.exception("egress record failed")
+        return False
+
+
 def record_open_url(url: str, *, log: Optional[EgressLog] = None) -> bool:
     """``open_url`` handed ``url`` to the browser. Only the host is kept by default."""
     try:
@@ -705,7 +738,7 @@ __all__ = [
     "KIND_OPEN_URL", "KIND_SANDBOXED_TOOL", "LIMIT_NOTE", "NOTHING_TODAY",
     "PERSONAL_REPLACED", "PERSONAL_SENT", "RETENTION_DAYS", "TEXT_RETENTION_DAYS",
     "clear", "default_db_path", "default_log", "host_of", "keep_text_enabled",
-    "model_download", "payload_size", "personal_text_flag", "record",
+    "model_download", "payload_size", "personal_text_flag", "record", "record_image",
     "record_completion", "record_open_url", "record_tool_run", "rows",
     "set_default_log", "stats", "wrap_openai_client",
 ]

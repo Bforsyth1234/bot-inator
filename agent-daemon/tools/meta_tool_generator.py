@@ -113,6 +113,7 @@ Sandbox limits (CRITICAL — your tool runs under macOS sandbox-exec; these fail
 * Calling the built-ins below from inside your tool does not help: they run in the same sandbox. The assistant calls them directly instead, so for these tasks do NOT write a tool:
   - quit / close an app: the built-in `quit_app(app_name)`;
   - take a screenshot or screen capture: the built-in `take_screenshot(path)`;
+  - look at the screen or a window and describe or read what it shows (charts, images, layouts, text in a picture): the built-in `look_at_screen(question, target)`;
   - list recent emails: the built-in `list_recent_emails(count, mailbox)`; one email's body: `read_email(message_id)`.
 * If the requested tool needs one of these anyway, return ``{"status": "error", "message": "<which built-in to call instead>"}`` rather than code that cannot work.
 
@@ -1019,9 +1020,10 @@ def generate_custom_tool(
     etc.). Also appropriate when the pattern recognizer has proposed a
     concrete automation. Do NOT call this for conversational turns that
     only need a direct text answer. Never call it to quit or close an app,
-    take a screenshot, or list or read emails: a generated tool runs in a
-    sandbox that cannot do those, so call the built-ins ``quit_app``,
-    ``take_screenshot``, ``list_recent_emails`` and ``read_email`` instead.
+    take a screenshot, look at the screen, or list or read emails: a
+    generated tool runs in a sandbox that cannot do those, so call the
+    built-ins ``quit_app``, ``take_screenshot``, ``look_at_screen``,
+    ``list_recent_emails`` and ``read_email`` instead.
     The function drives the main MLX
     engine to write a stdlib-only Python module, runs static safety
     checks on the draft, asks the user to review (and optionally edit)

@@ -12,6 +12,8 @@ from .find_files import find_files
 from .list_events import list_events
 # #103: Mail's newest messages from the Envelope Index (read-only).
 from .list_recent_emails import list_recent_emails
+# #107: one capture, asked of a vision model (approval-gated).
+from .look_at_screen import look_at_screen
 from .meta_tool_generator import generate_custom_tool, repair_generated_tool
 from .move_file import move_file
 from .notes import append_note, create_note
@@ -57,6 +59,8 @@ AVAILABLE_TOOLS = [
     # #102: daemon-side, approval-gated (the sandbox blocks both).
     quit_app,
     take_screenshot,
+    # #107: approval-gated; captures once, asks the vision model, deletes.
+    look_at_screen,
     read_email,
     # #103: read-only; Mail refuses message data to sandboxed tools.
     list_recent_emails,
@@ -115,6 +119,7 @@ __all__ = [
     "open_app",
     "quit_app",
     "take_screenshot",
+    "look_at_screen",
     "read_email",
     "list_recent_emails",
     "draft_email",
