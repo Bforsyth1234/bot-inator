@@ -1,13 +1,94 @@
 """Daemon configuration settings."""
+import importlib.abc
+import importlib.machinery
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
 import providers
 import user_settings
+
+# --- writable home for the app-bundled daemon (#96) ------------------------
+# A signed .app is read-only, so the daemon bundled inside it cannot write
+# into its own tree. Two files lived there: ``.env`` and the generated
+# tools (``tools/generated``, a nested git repo). ``AGENT_DATA_DIR`` (set by
+# the menu bar app's DaemonLauncher to ``~/Library/Application Support/
+# bot-inator``) moves both; ``AGENT_GENERATED_TOOLS_DIR`` moves only the
+# tools. Unset (``./run.sh``), the dev layout is unchanged. Real
+# environment only: neither key can come from the settings file.
+DATA_DIR_ENV = "AGENT_DATA_DIR"
+GENERATED_TOOLS_DIR_ENV = "AGENT_GENERATED_TOOLS_DIR"
+_DAEMON_DIR = Path(__file__).resolve().parent
+IN_TREE_GENERATED_TOOLS_DIR = _DAEMON_DIR / "tools" / "generated"
+
+
+def data_dir() -> Optional[Path]:
+    """``AGENT_DATA_DIR`` as a path, ``None`` when unset (the dev layout)."""
+    raw = os.environ.get(DATA_DIR_ENV, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def dotenv_path() -> Path:
+    """The ``.env`` the daemon loads: in the data dir when one is set."""
+    home = data_dir()
+    return home / ".env" if home else _DAEMON_DIR / ".env"
+
+
+def default_generated_tools_dir() -> Path:
+    """``AGENT_GENERATED_TOOLS_DIR``, else ``<data dir>/tools/generated``,
+    else ``agent-daemon/tools/generated``."""
+    raw = os.environ.get(GENERATED_TOOLS_DIR_ENV, "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    home = data_dir()
+    return home / "tools" / "generated" if home else IN_TREE_GENERATED_TOOLS_DIR
+
+
+class _GeneratedToolsFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    """Resolve the ``tools.generated`` package to a moved generated dir, so
+    ``from tools.generated.<name> import <name>`` (one generated tool
+    composing another) keeps working when the tools live outside the tree."""
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = str(directory)
+
+    def find_spec(self, fullname, path=None, target=None):  # noqa: ANN001
+        if fullname != "tools.generated":
+            return None
+        spec = importlib.machinery.ModuleSpec(fullname, self, is_package=True)
+        spec.submodule_search_locations = [self.directory]
+        return spec
+
+    def create_module(self, spec):  # noqa: ANN001
+        return None
+
+    def exec_module(self, module) -> None:  # noqa: ANN001
+        return None
+
+
+def _use_moved_generated_dir(directory: Path) -> None:
+    """Create ``directory`` and point the ``tools.generated`` package at it."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # surfaced again when a tool is installed
+        logging.getLogger(__name__).warning(
+            "cannot create the generated tools dir %s: %s", directory, exc
+        )
+    if any(isinstance(f, _GeneratedToolsFinder) for f in sys.meta_path):
+        return
+    sys.meta_path.insert(0, _GeneratedToolsFinder(directory))
+    loaded = sys.modules.get("tools.generated")
+    if loaded is not None:
+        loaded.__path__ = [str(directory)]
+
+
+if default_generated_tools_dir() != IN_TREE_GENERATED_TOOLS_DIR:
+    _use_moved_generated_dir(default_generated_tools_dir())
 
 # Load ``agent-daemon/.env`` (resolved relative to this file, not CWD) so the
 # daemon picks up ``GROQ_API_KEY`` and friends regardless of where uvicorn is
@@ -17,8 +98,10 @@ import user_settings
 #
 # Settings saved from the MenuBar app's Settings window are applied first,
 # so they win over ``.env`` but still lose to real shell exports.
+# With ``AGENT_DATA_DIR`` set (the app-bundled daemon, #96) the ``.env`` is
+# ``<data dir>/.env`` instead.
 user_settings.apply_to_environ()
-load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+load_dotenv(dotenv_path(), override=False)
 
 
 # Groq model defaults. GPT-OSS models are the general chat models in
@@ -183,12 +266,9 @@ class Settings:
     )
     # Directory that holds AI-generated smolagents @tool modules. Loaded at
     # startup via :meth:`Orchestrator.load_dynamic_tools` and re-scanned
-    # whenever the meta-tool generator installs a new file.
-    generated_tools_dir: Path = field(
-        default_factory=lambda: Path(__file__).resolve().parent
-        / "tools"
-        / "generated"
-    )
+    # whenever the meta-tool generator installs a new file. Moved out of
+    # the tree by ``AGENT_DATA_DIR`` / ``AGENT_GENERATED_TOOLS_DIR`` (#96).
+    generated_tools_dir: Path = field(default_factory=default_generated_tools_dir)
 
 
     # --- provider resolution (#26) -------------------------------------

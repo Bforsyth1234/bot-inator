@@ -2231,7 +2231,7 @@ Results (wave 17, 2026-11-11, commits d328716, 386610e):
 ⚬ Live (user): in a new clone, ./install.sh then ./run.sh → the app opens.
 Deviations:
 
-#96 — A signed, notarized app download for people who do not use a terminal [~] signing prep done; rest in wave 18 (slot B)
+#96 — A signed, notarized app download for people who do not use a terminal [~] live (wave 18 B built; needs the user's signing run)
 Wave: 17 (prep only; user, 2026-11-11: "Prep, I'll sign"; A answered) · Agent: _ · Added: 2026-11-10 · Source: assistant (get-users review, user: "add all of this to the todo.md")
 Ask: Everything before this reaches developers only. A non-developer
 needs one download that opens without a Gatekeeper warning and starts its
@@ -2272,9 +2272,144 @@ Results (wave 17 prep, 2026-11-11, commit 931e8bc):
   binary, version 0.2.0-dryrun, CFBundleName bot-inator). shellcheck clean.
 ⚬ `docs/releasing.md`: enrol, Developer ID certificate, `notarytool
   store-credentials`, each-release command, `gh release create`, failures.
-⚬ STILL OPEN: decisions 2–4 (Python + daemon inside the .app, the app
-  starting/stopping it, start at login, update notice). Until then a
-  release still needs ./install.sh and ./run.sh for the daemon.
+⚬ (wave 17) STILL OPEN then: decisions 2–4. Done in wave 18, below.
+Results (wave 18 slot B, 2026-11-11):
+⚬ PYTHON CHOICE: python-build-standalone CPython 3.14.10, release
+  20261026, `aarch64-apple-darwin-install_only_stripped` (URL in
+  `scripts/release/bundle-daemon.sh`; SHA-256
+  95eb8c87d16af37c54e9765e31d8c56c0d8ffa9968ea0f704f73a9b83f84e9f9, matches
+  GitHub's asset digest; 27 MB download, 69 MB unpacked). Why: the smallest
+  thing that loads MLX. It links only system libraries, ships sqlite with
+  `enable_load_extension` (sqlite-vec works), and pip installs the same
+  cp314 wheels as the dev venv (also 3.14), so nothing is rebuilt or
+  patched. Not chosen: copying Homebrew's Python (not relocatable, links
+  /opt/homebrew), the system python3 (a stub on Macs without the command
+  line tools), py2app/PyInstaller (a frozen app breaks the sandbox child
+  and the dry run, which re-run `sys.executable -c ...`). Release 20261110
+  skipped: a day old.
+⚬ SIZE: app 1.5 GB on disk (Python + packages 1.5 GB, of which torch,
+  pulled in by sentence-transformers, is 634 MB and .pyc 90 MB; daemon
+  sources 4 MB; menu bar app 7.5 MB); zip 482 MB. Models are not bundled.
+⚬ `scripts/release/bundle-daemon.sh` (called by `build-release.sh`): pinned
+  download into `dist/cache/` + checksum, pip install of requirements.txt
+  minus browser-use and playwright, tracked daemon sources only (no tests,
+  evals, .env, generated tools), prunes Tk/IDLE/pip/headers, compiles
+  unchecked-hash .pyc so the signed bundle is never written to (the app
+  runs Python with `-I -B`), then imports mlx.core. `build-release.sh` now
+  signs every Mach-O inside-out (283 files, found by `list-macho.py`), the
+  bundled Python with `Python.entitlements`, the app last, runs `codesign
+  --verify --deep --strict`, then `smoke-test.sh`. Without DEVELOPER_ID it
+  signs ad hoc and stops before notarizing. `BUNDLE_DAEMON=0` /
+  `SMOKE_TEST=0` opt out.
+⚬ ENTITLEMENTS (bundled Python only): `personal-information.calendars`, for
+  the daemon's in-process EventKit backend (calendar_access.py,
+  reminders.py). Tested under the hardened runtime: ctypes callbacks, PyObjC
+  blocks, mx.compile on GPU and CPU, torch and sqlite-vec all work without
+  `allow-jit` and `allow-unsigned-executable-memory`, so neither is added.
+  Library validation stays ON for Developer ID (every library is in the
+  bundle with the same Team ID; `-I` keeps user site-packages out). The
+  ad-hoc build adds `disable-library-validation` (`Python-adhoc.entitlements`):
+  without it the ad-hoc import of mlx.core failed with "mapping process and
+  mapped file (non-platform) have different Team IDs". The smoke test runs
+  the SIGNED binary, so the release run proves library validation with the
+  real Team ID before notarization.
+⚬ WRITABLE HOME: the only writes into the daemon's own tree were `.env`
+  (read) and `tools/generated` (+ nested repo, `disabled/`, `quarantine/`);
+  everything else already lives in `~/.bot-inator`, the HF cache or temp
+  dirs. New in `config.py`: `AGENT_DATA_DIR` moves both to `<dir>/.env` and
+  `<dir>/tools/generated` (created at import); `AGENT_GENERATED_TOOLS_DIR`
+  moves only the tools; unset = the dev layout, unchanged. A meta-path
+  finder points the `tools.generated` package at the moved dir, so one
+  generated tool still imports another in-process. `tool_sandbox.py`: the
+  data dir and moved generated dir are write-denied and `<data dir>/.env`
+  read-denied (added paths), and the child adds the module's own dir to
+  `tools.generated.__path__` (one line, see Deviations). The app sets
+  `AGENT_DATA_DIR=~/Library/Application Support/bot-inator` (also under the
+  existing ~/Library deny rule).
+⚬ APP: `Services/DaemonLauncher.swift` starts the bundled daemon only when
+  `Contents/Resources/python` + `agent-daemon/main.py` exist AND nothing
+  answers 127.0.0.1:8000/health; log `~/Library/Logs/bot-inator/daemon.log`
+  (rotated at 10 MB); on quit SIGTERM, SIGKILL after 5 s; restart with
+  backoff 1, 2, 4, 8, 16 s, reset after 120 s up; after 5 quick failures an
+  alert with the log tail (port-in-use named), Try Again / Show Log. A pid
+  file lets the next launch adopt (and later stop) its own daemon left by a
+  force quit; any other daemon is "external" and never touched.
+  `MenuBarUIApp.swift`: start() at launch, stop() in
+  applicationWillTerminate, nothing else. Info.plist unchanged.
+⚬ START AT LOGIN: Settings → App → "Start bot-inator at login"
+  (new `Views/AppLifecycleSettingsView.swift`, one line in SettingsView),
+  `SMAppService.mainApp`, off by default (never registered until switched
+  on); shows the "needs approval in Login Items" state.
+⚬ UPDATE NOTICE: `Services/UpdateChecker.swift` + Settings → App → "Check
+  for new versions", DEFAULT OFF. Why: 7c is local by default; the check
+  sends no user data (not even the version: the comparison is local), but
+  it is a new request that tells GitHub this Mac's IP runs bot-inator, so
+  it waits for the user. "Check now" works with the switch off (the click
+  is consent for one request). What it sends: one `GET
+  https://api.github.com/repos/Bforsyth1234/bot-inator/releases/latest`,
+  headers `Accept: application/vnd.github+json`, `User-Agent: bot-inator`,
+  ephemeral session (no cookies, no cache); daily while on. A newer tag →
+  one alert per version ("Open Release Page") and a link in Settings. It
+  runs IN THE APP, so the privacy ledger (ai/egress_log.py, the daemon's own
+  sends) doesn't see it: it must work when the daemon is down or won't
+  start, and the daemon has no route for app-originated rows. The Settings
+  caption says so and names the URL.
+⚬ Tests: new `tests/test_bundled_data_dir.py` (8): dev layout unchanged;
+  data dir moves .env + generated tools; `tools.generated` import from the
+  moved dir; profile rules; real sandbox-exec: a generated tool imports
+  another from the data dir, its write there and its read of `.env` are
+  PermissionError, and with the #96 rules removed the same tool writes and
+  reads. Rule 5, each fix reverted on its own: child `__path__` line → 2
+  fail; finder → 1 fails; dotenv path → 1 fails; sandbox rules → 2 fail;
+  restored → 8 pass. Full suite: 1686 passed. Swift typecheck clean. A
+  swiftc harness (scratch, not committed) checked version compare, backoff,
+  argv/env, layout detection, and the lifecycle against the real bundled
+  daemon on port 8766 with a throwaway HOME: start + quit (process gone);
+  SIGKILL → restarting(1 s) → new pid healthy; force-quit orphan adopted,
+  then stopped (port free); a fake /health already answering → "external",
+  nothing started, still answering after stop. shellcheck clean.
+⚬ Live check done here (ad hoc): `ALLOW_DIRTY=1 VERSION=0.2.0-dryrun
+  scripts/release/build-release.sh` → 283 nested files signed, `codesign
+  --verify --deep --strict` valid, the signed Python imported mlx 0.32.4 on
+  the GPU + torch + PyObjC + sqlite-vec, daemon on a free port answered
+  /health, nothing written inside the bundle; the zip round-trips (the
+  unzipped copy verifies). In the bundle, a generated tool in the data dir
+  loaded sandboxed, called another, and was refused the write to the data
+  dir and the .env read.
+⚬ UNVERIFIED: notarization and `spctl --assess` (no certificate); library
+  validation with a real Team ID (the release run's smoke test checks it);
+  that the notary accepts Mach-O under Contents/Resources (codesign strict
+  does); the menu bar app itself starting the daemon (the launcher ran in a
+  harness, not in the app, because the app would join the user's daemon on
+  8000); permission prompts naming bot-inator for the daemon (Full Disk
+  Access for chat.db, Automation via osascript, EventKit from the bundled
+  Python); the failure alert UI; SMAppService on a signed build; a Mac that
+  has never had the repo.
+⚬ FOR THE RUNNER / USER: (1) on a Mac without the Xcode command line tools
+  `/usr/bin/git` is a stub that offers to install developer tools when a
+  generated tool is committed (`_git_commit` in tools/meta_tool_generator.py,
+  slot A's file this wave); it needs an `xcode-select -p` guard or a
+  bundled git. (2) torch is 634 MB of the 1.5 GB, only for memory
+  embeddings (sentence-transformers); leaving it out halves the download
+  but memory recall falls back to hash embeddings. Kept for parity: the
+  user's call. (3) the dry-run probe (`tools/draft_dry_run.py`) runs with a
+  minimal env, so a DRAFT that imports a generated tool may fail its dry
+  run in the bundled build; untested.
+⚬ Live (user): `DEVELOPER_ID=… NOTARY_PROFILE=… VERSION=0.2.0
+  scripts/release/build-release.sh` passes the smoke test, notarizes,
+  `spctl` accepts; stop any ./run.sh daemon; open the zip's app from
+  Applications → Settings → App says "Assistant running"; first-run screen
+  (#93), one approved action; Calendar / Full Disk Access prompts name
+  bot-inator; quit → port 8000 free; Start at login on → it starts after
+  logging in; Check now → "Up to date" or the release link.
 Deviations:
+⚬ The bundle installs requirements.txt minus browser-use and playwright:
+  nothing in agent-daemon imports them outside tests (grep).
+⚬ `tool_sandbox.py` got one line beyond protected paths (the child's
+  `tools.generated.__path__` includes the module's dir): without it a
+  generated tool that imports another fails in the bundled build
+  (test_sandboxed_tool_composes_... fails when it is reverted).
+⚬ `BOT_INATOR_PORT` (as in run.sh) also moves DaemonLauncher's port, for
+  testing the launcher off 8000; the app's clients still use 8000.
 
 ---

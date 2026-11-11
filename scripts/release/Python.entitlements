@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the bundled Python that runs the daemon
+  (#96), Developer ID build. Applied to Contents/Resources/python/bin/python3.x
+  only; every other Mach-O in the bundle is signed with the runtime and no
+  entitlements.
+
+  Tested under the hardened runtime (ad hoc, 2026-11-11): ctypes callbacks,
+  PyObjC blocks, mx.compile on GPU and CPU, torch and sqlite-vec all work
+  WITHOUT allow-jit and allow-unsigned-executable-memory, so neither is here.
+
+  Library validation stays ON: every .so / .dylib the daemon loads is inside
+  the bundle and signed with the same Team ID, and the daemon runs Python
+  with -I (no user site-packages, no PYTHONPATH). build-release.sh checks it
+  after signing by importing mlx.core, torch and PyObjC with the signed
+  binary and starting the daemon. Ad-hoc code has no Team ID, so the ad-hoc
+  build uses Python-adhoc.entitlements instead.
+-->
+<plist version="1.0">
+<dict>
+    <!-- The daemon's own EventKit backend (tools/calendar_access.py,
+         tools/reminders.py: PyObjC, in-process). Under the hardened runtime
+         a process without this entitlement is refused calendar access. -->
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+</dict>
+</plist>

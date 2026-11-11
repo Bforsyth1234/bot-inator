@@ -14,9 +14,11 @@ Sandbox profile (:func:`build_profile`):
 * writes: allowed under ``$HOME`` and the per-call work dir, denied under
   ``~/Library``, ``~/.ssh``, ``~/.bot-inator``, shell start-up files and the
   bot-inator repo (``tools/generated`` plus the daemon's own source, venv
-  and ``.env``: a write there would run unsandboxed on the next start);
+  and ``.env``: a write there would run unsandboxed on the next start), and
+  for the app-bundled daemon (#96) its ``AGENT_DATA_DIR`` and moved
+  generated-tools dir;
 * reads: allowed, except ``~/.ssh``, ``~/.bot-inator`` (API token, memory)
-  and the daemon's ``.env`` (cloud API keys);
+  and the daemon's ``.env`` (cloud API keys; ``<AGENT_DATA_DIR>/.env`` too);
 * network: denied unless the module imports a network module
   (:data:`NETWORK_MODULES`, decided from the AST at load time and exposed
   as ``network_allowed`` / ``sandbox_note`` on the proxy). A dynamic import
@@ -228,10 +230,11 @@ def build_profile(
     write_denied = [home / d for d in _WRITE_DENIED_IN_HOME]
     write_denied.append(_protected_repo_dir(home))
     write_denied.append(daemon / "tools" / "generated")
+    write_denied.extend(_moved_write_denied())
     write_denied.append(shims)
     write_literals = [home / f for f in _SHELL_STARTUP_FILES]
     read_denied = [home / d for d in _READ_DENIED_IN_HOME]
-    read_literals = [daemon / ".env", *extra_read_denied]
+    read_literals = [daemon / ".env", *_moved_read_denied(), *extra_read_denied]
     lines = [
         "(version 1)",
         "(allow default)",
@@ -274,6 +277,27 @@ def build_profile(
         + ")"
     )
     return "\n".join(lines) + "\n"
+
+
+def _moved_write_denied() -> list[Path]:
+    """#96: the app-bundled daemon's writable home (``AGENT_DATA_DIR``) and a
+    moved generated-tools dir. Same reason as ``tools/generated`` in the
+    tree: a write there would run unsandboxed on the next start."""
+    import config
+
+    paths = [config.default_generated_tools_dir()]
+    if config.data_dir() is not None:
+        paths.append(config.data_dir())
+    return [Path(os.path.realpath(p)) for p in paths]
+
+
+def _moved_read_denied() -> list[Path]:
+    """#96: the data dir's ``.env`` (cloud API keys), like the tree's."""
+    import config
+
+    if config.data_dir() is None:
+        return []
+    return [Path(os.path.realpath(config.dotenv_path()))]
 
 
 def _extra_read_denied() -> tuple[Path, ...]:
@@ -644,6 +668,9 @@ try:
         _m = types.ModuleType(_pkg)
         _m.__path__ = [os.path.join(root, _sub)]
         sys.modules[_pkg] = _m
+    # #96: the module's own dir too (the app-bundled daemon keeps generated
+    # tools outside the tree), so one generated tool can import another.
+    sys.modules["tools.generated"].__path__.insert(0, os.path.dirname(path))
     import importlib.util
     from smolagents import Tool
     _mod_name = "tools.generated." + os.path.splitext(os.path.basename(path))[0]
