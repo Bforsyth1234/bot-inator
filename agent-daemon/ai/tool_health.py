@@ -83,6 +83,8 @@ REASONS = {
     CATEGORY_SANDBOX: (
         "The tool sandbox refused it (a denied path, app, executable or "
         "network). That is policy; a code change would be a way around it."
+        " If you reviewed this tool and trust it, you can let it run outside the "
+        "sandbox: Tool Manager → the tool → Run outside the sandbox (#104)."
     ),
     CATEGORY_BAD_ARGUMENTS: (
         "The assistant called it with bad arguments; the tool's code is not "
@@ -98,10 +100,14 @@ REASON_SANDBOX_APPLE_EVENT = (
     "Automation allowed, so no permission or code change fixes it. Use the "
     "built-ins instead: quit_app to quit an app, list_recent_emails or "
     "read_email for Mail."
+    " If you reviewed this tool and trust it, you can let it run outside the "
+    "sandbox: Tool Manager → the tool → Run outside the sandbox (#104)."
 )
 REASON_SANDBOX_EXECUTABLE = (
     "The tool sandbox does not let generated tools run that program. Use the "
     "built-in take_screenshot for screenshots, quit_app to quit an app."
+    " If you reviewed this tool and trust it, you can let it run outside the "
+    "sandbox: Tool Manager → the tool → Run outside the sandbox (#104)."
 )
 # Key added to a failed call's result dict: the one line the reply names.
 USER_NOTE_KEY = "tell_user"
