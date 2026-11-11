@@ -106,6 +106,9 @@ final class QuickAskModel: ObservableObject {
     @Published private(set) var screen = ScreenContext.empty
     @Published var includeWindow = true
     @Published var includeSelection = false
+    /// #89: "Include this window's text": the daemon reads the window
+    /// itself (no text is sent from here). Off for every new ask.
+    @Published var includeWindowText = false
     /// Set only when the user clicks "Use what's on the clipboard".
     @Published private(set) var clipboardText: String?
     @Published private(set) var askedText: String?
@@ -155,6 +158,7 @@ final class QuickAskModel: ObservableObject {
         // Selecting text and pressing the hotkey is the choice; the toggle
         // stays visible to take it back.
         includeSelection = screen.selection != nil
+        includeWindowText = false
         clipboardText = nil
         askedText = nil
         reply = nil
@@ -190,6 +194,11 @@ final class QuickAskModel: ObservableObject {
         if let included = includedText {
             ctx.selection = included.text
             ctx.selectionSource = included.source
+        } else if includeWindowText && screen.accessibilityTrusted {
+            // #89: the daemon reads the front window (read_front_window's
+            // never-watch / browser / password-field rules apply there).
+            ctx.selectionSource = .window
+            ctx.selection = nil
         }
         scanned = ws.messages.count
         messageId = send(text, ctx.isEmpty ? nil : ctx)
@@ -202,6 +211,7 @@ final class QuickAskModel: ObservableObject {
         screen.selection = nil
         clipboardText = nil
         includeSelection = false
+        includeWindowText = false
     }
 
     private func ingest(_ messages: [WSMessage]) {
@@ -282,7 +292,15 @@ struct QuickAskView: View {
                 .appFont(.secondary)
             }
             selectionRow
-            if model.includedText != nil, model.selectionStaysLocal {
+            if model.screen.accessibilityTrusted, model.includedText == nil, model.askedText == nil {
+                Toggle(isOn: $model.includeWindowText) {
+                    Text("Include this window's text")
+                }
+                .toggleStyle(.checkbox)
+                .appFont(.secondary)
+                .help("The assistant reads the text of the window in front once, for this message only. Never password fields, password managers or browser windows.")
+            }
+            if (model.includedText != nil || model.includeWindowText), model.selectionStaysLocal {
                 Text("The main engine is a cloud one: the included text stays on this Mac unless you allow personal text in Settings.")
                     .appFont(.fine)
                     .foregroundStyle(.orange)

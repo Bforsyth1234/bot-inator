@@ -88,6 +88,19 @@ from schemas.ws_messages import (
     CalendarStatus,
     CodeApprovalResponse,
     Command,
+    DemonstrationDraft,
+    DemonstrationTrace,
+    DemonstrationTracePayload,
+    MeetingAudioReady,
+    MeetingRecordOffer,
+    MeetingRecordOfferPayload,
+    MeetingRecordState,
+    MeetingRecordStop,
+    MeetingRecordStopPayload,
+    ScreenTextRequest,
+    ScreenTextRequestPayload,
+    ScreenTextResponse,
+    ScreenTextStatus,
     Status,
     StatusPayload,
     UserMessage,
@@ -95,6 +108,9 @@ from schemas.ws_messages import (
 )
 from tools import AVAILABLE_TOOLS
 from tools import calendar_access
+# #89: the module (``tools.read_front_window`` stays the module, see
+# tools/__init__.py), for its WS bridge to the menu bar app.
+from tools import read_front_window as screen_text
 from tools.meta_tool_generator import set_meta_tool_context
 
 logging.basicConfig(
@@ -356,6 +372,27 @@ async def lifespan(app: FastAPI):
         idea_sources.append(meeting_prep)
     except Exception:
         logger.exception("Failed to start meeting_prep")
+    # #86: offers to take meeting notes (the app records, only on a click)
+    # and turns a finished recording into one prepared-offer card. The
+    # transcript's summary uses LOCAL engines only (never a cloud one).
+    app.state.meeting_notes = None
+    try:
+        from events.meeting_notes import MeetingNotes  # noqa: WPS433
+
+        meeting_notes = MeetingNotes(bus, evaluators=[
+            (role, make_detection_evaluator(
+                eng, system_prompt="Summarize; reply with one JSON object only."))
+            for role, eng in (("main", engine), ("analysis", analysis_engine),
+                              ("drafting", drafting_engine))
+            if eng is not None
+        ])
+        meeting_notes.start()
+        listeners.append(meeting_notes)
+        listener_names.append("meeting_notes")
+        idea_sources.append(meeting_notes)
+        app.state.meeting_notes = meeting_notes
+    except Exception:
+        logger.exception("Failed to start meeting_notes")
     # #79: what happens to each suggestion, and every card decision.
     idea_outcomes = OutcomeStore(_store_path("AGENT_IDEA_OUTCOMES_PATH", default_outcomes_path()))
     approval_decisions = DecisionLog(
@@ -428,6 +465,55 @@ async def lifespan(app: FastAPI):
     )
     orchestrator.delivery = delivery
     app.state.delivery = delivery
+    # #78: standing rules ("always do this"): offers after 5 clean
+    # approvals, runs without a card (journaled, Undo), never while paused.
+    from ai import standing_rules as standing_rules_mod  # noqa: WPS433
+
+    standing_rules = standing_rules_mod.StandingRules(
+        standing_rules_mod.default_path(),
+        paused=lambda: bool(orchestrator.delivery is not None and orchestrator.delivery.paused),
+        classify=NextStepSuggester.classify,
+        watch_lookup=watch_store.get,
+    )
+    orchestrator.standing_rules = standing_rules
+    orchestrator.watch_lookup = watch_store.get
+    app.state.action_journal.add_undo_listener(standing_rules.on_undo)
+    app.state.standing_rules = standing_rules
+
+    # #84 "Watch me": a recording takes events first (Orchestrator._handle_event).
+    from ai.demonstration import DemonstrationController  # noqa: WPS433
+
+    async def _send_demo_trace(payload: dict[str, Any]) -> None:
+        await orchestrator._send(DemonstrationTrace(
+            seq=orchestrator._next_seq(), timestamp=_now_iso(),
+            payload=DemonstrationTracePayload(**payload),
+        ))
+
+    demonstration = DemonstrationController(
+        publish=bus.push, send=_send_demo_trace,
+        shortcuts=lambda: _shortcut_names_or_none(),
+    )
+    orchestrator.demonstration = demonstration
+    app.state.demonstration = demonstration
+
+    # #85 iPhone remote (off by default, 7c): the own Messages thread can
+    # ask, and answer a mirrored card with "yes <code>".
+    from events.remote_channel import RemoteChannel  # noqa: WPS433
+
+    remote = RemoteChannel(bus, paused=lambda: bool(delivery.paused))
+    remote.attach_orchestrator(orchestrator, asyncio.get_running_loop())
+    orchestrator.remote_channel = remote
+    app.state.remote_channel = remote
+    if _listeners_enabled():
+        try:
+            remote.start()
+            listeners.append(remote)
+            listener_names.append("remote_channel")
+        except Exception:
+            logger.exception("Failed to start the remote channel")
+
+    # #89: read_front_window answers only in a turn the user started.
+    screen_text.set_turn_kind_provider(lambda: getattr(orchestrator, "_turn_kind", ""))
     set_meta_tool_context(
         orchestrator=orchestrator,
         engine=engine,
@@ -538,6 +624,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Error closing the action journal")
         set_default_memory(None)
+        screen_text.set_turn_kind_provider(None)
         try:
             import tools.meta_tool_generator as _mg  # noqa: WPS433
             _mg._ORCHESTRATOR = None  # type: ignore[attr-defined]
@@ -588,6 +675,14 @@ app.include_router(egress_routes.router)
 app.include_router(delivery_routes.router)
 app.include_router(watch_routes.router)
 app.include_router(tool_health_routes.router)
+# Wave 16: standing rules (#78), iPhone remote (#85), meeting notes (#86).
+from routes import meeting_notes as meeting_notes_routes  # noqa: E402
+from routes import remote as remote_routes  # noqa: E402
+from routes import rules as rules_routes  # noqa: E402
+
+app.include_router(rules_routes.router)
+app.include_router(remote_routes.router)
+app.include_router(meeting_notes_routes.router)
 
 
 def _next_seq() -> int:
@@ -1187,6 +1282,20 @@ async def _handle_command(app: FastAPI, msg: Command) -> None:
             app.state.orchestrator.load_dynamic_tools()
         except Exception:
             logger.exception("Failed to reload dynamic tools")
+    elif action in ("demonstration_start", "demonstration_stop", "demonstration_cancel"):
+        # #84 "Watch me": the user's own menu item / hotkey.
+        demo = getattr(app.state, "demonstration", None)
+        if demo is None:
+            return
+        try:
+            if action == "demonstration_start":
+                await demo.start()
+            elif action == "demonstration_stop":
+                await demo.stop("user")
+            else:
+                await demo.cancel()
+        except Exception:
+            logger.exception("Failed to run %s", action)
 
 
 def _listener_health() -> dict[str, dict[str, Any]] | None:
@@ -1292,6 +1401,65 @@ def _calendar_sender(websocket: WebSocket):
     return send
 
 
+def _screen_text_sender(websocket: WebSocket):
+    """``screen_text_request`` frames go to this one connection only (#89)."""
+
+    async def send(request_id: str, max_chars: int, never_watch: list[str],
+                   timeout_seconds: int) -> None:
+        frame = ScreenTextRequest(
+            seq=_next_seq(),
+            timestamp=_now_iso(),
+            payload=ScreenTextRequestPayload(
+                request_id=request_id, max_chars=max_chars,
+                never_watch=never_watch, timeout_seconds=timeout_seconds,
+            ),
+        )
+        await websocket.send_text(frame.model_dump_json())
+
+    return send
+
+
+_MEETING_FRAMES = {
+    "meeting_record_offer": (MeetingRecordOffer, MeetingRecordOfferPayload),
+    "meeting_record_stop": (MeetingRecordStop, MeetingRecordStopPayload),
+}
+
+
+def _meeting_sender(websocket: WebSocket):
+    """#86: the meeting-notes offer / stop frames, to this connection."""
+
+    async def send(frame_type: str, payload: dict[str, Any]) -> None:
+        cls, payload_cls = _MEETING_FRAMES[frame_type]
+        frame = cls(seq=_next_seq(), timestamp=_now_iso(), payload=payload_cls(**payload))
+        await websocket.send_text(frame.model_dump_json())
+
+    return send
+
+
+# Strong refs to running meeting-audio jobs (a bare create_task can be GC'd).
+_MEETING_JOBS: set[asyncio.Task[Any]] = set()
+
+
+async def _process_meeting_audio(meeting_notes: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """#86: transcript / audio -> one card. Anything but a card is told to
+    the user as a notification (the audio is deleted either way)."""
+    try:
+        result = await meeting_notes.process(payload)
+    except Exception as exc:
+        logger.exception("meeting notes: processing failed")
+        result = {"status": "error", "reason": str(exc)[:300]}
+    if result.get("status") != "offered":
+        try:
+            from tools.show_notification import show_notification  # noqa: WPS433
+
+            await asyncio.to_thread(
+                show_notification, "Meeting notes", str(result.get("reason") or "No notes."),
+            )
+        except Exception:
+            logger.exception("meeting notes notification failed")
+    return result
+
+
 @app.websocket("/ws/stream")
 async def ws_stream(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -1321,6 +1489,17 @@ async def ws_stream(websocket: WebSocket) -> None:
     calendar_access.app_bridge.connect(
         conn_id, _calendar_sender(websocket), asyncio.get_running_loop(),
     )
+    # #89: this connection may serve read_front_window once it reports
+    # ``screen_text_status``.
+    screen_text.bridge.connect(
+        conn_id, _screen_text_sender(websocket), asyncio.get_running_loop(),
+    )
+    # #86: the meeting recorder lives in the app.
+    meeting_notes = getattr(app.state, "meeting_notes", None)
+    if meeting_notes is not None:
+        meeting_notes.link.connect(
+            conn_id, _meeting_sender(websocket), asyncio.get_running_loop(),
+        )
 
     try:
         while True:
@@ -1342,6 +1521,25 @@ async def ws_stream(websocket: WebSocket) -> None:
                 calendar_access.app_bridge.set_status(
                     conn_id, msg.payload.authorization,
                 )
+            elif isinstance(msg, ScreenTextResponse):
+                screen_text.bridge.submit_response(conn_id, msg.payload.model_dump())
+            elif isinstance(msg, ScreenTextStatus):
+                screen_text.bridge.set_status(conn_id, msg.payload.accessibility_trusted)
+            elif isinstance(msg, DemonstrationDraft):
+                demo = getattr(app.state, "demonstration", None)
+                if demo is not None:
+                    await demo.draft(msg.payload.sentence, msg.payload.removed_step_ids)
+            elif isinstance(msg, MeetingRecordState):
+                if meeting_notes is not None:
+                    meeting_notes.on_record_state(conn_id, msg.payload.model_dump())
+            elif isinstance(msg, MeetingAudioReady):
+                if meeting_notes is not None:
+                    task = asyncio.create_task(
+                        _process_meeting_audio(meeting_notes, msg.payload.model_dump()),
+                        name="meeting-notes",
+                    )
+                    _MEETING_JOBS.add(task)
+                    task.add_done_callback(_MEETING_JOBS.discard)
             elif isinstance(msg, Command):
                 await _handle_command(app, msg)
             elif isinstance(msg, UserMessage):
@@ -1365,3 +1563,6 @@ async def ws_stream(websocket: WebSocket) -> None:
         health_task.cancel()
         orchestrator.remove_subscriber(_ws_send)
         calendar_access.app_bridge.disconnect(conn_id)
+        screen_text.bridge.disconnect(conn_id)
+        if meeting_notes is not None:
+            meeting_notes.link.disconnect(conn_id)

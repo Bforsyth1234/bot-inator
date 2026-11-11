@@ -8,12 +8,12 @@ struct MenuBarUIApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            RootPopoverView()
+            RootPopoverView(watchMe: { delegate.demonstration.toggleRecording() })
                 .environmentObject(delegate.ws)
                 .environmentObject(delegate.delivery)
                 .appTextSize()
         } label: {
-            MenuBarIconLabel(ws: delegate.ws)
+            MenuBarIconLabel(ws: delegate.ws, demo: delegate.demonstration.model)
         }
         .menuBarExtraStyle(.window)
 
@@ -54,16 +54,24 @@ struct MenuBarUIApp: App {
     }
 }
 
-/// The menu bar icon: a pause glyph while paused, and the Inbox count
-/// (#87) as a badge. Reads the status frames the daemon sends on change.
+/// The menu bar icon: a pause glyph while paused, a record glyph while a
+/// "Watch me" recording runs (#84), and the Inbox count (#87) as a badge.
+/// Reads the status frames the daemon sends on change.
 struct MenuBarIconLabel: View {
     @ObservedObject var ws: WebSocketManager
+    @ObservedObject var demo: DemonstrationModel
+
+    private var glyph: String {
+        if ws.lastStatus?.paused == true { return "pause.circle" }
+        if demo.isRecording { return "record.circle.fill" }
+        // Brain/robot SF Symbol for the menu bar icon.
+        return "brain.head.profile"
+    }
 
     var body: some View {
         let inbox = ws.lastStatus?.inboxCount ?? 0
         HStack(spacing: 2) {
-            // Brain/robot SF Symbol for the menu bar icon.
-            Image(systemName: ws.lastStatus?.paused == true ? "pause.circle" : "brain.head.profile")
+            Image(systemName: glyph)
             if inbox > 0 {
                 Text("\(inbox)")
             }
@@ -119,6 +127,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let approvalPresenter = ApprovalPresenter()
     /// Quick-ask panel (#74), opened by the global hotkey.
     private var quickAsk: QuickAskPanelController?
+    /// #84 "Watch me": the recording panel, the record hotkey and the menu
+    /// item all go through this controller.
+    lazy var demonstration: DemonstrationPanelController = {
+        let ws = self.ws
+        return DemonstrationPanelController(actions: DemonstrationActions(
+            start: { ws.sendCommand(.demonstrationStart) },
+            stop: { ws.sendCommand(.demonstrationStop) },
+            cancel: { ws.sendCommand(.demonstrationCancel) },
+            draft: { ws.sendDemonstrationDraft($0) }
+        ))
+    }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ws.connect()
@@ -137,6 +156,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         self.quickAsk = quickAsk
         QuickAskHotKeyController.shared.start { quickAsk.toggle() }
+        // #84: follow demonstration_trace frames; ⌃⌥⌘R (default) toggles.
+        let demonstration = self.demonstration
+        demonstration.model.attach(messages: ws.$messages.eraseToAnyPublisher()) {
+            if case let .demonstrationTrace(_, _, payload) = $0 { return payload }
+            return nil
+        }
+        RecordHotKeyController.shared.start { [demonstration] in demonstration.toggleRecording() }
+        // #86: the recorder exists from launch (it purges leftover audio).
+        _ = MeetingRecorder.shared
     }
 
     // MARK: Cmd-Tab / Dock while a window is open
@@ -188,6 +216,8 @@ struct RootPopoverView: View {
     @EnvironmentObject private var ws: WebSocketManager
     @EnvironmentObject private var delivery: DeliveryViewModel
     @Environment(\.openWindow) private var openWindow
+    /// #84: start / stop a "Watch me" recording (shows its panel).
+    var watchMe: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 0) {
@@ -210,6 +240,24 @@ struct RootPopoverView: View {
             HStack {
                 PrivacyLedgerTodayLabel()
                 Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                // #84: record one demonstration, get a reviewed tool.
+                Button {
+                    watchMe()
+                } label: {
+                    Label("Watch me…", systemImage: "record.circle")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.borderless)
+                .help("Record yourself doing a task once (⌃⌥⌘R), then make a tool from it")
+                Spacer()
+                // #86: meeting notes start only on this click (or an offer's).
+                MeetingRecorderMenuItems()
+                    .buttonStyle(.borderless)
             }
             .padding(.horizontal, 10)
             .padding(.top, 4)

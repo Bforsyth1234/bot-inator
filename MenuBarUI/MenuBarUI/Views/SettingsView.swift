@@ -300,9 +300,19 @@ struct SettingsView: View {
 
             DailyBriefSettingsView()
             MeetingPrepSettingsView()
+            // Wave 16: meeting notes (#86), "Watch me" shortcut (#84),
+            // iPhone remote (#85).
+            MeetingNotesSettingsView()
             QuickAskSettingsView()
+            RecordShortcutSettingsView()
+            RemoteSettingsView()
             ActivityHistorySettingsView()
             PermissionsView()
+
+            // #78: "always do this" rules the user turned on.
+            Section("Standing rules") {
+                RulesView()
+            }
 
             // Wave 15: watches (#88), right-moment delivery (#87), what the
             // assistant did with Undo (#83), what left this Mac (#82).
@@ -385,6 +395,36 @@ struct SettingsView: View {
             Text("Set by \(env) in the daemon's shell; unset it there to change it here.")
                 .appFont(.secondary)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+
+/// #84: the "Watch me" record hotkey (default ⌃⌥⌘R).
+struct RecordShortcutSettingsView: View {
+    @AppStorage(RecordShortcut.storageKey) private var stored: String = RecordShortcut.fallback.rawValue
+    @ObservedObject private var hotKeys = RecordHotKeyController.shared
+
+    var body: some View {
+        Section("Watch me") {
+            Picker("Record shortcut", selection: $stored) {
+                ForEach(RecordShortcut.allCases) { shortcut in
+                    Text(shortcut.label).tag(shortcut.rawValue)
+                }
+            }
+            Text("Starts and stops a recording of one task (at most 5 minutes). Only file, app and window names are noted, never keystrokes; you review the steps before anything is drafted.")
+                .appFont(.secondary)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let error = hotKeys.lastError {
+                HStack {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .appFont(.secondary)
+                    Spacer()
+                    Button("Retry") { hotKeys.retry() }
+                }
+            }
         }
     }
 }

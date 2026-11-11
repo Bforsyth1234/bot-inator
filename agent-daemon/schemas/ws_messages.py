@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +79,20 @@ class ApprovalResponsePayload(BaseModel):
     # When present, the orchestrator invokes the tool with these values
     # instead of the ones the agent originally proposed.
     edited_args: dict[str, Any] | None = None
+
+
+ApprovalOutcome = Literal["approved", "declined", "timed_out"]
+
+
+class ApprovalResolvedPayload(BaseModel):
+    """Server→client (#85): the card ``request_id`` is answered or timed
+    out, wherever it was answered (this Mac, another window, the phone). A
+    client still showing that card closes it. ``note`` is the response's
+    ``user_note`` (e.g. "answered from your phone")."""
+
+    request_id: str
+    outcome: ApprovalOutcome
+    note: str | None = None
 
 
 class CodeApprovalRequestPayload(BaseModel):
@@ -154,8 +168,21 @@ NOTICE_EVENT_TYPE = "system_notice"
 
 
 class NoticeAction(BaseModel):
-    kind: Literal["open_settings"]
-    url: str
+    """``open_settings``: open ``url``. ``undo`` (#78): one-click Undo of
+    the standing-rule run journaled as ``entry_id`` (the app calls
+    ``POST /api/rules/runs/{entry_id}/undo``; ``url`` is unused)."""
+
+    kind: Literal["open_settings", "undo"]
+    url: str = ""
+    entry_id: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_entry(self, handler: Any) -> dict[str, Any]:
+        # An ``open_settings`` action keeps its pre-#78 wire shape.
+        data = handler(self)
+        if data.get("entry_id") is None:
+            data.pop("entry_id", None)
+        return data
 
 
 class NoticePayload(BaseModel):
@@ -315,6 +342,10 @@ CommandAction = Literal[
     "reload_model",
     "clear_memory",
     "reload_dynamic_tools",
+    # #84 "Watch me": start / stop / cancel a demonstration recording.
+    "demonstration_start",
+    "demonstration_stop",
+    "demonstration_cancel",
 ]
 
 
@@ -369,6 +400,91 @@ class UserMessagePayload(BaseModel):
     context: ChatContextPayload | None = None
 
 
+# #84 "Watch me" ----------------------------------------------------------------
+
+DemonstrationState = Literal["idle", "recording", "stopped", "drafted", "refused"]
+
+
+class DemonstrationStepPayload(BaseModel):
+    id: str
+    kind: str
+    text: str
+
+
+class DemonstrationTracePayload(BaseModel):
+    """Server→client: the recording's state and its readable steps (memory
+    only; dropped after the draft, on cancel or 30 min after the stop)."""
+
+    recording_id: str | None = None
+    state: DemonstrationState
+    started_at: float | None = None
+    ends_at: float | None = None
+    stop_reason: str | None = None
+    steps: list[DemonstrationStepPayload] = Field(default_factory=list)
+    reason: str | None = None
+    tool_name: str | None = None
+    deferred_count: int | None = None
+
+
+class DemonstrationDraftPayload(BaseModel):
+    """Client→server: the user's one sentence and the steps they removed."""
+
+    sentence: str = Field(max_length=2000)
+    removed_step_ids: list[str] = Field(default_factory=list)
+
+
+# #86 meeting notes (the app records; the daemon only offers) ----------------
+
+MeetingAuthStatus = Literal["not_determined", "restricted", "denied", "authorized"]
+MeetingRecordStateKind = Literal["idle", "started", "stopped", "failed", "declined"]
+
+
+class MeetingRecordOfferPayload(BaseModel):
+    """Server→client: offer "Take notes for <title>?" (never a start)."""
+
+    meeting_id: str
+    title: str
+    start: str = ""
+    end: str = ""
+    stop_at: str
+    engine: Literal["apple", "whisper"] = "apple"
+    attendee_count: int = 0
+
+
+class MeetingRecordStopPayload(BaseModel):
+    """Server→client: stop the recording (the meeting ended + grace)."""
+
+    meeting_id: str
+    reason: str = "meeting_ended"
+
+
+class MeetingRecordStatePayload(BaseModel):
+    """Client→server: recorder state + Microphone / Speech authorization."""
+
+    meeting_id: str | None = None
+    state: MeetingRecordStateKind
+    title: str | None = None
+    stop_at: str | None = None
+    microphone: MeetingAuthStatus
+    speech_recognition: MeetingAuthStatus
+    error: str | None = None
+
+
+class MeetingAudioReadyPayload(BaseModel):
+    """Client→server: the recording finished; a transcript or audio path
+    (inside the daemon's audio folder) to turn into one card."""
+
+    meeting_id: str
+    title: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    audio_path: str | None = None
+    system_audio_path: str | None = None
+    transcript_path: str | None = None
+    error: str | None = None
+    stop_reason: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Messages (discriminated on `type`)
 # ---------------------------------------------------------------------------
@@ -392,6 +508,11 @@ class ApprovalRequest(_BaseMessage):
 class ApprovalResponse(_BaseMessage):
     type: Literal["approval_response"] = "approval_response"
     payload: ApprovalResponsePayload
+
+
+class ApprovalResolved(_BaseMessage):
+    type: Literal["approval_resolved"] = "approval_resolved"
+    payload: ApprovalResolvedPayload
 
 
 class CodeApprovalRequest(_BaseMessage):
@@ -460,6 +581,36 @@ class ScreenTextStatus(_BaseMessage):
     payload: ScreenTextStatusPayload
 
 
+class DemonstrationTrace(_BaseMessage):
+    type: Literal["demonstration_trace"] = "demonstration_trace"
+    payload: DemonstrationTracePayload
+
+
+class DemonstrationDraft(_BaseMessage):
+    type: Literal["demonstration_draft"] = "demonstration_draft"
+    payload: DemonstrationDraftPayload
+
+
+class MeetingRecordOffer(_BaseMessage):
+    type: Literal["meeting_record_offer"] = "meeting_record_offer"
+    payload: MeetingRecordOfferPayload
+
+
+class MeetingRecordStop(_BaseMessage):
+    type: Literal["meeting_record_stop"] = "meeting_record_stop"
+    payload: MeetingRecordStopPayload
+
+
+class MeetingRecordState(_BaseMessage):
+    type: Literal["meeting_record_state"] = "meeting_record_state"
+    payload: MeetingRecordStatePayload
+
+
+class MeetingAudioReady(_BaseMessage):
+    type: Literal["meeting_audio_ready"] = "meeting_audio_ready"
+    payload: MeetingAudioReadyPayload
+
+
 WSMessage = Annotated[
     Union[
         Thought,
@@ -478,6 +629,13 @@ WSMessage = Annotated[
         ScreenTextRequest,
         ScreenTextResponse,
         ScreenTextStatus,
+        ApprovalResolved,
+        DemonstrationTrace,
+        DemonstrationDraft,
+        MeetingRecordOffer,
+        MeetingRecordStop,
+        MeetingRecordState,
+        MeetingAudioReady,
     ],
     Field(discriminator="type"),
 ]

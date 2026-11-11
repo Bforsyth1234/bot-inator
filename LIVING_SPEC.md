@@ -31,8 +31,64 @@ limits:
    on/off and delete; every automatic run posts a notification with Undo
    and is logged; a rule that is undone twice switches itself off.
 
-Everything outside these limits still needs an approval card. Until #78
-is built, no standing rules exist and every side-effecting call is gated.
+Everything outside these limits still needs an approval card.
+
+Built (#78, wave 16; `ai/standing_rules.py`, `routes/rules.py`, Settings >
+Standing rules). The narrower choices it made, part of the limits: only
+`move_file`, `create_reminder`, `create_event` and `create_note` (the
+built-ins History can undo) may have a rule; triggers are `file` and
+`mail_received` only, a mail rule matches the sender header only (never
+words in the email, mailing lists left out); the only placeholders are
+`{path}` (exactly `move_file`'s `src`) and `{date}`; a move rule keeps the
+file's name and files only into ordinary home folders (no dot folders,
+`~/Library`, `~/.ssh`, `~/.bot-inator`). An offer is raised only from a card
+whose arguments came from structured data (the triggering file's path, a
+one-action prepared offer, a watch's own spec), is listed in Settings and
+announced by an "Always do this?" notice; a rule exists only after the
+user's accept route re-checks every limit and the clean-approval count. At
+most 20 rules, 20 runs per rule a day, one run per file / message. The run
+hook sits in `Orchestrator._handle_event` after #84 recording and #87
+delivery (a paused, held or capped event never reaches a rule) and before
+any turn: deterministic match, fixed arguments, the built-in function
+itself, journaled (#83, `source="rule"`), then a thought, a "Done
+automatically" notice with one-click Undo and a macOS notification. A run
+whose tool failed is not journaled and the normal card path goes on.
+Store `~/.bot-inator/standing_rules.json` (0600, `AGENT_STANDING_RULES_PATH`).
+
+**iPhone remote (amendment to 7a and 7c, user decisions 2026-11-10, item
+#85).** 7a: a reply `yes <code>` / `no <code>` sent from the user's own
+devices (`is_from_me = 1`, iMessage service, in the own thread only) is
+consent for the one card carrying that code. Codes are single use and end
+with the request. Code review, `generate_custom_tool`, `run_shortcut`, cards
+with origin notes (#81) and cards with several actions are never approvable
+from the phone. The app's texts to the own thread are chat-channel output,
+not a tool call: `send_imessage` stays unregistered and the model never
+picks a recipient. 7c: answer and card text may travel through Apple's
+iMessage to the user's own handle only while the remote is on
+(`AGENT_REMOTE`, off by default); every message is recorded in the privacy
+ledger (kind `imessage`), at most 20 an hour. A card is mirrored only while
+the Mac is idle (`AGENT_REMOTE_IDLE_MINUTES`, default 10) or when the turn
+came from the phone, and then waits up to 15 minutes; the phone's answer
+resolves the same future the Mac card waits on, and an `approval_resolved`
+frame closes the Mac card.
+
+**Watch me (#84).** A recording is explicit (menu item or ⌃⌥⌘R) and stops
+by itself after 5 minutes. While it runs it takes events first, before #87
+delivery and any rule: step events are recorded (memory only, never the
+activity history), chat passes through, everything else is deferred and
+released when it stops. The reviewed trace + one sentence become a spec
+(`pattern_detected`, source `demonstration`) that goes through the normal
+idea card, code review (7b) and sandbox; nothing is replayed. Refused when
+the main or drafting engine is a cloud one without the personal-text opt-in.
+
+**Meeting notes (#86).** Off by default (`AGENT_MEETING_NOTES`). The daemon
+only OFFERS ("Take notes for <title>?"); the app records only after the
+user's click. Audio stays in `~/.bot-inator/meetings/audio/` and is deleted
+once a transcript exists and on every failure; the transcript (0600) never
+goes to a cloud engine, whatever the provider or the personal-text opt-in
+(the summary uses local engines or local rules only). The result is ONE
+prepared-offer card (reminders, a follow-up event, an unsent draft, a note);
+nothing runs before it is approved.
 
 **Undo is a user click, not a bypass (#83).** History (`ai/action_journal.py`)
 records every side-effecting call that ran after its card (and each action of
@@ -62,8 +118,8 @@ matching is a bounded in-memory copy, dropped at the next turn.
 **Never-watch apps (#87).** Nothing observes an app on the never-watch list
 (`ai.delivery.is_never_watched`; password managers by default, editable in
 Settings > Delivery): no `app_activated` event, no `clipboard_changed`
-event, and `read_active_tab_text` refuses it. #89's `read_front_window`
-must consult the same list.
+event, `read_active_tab_text` refuses it, and #89's `read_front_window`
+sends the same list to the app, which refuses those apps before reading.
 
 **Guiding question.** For every event, or window of events, the LLM asks:
 *"How could I possibly help the user here?"* That question is always
@@ -185,6 +241,40 @@ delivery gate holds agent work and drops the rest; `resume_listeners`
 resumes with no restart.
 Calendar (#60): server → client `calendar_request`; client → server
 `calendar_response`, `calendar_status` (see the Calendar flow below).
+Wave 16 frames:
+- **`approval_resolved`** (server → client, #85) `{request_id, outcome:
+  approved | declined | timed_out, note?}`: sent for every card once it is
+  answered (from any window or the phone) or times out; a client still
+  showing that card closes it without answering.
+- `notice.action` may be `{kind: "undo", entry_id}` (#78): the "Done
+  automatically" notice of a standing-rule run; the banner's Undo calls
+  `POST /api/rules/runs/{entry_id}/undo`. `open_settings` keeps
+  `{kind, url}`.
+- **`demonstration_trace`** (server → client, #84) `{recording_id?, state:
+  idle | recording | stopped | drafted | refused, started_at?, ends_at?,
+  stop_reason?, steps: [{id, kind, text}], reason?, tool_name?,
+  deferred_count?}`; **`demonstration_draft`** (client → server)
+  `{sentence ≤ 2000, removed_step_ids}`; `command` actions
+  `demonstration_start` / `demonstration_stop` / `demonstration_cancel`.
+- Meeting notes (#86): server → client **`meeting_record_offer`**
+  `{meeting_id, title, start, end, stop_at, engine: apple | whisper,
+  attendee_count}` (an offer, never a start) and **`meeting_record_stop`**
+  `{meeting_id, reason}`; client → server **`meeting_record_state`**
+  `{meeting_id?, state: idle | started | stopped | failed | declined, title?,
+  stop_at?, microphone, speech_recognition, error?}` (authorization names
+  `not_determined | restricted | denied | authorized`; they feed the
+  Permissions rows) and **`meeting_audio_ready`** `{meeting_id, title?,
+  started_at?, ended_at?, audio_path?, system_audio_path?, transcript_path?,
+  error?, stop_reason?}` (processed in a task; anything but a card is told
+  as a notification).
+- Front window (#89): server → client **`screen_text_request`**
+  `{request_id, max_chars, never_watch, timeout_seconds}` to ONE connection
+  (the one that last sent `screen_text_status`); client → server
+  **`screen_text_response`** `{request_id, ok, app?, bundle_id?, title?,
+  text?, truncated, error?, error_code?, accessibility_trusted?}` and
+  **`screen_text_status`** `{accessibility_trusted}` (on connect and on
+  change). `user_message.context.selection_source` may be `"window"` (no
+  text sent; the daemon reads the window itself).
 Chat: client → server `user_message` `{message_id, text, context?}`.
 `context` (#74, quick-ask panel only; absent from the Chat window and older
 clients) is `{front_app?, window_title?, selection?, selection_source?
@@ -342,6 +432,13 @@ the bearer token (see Auth above):
 | GET/POST | `/api/watches`          | List / save watches (≤ 20; denied 3× in a row switches one off) (#88). |
 | PATCH/DELETE | `/api/watches/{id}` | `{enabled?, daily_limit?, cooldown_minutes?}` / delete (#88). |
 | GET    | `/api/tool-health`        | Every logged generated tool's health (#90).       |
+| GET    | `/api/rules`              | Standing rules, pending "always do this?" offers, recent automatic runs (#78). |
+| POST   | `/api/rules/offers/{id}/accept` | The user's yes: re-checks every limit, creates the rule (404 / 409) (#78). |
+| POST   | `/api/rules/offers/{id}/dismiss` | "No thanks" (offered again only after 5 more clean approvals) (#78). |
+| PATCH/DELETE | `/api/rules/{id}`   | `{enabled}` only / delete (#78).                  |
+| POST   | `/api/rules/runs/{entry_id}/undo` | Undo one automatic run (two undos switch the rule off) (#78). |
+| GET/PUT| `/api/remote`             | iPhone remote `{enabled, handle, idle_minutes}` (+ limits, `locked_fields`); can't be on without a valid own handle (#85). |
+| GET/PUT| `/api/meeting-notes`      | `{enabled, engine apple / whisper}` (+ `engine_in_use`, `whisper_available`, `notes_dir`, `locked_fields`) (#86). |
 | GET    | `/api/tools/{name}/health` | One tool: status, recent failures, ok runs, repair cooldown, `can_restore` (#90). |
 | POST   | `/api/tools/{name}/restore-previous` | Put back the prior committed version (user click) (#90). |
 
@@ -560,6 +657,25 @@ restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 |                               | `gated_forward` for every dynamic-tool call (raise |
 |                               | or `status: error`); 2 repairable failures in a    |
 |                               | week → a repair idea; `routes/tool_health.py`.     |
+| `ai/standing_rules.py`        | #78 standing rules: offers, limits, deterministic  |
+|                               | runs; `~/.bot-inator/standing_rules.json`          |
+|                               | (`AGENT_STANDING_RULES_PATH`); hooks in            |
+|                               | `_record_decision` (arg pattern + offer) and       |
+|                               | `_handle_event` (run); undo listener on the        |
+|                               | journal; `routes/rules.py`.                        |
+| `ai/demonstration.py`         | #84 "Watch me": `DemonstrationController` (memory  |
+|                               | only), `intercept` first in `_handle_event`;       |
+|                               | trace → `pattern_detected` source `demonstration`. |
+| `events/remote_channel.py`    | #85 iPhone remote: polls the own thread in         |
+|                               | `chat.db`, mirrors eligible cards with a code,     |
+|                               | answers phone turns (`source: "remote"`); excluded |
+|                               | from `imessage_received`; `routes/remote.py`.      |
+| `events/meeting_notes.py`     | #86 meeting notes: offer at prep time, stop timer, |
+|                               | transcript (0600, `~/.bot-inator/meetings/`) → one |
+|                               | prepared offer; local engines only;                |
+|                               | `routes/meeting_notes.py`. Optional `mlx-whisper`. |
+| `tools/read_front_window.py`  | #89 front-window text via the app's Accessibility  |
+|                               | bridge (`bridge`, WS routed in `main.py`).         |
 
 ## 5. Inference engines
 
@@ -629,8 +745,9 @@ bypass the approval gate and run inline; all other tools still emit an
 |                    |           | `new_name` (plain name, no separators, no leading |
 |                    |           | dot, keeps the extension if omitted); never       |
 |                    |           | overwrites an existing file (#76).                |
-| `send_imessage`    |           | AppleScript `tell application "Messages"` → send  |
-|                    |           | to a buddy on the iMessage service.               |
+| `send_imessage`    |           | NOT registered (the user doesn't want it). The    |
+|                    |           | iPhone remote (#85) sends to the own handle only, |
+|                    |           | as chat-channel output, never as a tool.          |
 | `remember_preference`| ✅       | Persists a user preference string into the shared |
 |                    |           | `Memory` at `~/.bot-inator/memory.db`. Asks first |
 |                    |           | in a turn that read outside text (#81).           |
@@ -660,6 +777,13 @@ bypass the approval gate and run inline; all other tools still emit an
 | `create_event`     |           | Adds a Calendar event (app's EventKit; default    |
 |                    |           | calendar unless one is named).                    |
 | `list_reminders`   | ✅         | Reminders (EventKit/AppleScript), soonest first.  |
+| `read_front_window`| ✅         | #89: the front window's Accessibility text, once, |
+|                    |           | through the menu bar app (WS `screen_text_*`;     |
+|                    |           | Accessibility is the app's). Only in a turn the   |
+|                    |           | user started (chat / quick ask); never password   |
+|                    |           | fields, never-watch apps, bot-inator's own or     |
+|                    |           | browser windows (use `read_active_tab_text`);     |
+|                    |           | cloud placeholder per #31; marks the turn (#81).  |
 | `create_reminder`  |           | Adds a reminder (optional due date, list, notes). |
 | `<server>__<tool>` |           | An MCP server's tool (#69): listed in Tool        |
 |                    |           | Manager, off until enabled, gated unless the user |
@@ -729,6 +853,19 @@ SwiftUI MenuBar app with an AppKit shell:
   delivery state, busy checks and today's ledger line; `ApprovalAlert`
   shows `originNotesSection` first (#81); `CodeReviewAlert` diffs against
   `previousCode` for a repair (#90).
+  Wave 16: the popover has a "Watch me…" button (#84, also ⌃⌥⌘R via
+  `RecordHotKeyController`, `DemonstrationPanelController`) and
+  `MeetingRecorderMenuItems` ("Take meeting notes now" / "Stop taking
+  notes", #86); the menu bar icon shows `record.circle.fill` while a
+  demonstration records (the pause glyph wins). Settings embeds
+  `MeetingNotesSettingsView` (#86), a "Watch me" record-shortcut picker
+  (#84), `RemoteSettingsView` (#85) and `RulesView` ("Standing rules",
+  #78). `NoticeBanner` shows Undo for a `kind: "undo"` notice action;
+  `WebSocketManager` closes the open card on `approval_resolved` (#85),
+  routes `meeting_record_offer` / `_stop` to `MeetingRecorder` and its
+  state / audio frames back; quick-ask has "Include this window's text"
+  (#89, only with Accessibility); the privacy ledger labels kind
+  `imessage` "iMessage to you".
 - `Services/WebSocketManager.swift` — publishes `@Published messages`,
   `pendingApproval`, `lastStatus`, and a `DebugStats` struct (frame
   counts by type, thought counts by stage, decode-error ring buffer,

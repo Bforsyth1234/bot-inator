@@ -47,6 +47,16 @@ ALLOWED_KEYS = frozenset({
     # Privacy ledger (#82): "1" keeps what was sent (7 days) next to each
     # row; default "0" keeps metadata only. Read live by ai.egress_log.
     "AGENT_EGRESS_KEEP_TEXT",
+    # iPhone remote (#85): "1"/"0" (default off, 7c), the own handle (E.164
+    # phone or Apple ID email) and idle minutes 1..120 (default 10). Read
+    # live by events.remote_channel.
+    "AGENT_REMOTE",
+    "AGENT_REMOTE_HANDLE",
+    "AGENT_REMOTE_IDLE_MINUTES",
+    # Meeting notes (#86): "1"/"0" (default off) and the engine "apple" |
+    # "whisper". Read live by events.meeting_notes.
+    "AGENT_MEETING_NOTES",
+    "AGENT_MEETING_NOTES_ENGINE",
 })
 PROVIDERS = ("local", "groq")
 

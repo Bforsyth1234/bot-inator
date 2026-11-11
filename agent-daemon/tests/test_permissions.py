@@ -82,8 +82,11 @@ def test_no_prompt_guard_is_not_vacuous(no_prompts, monkeypatch) -> None:
     assert sorted(prompted) == ["AE ask=True for com.apple.Notes", "request path called"]
 
 
-def test_no_messages_row() -> None:
-    assert P.get("automation_messages") is None
+def test_messages_row_is_the_remote_channel_only() -> None:
+    # #85 (user answer A): Automation -> Messages exists for the iPhone
+    # remote's own-thread sends; send_imessage stays unregistered.
+    row = P.get("automation_messages")
+    assert row is not None and row.used_by == ("events/remote_channel.py",)
     assert all("send_imessage" not in " ".join(p.used_by) for p in P.PERMISSIONS)
 
 

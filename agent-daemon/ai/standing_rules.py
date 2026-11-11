@@ -744,13 +744,18 @@ def offer_notice(offer: Mapping[str, Any]) -> dict[str, Any]:
 def run_notice(run: Mapping[str, Any]) -> dict[str, Any]:
     """A ``NoticePayload`` dict for one automatic run, naming where to undo it."""
     entry = run.get("entry") or {}
-    return {
+    notice: dict[str, Any] = {
         "id": f"rule_run:{entry.get('id') or run.get('rule_id')}",
         "level": "info",
         "title": "Done automatically",
         "body": (f"{entry.get('label') or run.get('tool')} (standing rule: {run.get('words', '')}) "
                  "Undo it in Settings → Standing rules or History."),
     }
+    if entry.get("id") and entry.get("can_undo", True):
+        # One-click Undo on the banner: the app calls
+        # ``POST /api/rules/runs/{entry_id}/undo`` (the journal's undo).
+        notice["action"] = {"kind": "undo", "entry_id": str(entry["id"])}
+    return notice
 
 
 def notification_text(run: Mapping[str, Any]) -> tuple[str, str]:

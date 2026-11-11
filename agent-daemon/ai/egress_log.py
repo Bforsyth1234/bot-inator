@@ -67,9 +67,11 @@ KIND_MCP_TOOL = "mcp_tool"
 KIND_SANDBOXED_TOOL = "sandboxed_tool"
 KIND_OPEN_URL = "open_url"
 KIND_MODEL_DOWNLOAD = "model_download"
+# #85: a text the iPhone remote sent to the user's own Messages thread.
+KIND_IMESSAGE = "imessage"
 KINDS = frozenset({
     KIND_INFERENCE, KIND_MCP_TOOL, KIND_SANDBOXED_TOOL, KIND_OPEN_URL,
-    KIND_MODEL_DOWNLOAD,
+    KIND_MODEL_DOWNLOAD, KIND_IMESSAGE,
 })
 PERSONAL_SENT = "sent"
 PERSONAL_REPLACED = "replaced"
@@ -692,7 +694,7 @@ def model_download(
 
 __all__ = [
     "COLUMNS", "DB_PATH_ENV", "DEFAULT_MAX_ROWS", "EgressLog", "KEEP_TEXT_KEY",
-    "KINDS", "KIND_INFERENCE", "KIND_MCP_TOOL", "KIND_MODEL_DOWNLOAD",
+    "KINDS", "KIND_IMESSAGE", "KIND_INFERENCE", "KIND_MCP_TOOL", "KIND_MODEL_DOWNLOAD",
     "KIND_OPEN_URL", "KIND_SANDBOXED_TOOL", "LIMIT_NOTE", "NOTHING_TODAY",
     "PERSONAL_REPLACED", "PERSONAL_SENT", "RETENTION_DAYS", "TEXT_RETENTION_DAYS",
     "clear", "default_db_path", "default_log", "host_of", "keep_text_enabled",

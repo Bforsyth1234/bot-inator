@@ -30,6 +30,8 @@ from events.event_bus import ContextEvent, EventBus
 from schemas.ws_messages import (
     ApprovalRequest,
     ApprovalRequestPayload,
+    ApprovalResolved,
+    ApprovalResolvedPayload,
     ApprovalResponsePayload,
     CodeApprovalRequest,
     CodeApprovalRequestPayload,
@@ -48,6 +50,7 @@ from . import (
     activity_store, chat_context, preference_learning, prepared_offers, privacy, taint,
     tool_health, tool_summary,
 )
+from . import standing_rules
 from . import watches as watches_mod
 from .action_journal import is_undoable
 from .idea_outcomes import edit_facts, trigger_kind_of
@@ -180,6 +183,11 @@ _PATTERN_SOURCE_INTROS: dict[str, str] = {
 # #88: a watch the user wrote (``ai.watches``).
 _PATTERN_SOURCE_INTROS["watch"] = watches_mod.PATTERN_SOURCE_INTRO
 
+# #84: a tool the user demonstrated once ("Watch me", ``ai.demonstration``).
+from . import demonstration as demonstration_mod  # noqa: E402
+
+_PATTERN_SOURCE_INTROS["demonstration"] = demonstration_mod.PATTERN_SOURCE_INTRO
+
 
 class Orchestrator:
     """Drives the agent loop on top of an :class:`MLXEngine`."""
@@ -291,6 +299,18 @@ class Orchestrator:
         self.tool_health: Optional[Any] = None
         # #87: ``ai.delivery.Delivery`` (set by main.py): hold / cap / pause.
         self.delivery: Optional[Any] = None
+        # #78: ``ai.standing_rules.StandingRules`` and ``WatchStore.get``
+        # (set by main.py), and the raw metadata of the current event (a
+        # rule's spec is derived from structured fields only).
+        self.standing_rules: Optional[Any] = None
+        self.watch_lookup: Optional[Callable[[str], Any]] = None
+        self._current_event_meta: dict[str, Any] = {}
+        # #84: ``ai.demonstration.DemonstrationController`` (set by main.py).
+        self.demonstration: Optional[Any] = None
+        # #85: ``events.remote_channel.RemoteChannel`` (set by main.py), and
+        # whether the current chat turn came from the own Messages thread.
+        self.remote_channel: Optional[Any] = None
+        self._turn_from_phone: bool = False
         self._agent: Any = None
 
     def mark_tool_ready_for_rerun(self, tool_name: str) -> None:
@@ -819,6 +839,16 @@ class Orchestrator:
             except Exception:
                 logger.exception("Invalid notice dropped: %r", event.metadata)
             return
+        # #84: while the user demonstrates a task, the recording takes step
+        # events and defers the rest (released when it stops), before #87
+        # delivery, the activity history, a standing rule or any turn.
+        demo = getattr(self, "demonstration", None)
+        if demo is not None:
+            try:
+                if await demo.intercept(event):
+                    return
+            except Exception:
+                logger.exception("demonstration.intercept failed; handling the event")
         # #87: right-moment delivery decides first, before any turn starts:
         # a held / capped / paused event costs no model call, no thought, no
         # observer and (while paused) no activity-history row.
@@ -844,14 +874,36 @@ class Orchestrator:
             except Exception:
                 logger.exception("activity_store.record failed")
         event_id = event.metadata.get("event_id") or f"evt_{uuid.uuid4().hex[:12]}"
+        # #78: a standing rule the user turned on runs here, without a card
+        # and without a model (deterministic match + fixed arguments). Only
+        # after #87 delivery let the event through: a paused, held or capped
+        # event never reaches a rule (and the store checks Pause again).
+        rules = getattr(self, "standing_rules", None)
+        if rules is not None and event.event_type in standing_rules.RULE_EVENT_TYPES:
+            mcp = getattr(self, "mcp_manager", None)
+            try:
+                runs = await asyncio.to_thread(
+                    rules.run_for_event, event,
+                    journal=getattr(self, "action_journal", None), event_id=event_id,
+                    dynamic_names=set(getattr(self, "_dynamic_tool_names", ())),
+                    is_mcp=lambda n: bool(mcp is not None and mcp.server_of(n)),
+                )
+            except Exception:
+                logger.exception("standing_rules.run_for_event failed")
+                runs = []
+            if runs and runs[0].get("entry") is not None:
+                await self._after_rule_run(event_id, runs[0])
+                return
         self._turn_tool_calls = set()
         self._turn_done = {}
+        self._turn_from_phone = False
         # #81: a new turn; an event carrying outside text marks it now.
         shield = getattr(self, "_taint", None)
         if shield is not None:
             shield.begin_turn("event", event_type=event.event_type, metadata=event.metadata)
         self._turn_kind = "event"
         self._current_event_type = event.event_type
+        self._current_event_meta = dict(event.metadata or {})
         self._current_idea = None
         # Personal text an idea may quote later (#51).
         privacy.note_personal_event(event)
@@ -880,7 +932,8 @@ class Orchestrator:
             # #72: the user's denials say "don't offer this here": refuse
             # before any card (never instead of one).
             offered = _offered_tool(meta)
-            if offered and await asyncio.to_thread(
+            # #84: a tool the user just demonstrated is their own request.
+            if offered and meta.get("source") != demonstration_mod.SOURCE and await asyncio.to_thread(
                 self._learned_refusal, offered, trigger_kind_of("pattern_detected", meta)
             ):
                 await self._emit_thought(
@@ -912,7 +965,10 @@ class Orchestrator:
             return
 
         if event.event_type == "user_message":
-            await self._handle_user_message(event, event_id)
+            try:
+                await self._handle_user_message(event, event_id)
+            finally:
+                self._turn_from_phone = False
             return
 
         if event.event_type == "daily_brief":
@@ -952,6 +1008,26 @@ class Orchestrator:
         result = await self._run_agent(event_id, prompt, max_steps=max_steps)
         await self._emit_thought(event_id, "complete", str(result)[:500])
 
+    async def _after_rule_run(self, event_id: str, run: dict[str, Any]) -> None:
+        """#78: announce one automatic run (thought, notice with Undo, and a
+        macOS notification). The run is already journaled (source="rule")."""
+        await self._emit_thought(
+            event_id, "tool_result",
+            f"{run['tool']} (standing rule {run['rule_id']}, no card): {run['result']}",
+        )
+        try:
+            self.publish_notice(standing_rules.run_notice(run))
+        except Exception:
+            logger.exception("standing rule notice failed")
+        title, body = standing_rules.notification_text(run)
+        try:
+            from tools.show_notification import show_notification
+
+            # The user turned the rule on: its announcement needs no card.
+            await asyncio.to_thread(show_notification, title, body)
+        except Exception:
+            logger.exception("standing rule notification failed")
+
     async def _handle_user_message(
         self, event: ContextEvent, event_id: str
     ) -> None:
@@ -963,6 +1039,12 @@ class Orchestrator:
         window can re-hydrate on reconnect.
         """
         text = (event.metadata.get("text") or "").strip()
+        # #85: a turn the own Messages thread started is answered there, and
+        # its cards may be mirrored to the phone. Only the remote channel
+        # sets this source (the WS user_message never carries one).
+        from events.remote_channel import REMOTE_SOURCE
+
+        self._turn_from_phone = (event.metadata or {}).get("source") == REMOTE_SOURCE
         if self.memory is not None and text:
             try:
                 await asyncio.to_thread(
@@ -979,9 +1061,20 @@ class Orchestrator:
 
         # #74: the quick-ask panel's context (front app, window, and the
         # selection only when the user included it) for this turn only.
+        ctx = chat_context.context_from_metadata(event.metadata)
+        if ctx and ctx.get("selection_source") == "window":
+            # #89: "Include this window's text": the daemon reads the window
+            # itself (never-watch, browser, secure-field and 7c rules apply).
+            from tools import read_front_window as screen_text
+
+            try:
+                ctx = await asyncio.to_thread(screen_text.context_with_window_text, ctx)
+            except Exception:
+                logger.exception("reading the front window for quick ask failed")
+                ctx = {k: v for k, v in ctx.items() if k not in ("selection", "selection_source")}
         prompt = chat_context.with_context(
             self._build_chat_prompt(event, memories=memories),
-            chat_context.context_from_metadata(event.metadata),
+            ctx,
             redact_selection=privacy.should_redact("main"),
         )
         await self._emit_thought(
@@ -1000,7 +1093,7 @@ class Orchestrator:
         shield = getattr(self, "_taint", None)
         if shield is not None:
             shield.begin_turn("chat", user_text=text)
-            shield.mark_context(chat_context.context_from_metadata(event.metadata))
+            shield.mark_context(ctx)
         self._turn_kind = "chat"
         result = await self._run_agent(event_id, prompt, max_steps=6)
         reply = str(result) if result is not None else ""
@@ -1031,6 +1124,12 @@ class Orchestrator:
             reply = str(result) if result is not None else reply
 
         await self._emit_thought(event_id, "complete", reply[:500])
+        remote = getattr(self, "remote_channel", None)
+        if self._turn_from_phone and remote is not None:
+            try:
+                await asyncio.to_thread(remote.send_reply, event_id, reply)
+            except Exception:
+                logger.exception("remote channel: reply not sent")
 
         for source in self.idea_sources:
             observe_chat = getattr(source, "observe_chat", None)
@@ -1410,9 +1509,16 @@ class Orchestrator:
                     reasoning=reasoning,
                     **extra,
                 )
+                # #85: a card mirrored to the phone waits up to the remote
+                # timeout; the worker must outlive it.
+                remote = getattr(orchestrator, "remote_channel", None)
+                wait_s = max(
+                    float(orchestrator.approval_timeout),
+                    float(getattr(remote, "timeout_s", 0.0) or 0.0),
+                ) + 15
                 approved, edited = asyncio.run_coroutine_threadsafe(
                     coro, loop
-                ).result(timeout=orchestrator.approval_timeout + 5)
+                ).result(timeout=wait_s)
                 if not approved:
                     return {"skipped": True, "reason": "user_denied"}
                 call_args, call_kwargs = orchestrator._apply_edits(
@@ -1601,6 +1707,25 @@ class Orchestrator:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[ApprovalResponsePayload] = loop.create_future()
         self._pending[request_id] = fut
+        # #85: while the Mac is idle (or the turn came from the phone) an
+        # eligible card is also sent to the own Messages thread with a code;
+        # "yes <code>" resolves this same future. Never code review,
+        # generate_custom_tool, run_shortcut, origin notes or action bundles
+        # (``RemoteChannel.eligible``). A mirrored card waits longer.
+        remote = getattr(self, "remote_channel", None)
+        timeout = float(self.approval_timeout)
+        if remote is not None:
+            try:
+                code = await asyncio.to_thread(
+                    remote.mirror_approval, request_id, tool_name, tool_args,
+                    reasoning=reasoning, summary=summary, origin_notes=origin_notes,
+                    actions=actions, from_phone=bool(getattr(self, "_turn_from_phone", False)),
+                )
+            except Exception:
+                logger.exception("remote channel: mirror failed")
+                code = None
+            if code:
+                timeout = max(timeout, float(remote.timeout_s))
 
         msg = ApprovalRequest(
             seq=self._next_seq(),
@@ -1612,7 +1737,7 @@ class Orchestrator:
                 tool_args=tool_args,
                 reasoning=reasoning,
                 summary=summary or None,
-                timeout_seconds=int(self.approval_timeout),
+                timeout_seconds=int(timeout),
                 actions=actions or None,
                 # #83: History can undo it -> the small no-focus panel. A
                 # card shaped by outside text (#81) keeps the full window.
@@ -1634,12 +1759,23 @@ class Orchestrator:
         await self._send(msg)
 
         try:
-            resp = await asyncio.wait_for(fut, timeout=self.approval_timeout)
+            resp = await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
             logger.info("Approval %s timed out", request_id)
             self._record_offer_verdict(offer_id, "timed_out")
+            await self._send_approval_resolved(request_id, "timed_out")
             return False, None
+        finally:
+            if remote is not None:
+                try:
+                    remote.forget(request_id)
+                except Exception:
+                    logger.exception("remote channel: forget failed")
+        # Every client (and the phone's answer) closes the same card.
+        await self._send_approval_resolved(
+            request_id, "approved" if resp.approved else "declined", resp.user_note,
+        )
         self._record_offer_verdict(
             offer_id, "approved" if resp.approved else "declined"
         )
@@ -1659,6 +1795,22 @@ class Orchestrator:
                 bool(resp.approved),
             )
         return bool(resp.approved), resp.edited_args
+
+    async def _send_approval_resolved(
+        self, request_id: str, outcome: str, note: Optional[str] = None,
+    ) -> None:
+        """#85: tell every client the card is answered (or timed out), so a
+        card answered from the phone or another window closes on the Mac."""
+        try:
+            frame = ApprovalResolved(
+                seq=self._next_seq(), timestamp=_now_iso(),
+                payload=ApprovalResolvedPayload(
+                    request_id=request_id, outcome=outcome, note=note or None,
+                ),
+            )
+            await self._send(frame)
+        except Exception:
+            logger.exception("approval_resolved not sent")
 
     # ---- suggestion outcomes + decision log (#79) ------------------------
 
@@ -1703,25 +1855,48 @@ class Orchestrator:
         self, tool_name: str, tool_args: dict[str, Any], approved: bool,
         edited_args: Optional[dict[str, Any]],
     ) -> None:
-        """Log an approve / deny (with edited field facts, never values)."""
+        """Log an approve / deny (with edited field facts, never values).
+
+        #78: the decision carries the fixed argument pattern a standing rule
+        would have (derived from structured fields only), and a clean
+        approval may raise an "Always do this?" offer. An offer never makes
+        a rule: only the user's accept route does.
+        """
         log = getattr(self, "approval_decisions", None)
         if log is None:
             return
         original = tool_args.get("kwargs") or {}
-        edited = (edited_args or {}).get("kwargs") if edited_args else None
-        facts = edit_facts(original, edited) if approved and isinstance(edited, dict) else {}
+        effective = standing_rules.effective_kwargs(tool_args, edited_args)
+        facts = edit_facts(original, effective) if approved and edited_args else {}
+        event_type = getattr(self, "_current_event_type", "") or ""
+        idea = getattr(self, "_current_idea", None) or {}
+        trigger = trigger_kind_of(event_type, idea)
+        try:
+            spec = standing_rules.derive_spec(
+                tool_name, original, trigger, event_type=event_type,
+                event_meta=getattr(self, "_current_event_meta", None) or {},
+                idea_meta=idea, watch_lookup=getattr(self, "watch_lookup", None),
+            )
+        except Exception:
+            logger.exception("standing_rules.derive_spec failed")
+            spec = None
         try:
             log.record(
-                tool_name,
-                trigger_kind_of(
-                    getattr(self, "_current_event_type", "") or "",
-                    getattr(self, "_current_idea", None) or {},
-                ),
-                "approved" if approved else "denied",
-                facts,
+                tool_name, trigger, "approved" if approved else "denied", facts,
+                arg_pattern=standing_rules.arg_pattern(spec) if spec else None,
             )
         except Exception:
             logger.exception("approval_decisions.record failed")
+            return
+        rules = getattr(self, "standing_rules", None)
+        if approved and not facts and spec is not None and rules is not None:
+            try:
+                offer = rules.maybe_offer(log, trigger, tool_name, spec)
+            except Exception:
+                logger.exception("standing_rules.maybe_offer failed")
+                offer = None
+            if offer:
+                self.publish_notice(standing_rules.offer_notice(offer))
 
     # ---- learned preferences (#72) -----------------------------------------
 

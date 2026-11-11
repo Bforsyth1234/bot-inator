@@ -31,6 +31,7 @@ struct EgressRow: Codable, Identifiable, Equatable {
         case "sandboxed_tool": return "Tool \(tool ?? "")"
         case "open_url": return "Opened in browser"
         case "model_download": return "Model download \(model ?? "")"
+        case "imessage": return "iMessage to you"
         default: return kind
         }
     }

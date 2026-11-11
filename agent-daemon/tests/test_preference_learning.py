@@ -17,7 +17,13 @@ from ai.memory import Memory, _fallback_embed
 from ai.orchestrator import Orchestrator
 from events.event_bus import ContextEvent
 from routes import preferences
+from schemas.ws_messages import ApprovalRequest
 from tests.test_wave13_wiring import _answer_soon, _approval_orch
+
+
+def _cards(orch: Orchestrator) -> int:
+    # Approval cards only: #85 also sends an ``approval_resolved`` frame.
+    return sum(isinstance(m, ApprovalRequest) for m in orch.sent)  # type: ignore[attr-defined]
 
 
 class _Clock:
@@ -117,7 +123,7 @@ def test_no_fourth_offer_after_three_denials(mem) -> None:
             verdicts.append(ok)
             orch._pending.clear()  # the WS resolver pops it in the app
             pl.learn(orch.approval_decisions, mem)
-        cards = len(orch.sent)
+        cards = _cards(orch)
         return verdicts, _gate(orch, "create_reminder"), cards
 
     verdicts, fourth, cards = asyncio.run(run())
@@ -140,7 +146,7 @@ def test_suppression_never_approves_anything(log, mem) -> None:
         assert _gate(orch, "create_reminder") is None
         _answer_soon(orch, approved=True)
         await orch._request_approval("e", "create_reminder", {"kwargs": {}}, "r")
-        return len(orch.sent)
+        return _cards(orch)
     assert asyncio.run(run()) == 1
 
 

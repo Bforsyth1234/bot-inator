@@ -35,6 +35,8 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SOURCES = {
     "selection": "text the user selected",
     "clipboard": "text on the user's clipboard",
+    # #89: quick-ask "Include this window's text" (the daemon reads it).
+    "window": "text of the window in front (read through Accessibility)",
 }
 
 

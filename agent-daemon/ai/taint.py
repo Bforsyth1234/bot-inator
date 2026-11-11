@@ -319,6 +319,9 @@ class TurnTaint:
             return False
         if ctx.get("selection_source") == "clipboard":
             self._add("clipboard", "text on the clipboard", [selection])
+        elif ctx.get("selection_source") == "window":
+            # #89: quick-ask "Include this window's text".
+            self._add("window", "the window", [selection])
         else:
             self._add("selection", "the selected text", [selection])
         return True

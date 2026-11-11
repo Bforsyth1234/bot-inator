@@ -515,9 +515,13 @@ PERMISSIONS: list[Permission] = [
             "then Develop → Allow JavaScript from Apple Events."),
         request_kind="instructions",
     ),
+    # #85 (user, 2026-11-10, answer A): the iPhone remote sends to the
+    # user's OWN handle only. tools/send_imessage.py stays unregistered.
+    _automation("automation_messages", "Messages", "com.apple.iChat",
+                "Send answers and approval cards to your own Messages thread "
+                "(iPhone remote, only when it is on).",
+                ("events/remote_channel.py",)),
 ]
-# Not listed: Automation → Messages. tools/send_imessage.py is not a
-# registered tool (the user doesn't want it); add a row if it ever is.
 
 _BY_ID = {p.id: p for p in PERMISSIONS}
 

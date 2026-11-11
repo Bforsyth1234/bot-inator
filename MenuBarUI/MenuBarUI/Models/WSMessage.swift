@@ -193,9 +193,31 @@ enum NoticeLevel: String, Codable, Hashable {
 }
 
 struct NoticeAction: Codable, Hashable {
-    /// Only `open_settings` today: opens `url` (a System Settings pane).
+    /// `open_settings` opens `url` (a System Settings pane). `undo` (#78):
+    /// one-click Undo of the standing-rule run journaled as `entryId`
+    /// (`POST /api/rules/runs/{entry_id}/undo`).
     let kind: String
-    let url: String
+    var url: String? = nil
+    var entryId: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case kind, url
+        case entryId = "entry_id"
+    }
+}
+
+/// Server→client (#85): the card `requestId` was answered (here, in another
+/// window, or from the phone) or timed out. A card still open closes.
+struct ApprovalResolvedPayload: Codable, Hashable {
+    let requestId: String
+    /// `approved`, `declined` or `timed_out`.
+    let outcome: String
+    var note: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case outcome, note
+    }
 }
 
 /// Server→client hint that `GET /api/tools` changed (#29).
@@ -235,6 +257,10 @@ enum CommandAction: String, Codable, Hashable {
     case reloadModel = "reload_model"
     case clearMemory = "clear_memory"
     case reloadDynamicTools = "reload_dynamic_tools"
+    /// #84 "Watch me".
+    case demonstrationStart = "demonstration_start"
+    case demonstrationStop = "demonstration_stop"
+    case demonstrationCancel = "demonstration_cancel"
 }
 
 /// Server→client request to review AI-generated Python tool source.
@@ -526,6 +552,16 @@ enum WSMessage: Codable, Hashable {
     case screenTextRequest(seq: Int, timestamp: Date, payload: ScreenTextRequestPayload)
     case screenTextResponse(seq: Int, timestamp: Date, payload: ScreenTextResponsePayload)
     case screenTextStatus(seq: Int, timestamp: Date, payload: ScreenTextStatusPayload)
+    /// #85: a card was answered anywhere (incl. the phone) or timed out.
+    case approvalResolved(seq: Int, timestamp: Date, payload: ApprovalResolvedPayload)
+    /// #84 "Watch me" (payload structs live in DemonstrationPanel.swift).
+    case demonstrationTrace(seq: Int, timestamp: Date, payload: DemonstrationTracePayload)
+    case demonstrationDraft(seq: Int, timestamp: Date, payload: DemonstrationDraftPayload)
+    /// #86 meeting notes (payload structs live in MeetingRecorder.swift).
+    case meetingRecordOffer(seq: Int, timestamp: Date, payload: MeetingRecordOfferPayload)
+    case meetingRecordStop(seq: Int, timestamp: Date, payload: MeetingRecordStopPayload)
+    case meetingRecordState(seq: Int, timestamp: Date, payload: MeetingRecordStatePayload)
+    case meetingAudioReady(seq: Int, timestamp: Date, payload: MeetingAudioReadyPayload)
 
     var seq: Int {
         switch self {
@@ -539,7 +575,11 @@ enum WSMessage: Codable, Hashable {
              .calendarRequest(let seq, _, _), .calendarResponse(let seq, _, _),
              .calendarStatus(let seq, _, _),
              .screenTextRequest(let seq, _, _), .screenTextResponse(let seq, _, _),
-             .screenTextStatus(let seq, _, _):
+             .screenTextStatus(let seq, _, _),
+             .approvalResolved(let seq, _, _),
+             .demonstrationTrace(let seq, _, _), .demonstrationDraft(let seq, _, _),
+             .meetingRecordOffer(let seq, _, _), .meetingRecordStop(let seq, _, _),
+             .meetingRecordState(let seq, _, _), .meetingAudioReady(let seq, _, _):
             return seq
         }
     }
@@ -556,7 +596,11 @@ enum WSMessage: Codable, Hashable {
              .calendarRequest(_, let ts, _), .calendarResponse(_, let ts, _),
              .calendarStatus(_, let ts, _),
              .screenTextRequest(_, let ts, _), .screenTextResponse(_, let ts, _),
-             .screenTextStatus(_, let ts, _):
+             .screenTextStatus(_, let ts, _),
+             .approvalResolved(_, let ts, _),
+             .demonstrationTrace(_, let ts, _), .demonstrationDraft(_, let ts, _),
+             .meetingRecordOffer(_, let ts, _), .meetingRecordStop(_, let ts, _),
+             .meetingRecordState(_, let ts, _), .meetingAudioReady(_, let ts, _):
             return ts
         }
     }
@@ -582,6 +626,13 @@ enum WSMessage: Codable, Hashable {
         case screenTextRequest = "screen_text_request"
         case screenTextResponse = "screen_text_response"
         case screenTextStatus = "screen_text_status"
+        case approvalResolved = "approval_resolved"
+        case demonstrationTrace = "demonstration_trace"
+        case demonstrationDraft = "demonstration_draft"
+        case meetingRecordOffer = "meeting_record_offer"
+        case meetingRecordStop = "meeting_record_stop"
+        case meetingRecordState = "meeting_record_state"
+        case meetingAudioReady = "meeting_audio_ready"
     }
 
     init(from decoder: Decoder) throws {
@@ -639,6 +690,27 @@ enum WSMessage: Codable, Hashable {
         case .screenTextStatus:
             self = .screenTextStatus(seq: seq, timestamp: timestamp,
                                      payload: try container.decode(ScreenTextStatusPayload.self, forKey: .payload))
+        case .approvalResolved:
+            self = .approvalResolved(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(ApprovalResolvedPayload.self, forKey: .payload))
+        case .demonstrationTrace:
+            self = .demonstrationTrace(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(DemonstrationTracePayload.self, forKey: .payload))
+        case .demonstrationDraft:
+            self = .demonstrationDraft(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(DemonstrationDraftPayload.self, forKey: .payload))
+        case .meetingRecordOffer:
+            self = .meetingRecordOffer(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(MeetingRecordOfferPayload.self, forKey: .payload))
+        case .meetingRecordStop:
+            self = .meetingRecordStop(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(MeetingRecordStopPayload.self, forKey: .payload))
+        case .meetingRecordState:
+            self = .meetingRecordState(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(MeetingRecordStatePayload.self, forKey: .payload))
+        case .meetingAudioReady:
+            self = .meetingAudioReady(seq: seq, timestamp: timestamp,
+                        payload: try container.decode(MeetingAudioReadyPayload.self, forKey: .payload))
         }
     }
 
@@ -694,6 +766,27 @@ enum WSMessage: Codable, Hashable {
             try container.encode(payload, forKey: .payload)
         case .screenTextStatus(_, _, let payload):
             try container.encode(MessageType.screenTextStatus, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .approvalResolved(_, _, let payload):
+            try container.encode(MessageType.approvalResolved, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .demonstrationTrace(_, _, let payload):
+            try container.encode(MessageType.demonstrationTrace, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .demonstrationDraft(_, _, let payload):
+            try container.encode(MessageType.demonstrationDraft, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .meetingRecordOffer(_, _, let payload):
+            try container.encode(MessageType.meetingRecordOffer, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .meetingRecordStop(_, _, let payload):
+            try container.encode(MessageType.meetingRecordStop, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .meetingRecordState(_, _, let payload):
+            try container.encode(MessageType.meetingRecordState, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .meetingAudioReady(_, _, let payload):
+            try container.encode(MessageType.meetingAudioReady, forKey: .type)
             try container.encode(payload, forKey: .payload)
         }
     }

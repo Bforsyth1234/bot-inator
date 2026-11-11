@@ -66,3 +66,7 @@ os.environ.setdefault("AGENT_WATCHES_PATH", os.path.join(_wave15_tmp, "watches.j
 # #87: the developer's real calendar, running apps and key presses must not
 # hold test events (Pause still works).
 os.environ.setdefault("AGENT_DELIVERY_BUSY_CHECKS", "0")
+# Wave 16: keep the developer's real ~/.bot-inator stores out of tests:
+# standing rules (#78).
+_wave16_tmp = _tempfile.mkdtemp(prefix="bot-inator-w16-")
+os.environ.setdefault("AGENT_STANDING_RULES_PATH", os.path.join(_wave16_tmp, "standing_rules.json"))
