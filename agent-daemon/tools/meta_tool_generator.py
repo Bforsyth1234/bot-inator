@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -782,6 +783,39 @@ def _name_collision_error(tool_name: str, existing: dict[str, str]) -> dict[str,
     }
 
 
+_GIT_NOT_INSTALLED = (
+    "git isn't installed (install the Xcode command line tools: "
+    "xcode-select --install); the tool was installed without version history"
+)
+_git_ok_cache: Optional[bool] = None
+
+
+def _git_available() -> bool:
+    """True when a real git can run without macOS's "install developer
+    tools" dialog.
+
+    On a Mac without the Xcode command line tools ``/usr/bin/git`` is a
+    stub that pops that dialog when run (#96: the bundled app reaches such
+    Macs). ``xcode-select -p`` answers without prompting. Cached per process.
+    """
+    global _git_ok_cache
+    if _git_ok_cache is not None:
+        return _git_ok_cache
+    git = shutil.which("git")
+    if git is None:
+        _git_ok_cache = False
+    elif os.path.realpath(git) == "/usr/bin/git":
+        try:
+            probe = subprocess.run(["/usr/bin/xcode-select", "-p"], capture_output=True,
+                                   text=True, timeout=5, stdin=subprocess.DEVNULL)
+            _git_ok_cache = probe.returncode == 0
+        except Exception:
+            _git_ok_cache = False
+    else:
+        _git_ok_cache = True
+    return _git_ok_cache
+
+
 def _git_identity_args() -> list[str]:
     """Return ``-c user.name=... -c user.email=...`` for the nested commit.
 
@@ -790,6 +824,8 @@ def _git_identity_args() -> list[str]:
     identity when no global config is set (fresh machine, CI, etc.).
     """
     def _global(key: str) -> str:
+        if not _git_available():
+            return ""
         try:
             out = subprocess.run(
                 ["git", "config", "--global", "--get", key],
@@ -830,6 +866,8 @@ def _git_commit(directory: Path, filename: str, message: str) -> tuple[bool, str
     """
     if not directory.exists():
         return False, f"directory missing: {directory}"
+    if not _git_available():
+        return False, _GIT_NOT_INSTALLED
     try:
         def _run(*args: str) -> "subprocess.CompletedProcess[str]":
             return subprocess.run(
@@ -1405,6 +1443,8 @@ def repair_generated_tool(tool_name: str) -> dict[str, Any]:
 
 
 def _git_read(directory: Path, *args: str) -> "subprocess.CompletedProcess[str]":
+    if not _git_available():
+        return subprocess.CompletedProcess(["git", *args], 1, "", _GIT_NOT_INSTALLED)
     return subprocess.run(
         ["git", *_GIT_ISOLATION_ARGS, *args], cwd=directory, capture_output=True,
         text=True, timeout=10, stdin=subprocess.DEVNULL,

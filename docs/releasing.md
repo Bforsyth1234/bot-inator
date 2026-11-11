@@ -137,6 +137,8 @@ gh release create v0.2.0 dist/bot-inator-0.2.0.zip --title "bot-inator 0.2.0" --
   asks again for Calendar, Microphone and the rest the first time.
 - **The app shows "the assistant couldn't start"**: Settings → App → Show
   log. "address already in use" means something else holds port 8000.
-- **A generated tool won't commit to git** on a Mac without the Xcode
-  command line tools: `/usr/bin/git` is only a stub there (see #96 in
-  `todo.md`).
+- **"git isn't installed"** after installing a generated tool: on a Mac
+  without the Xcode command line tools the daemon skips the tool's version
+  history instead of running the `/usr/bin/git` stub (which would pop up
+  "install developer tools"). The tool still works; run
+  `xcode-select --install` to get history back.
