@@ -20,6 +20,8 @@ Isolation is layered, because the code has not been approved yet:
 * Inside the probe, ``subprocess`` is replaced by a recorder that does
   nothing and reports success, and ``urlopen`` refuses with a recorded
   error, so tools that shell out to ``osascript`` still run end to end.
+* ``tools.mcp`` is a recorder too (#112): ``call_mcp`` returns placeholder
+  text and never reaches the daemon or an MCP server.
 
 If ``sandbox-exec`` is missing or fails its self-test, the dry run is
 skipped (returns no problems): unapproved code never runs unsandboxed.
@@ -57,7 +59,9 @@ PLANNER_SYSTEM_PROMPT = (
     "- HOME is a fresh, empty folder containing ONLY the files you list;\n"
     "- every shell command (osascript, open, hdiutil, ...) is stubbed: it "
     "does nothing and reports success with empty output;\n"
-    "- the network is off.\n\n"
+    "- the network is off;\n"
+    "- every MCP tool call (call_mcp) is stubbed: it returns placeholder "
+    "text and does nothing.\n\n"
     "Write at most 8 fixture files (each one a different case, never a "
     "numbered series) and 1 to 3 calls that check the spec, including "
     "edge cases a buggy version would get wrong: names that match more "
@@ -86,7 +90,7 @@ _PROBE = r'''
 import json, subprocess, sys, threading, time, traceback, urllib.request, urllib.error
 root, path, name, kwargs_json = sys.argv[1:5]
 sys.path.insert(0, root)
-out = {"exception": None, "thread_errors": [], "subprocess": [], "network": [], "result": None}
+out = {"exception": None, "thread_errors": [], "subprocess": [], "network": [], "mcp": [], "result": None}
 
 class _Done:
     returncode = 0
@@ -118,6 +122,20 @@ def _no_network(url, *a, **k):
     out["network"].append(str(getattr(url, "full_url", url)))
     raise urllib.error.URLError("network is disabled in the dry run")
 urllib.request.urlopen = _no_network
+
+# #112: MCP calls never reach a server in the dry run (the code is not
+# approved yet): ``tools.mcp`` is a recorder that returns a placeholder.
+import types as _types
+_fake_mcp = _types.ModuleType("tools.mcp")
+class McpCallRefused(RuntimeError):
+    pass
+def _fake_call_mcp(name, arguments=None):
+    out["mcp"].append({"name": str(name), "arguments": arguments})
+    return "[dry run: the MCP tool %s was not called; placeholder result]" % name
+_fake_mcp.call_mcp = _fake_call_mcp
+_fake_mcp.McpCallRefused = McpCallRefused
+_fake_mcp.RELAY_SOCKET_ENV = "AGENT_TOOL_RELAY_SOCKET"
+sys.modules["tools.mcp"] = _fake_mcp
 
 def _hook(args):
     msg = f"{args.exc_type.__name__}: {args.exc_value}"
@@ -421,6 +439,7 @@ def evaluate_call(call: DryRunCall, out: dict, after: set[str], label: str) -> D
             call.expect_status
             and result.get("status") != call.expect_status
             and not out.get("network")  # network is off, so errors are expected
+            and not out.get("mcp")  # #112: MCP results are placeholders
         ):
             soft.append(
                 f"{label}: returned status {result.get('status')!r} "

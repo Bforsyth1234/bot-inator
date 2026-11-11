@@ -306,7 +306,11 @@ HOOK_POINTS: dict[str, str] = {
     "ai/vision_engine.py": "_answer_cloud",
 }
 # file -> why a network import there sends nothing for the ledger.
-EXEMPT: dict[str, str] = {}
+EXEMPT: dict[str, str] = {
+    # #112: a unix socket to the daemon's per-call sandbox relay, not the
+    # network; the relayed call's row is McpManager.call_tool's (above).
+    "tools/mcp.py": "AF_UNIX socket to the sandbox relay only",
+}
 
 
 def _network_import(node: ast.AST) -> Optional[str]:

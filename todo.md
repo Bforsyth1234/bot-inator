@@ -730,7 +730,7 @@ Verify:
   it twice → a repair card with the diff → Approve → it runs.
 Deviations:
 
-#112 — Generated tools can call enabled MCP tools (through a daemon relay) [~]
+#112 — Generated tools can call enabled MCP tools (through a daemon relay) [~] live
 Wave: 21 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user ("can a generated tool access mcp servers?" → "Yes, add it")
 Ask: Let a generated tool use the MCP tools the user switched on (e.g.
 Playwright MCP for the browser), so a browser task done once in chat can
@@ -798,7 +798,71 @@ Verify:
 ⚬ pytest gate (rule 8).
 ⚬ Live: with Playwright MCP enabled, ask for a tool that opens a page and
   returns its title → review → run → the title comes back.
+Results (subagent, wave 21 slot A, 2026-11-11):
+⚬ Child side: new `tools/mcp.py` (stdlib only): `call_mcp(name, arguments)`
+  sends `{"cmd": "mcp", ...}` on the per-call socket named by
+  `AGENT_TOOL_RELAY_SOCKET` (the only env var added to the child) and
+  returns the text, or raises `McpCallRefused`. No socket (daemon process:
+  trusted tool or `AGENT_TOOL_SANDBOX=0`) → raises.
+⚬ `tools/tool_sandbox.py`: `mcp_tool_names(source)` = string literals passed
+  to `call_mcp(...)` (first arg or `name=`; `as` aliases and
+  `<mod>.call_mcp` count; concatenation / f-string / variable never do),
+  read at load into `SandboxedTool.mcp_names`. `_OpenProxy` answers
+  `cmd: mcp` through the call's relay: name not in `mcp_names` → refused;
+  else `meta_tool_generator._ORCHESTRATOR.relay_mcp_call(...)`. Time spent
+  in a relayed call does not count toward `AGENT_TOOL_SANDBOX_TIMEOUT` (a
+  card can wait for the user), capped at 1800 s per call
+  (`MAX_RELAY_PAUSE_SECONDS`) so a loop of relayed calls can't keep a child
+  alive. No new executables or profile rules.
+⚬ `ai/mcp_client.py`: `McpManager.relay_call(name, args, allowed=, ask=)`:
+  literal check again, loaded NOW, `ask` (a card) unless the user marked it
+  "runs without asking", then `call_tool` (ledger row, header, truncation,
+  cloud redaction, unchanged). `call_tool` / the trusted path untouched.
+⚬ `ai/orchestrator.py`: `relay_mcp_call` (≈45 lines): the card ("The
+  generated tool 'x' wants to call srv__tool (a tool from the MCP server
+  'srv')"), card edits honoured, then `_taint.mark_read(..., is_mcp=True)`.
+⚬ Drafting prompt: enabled MCP tools (those in `orchestrator.tools`) get a
+  section with the import line, `call: call_mcp("srv__tool", {"arg": type})`
+  and the literal-name rule. Dry run: `tools.mcp` is a recorder returning
+  placeholder text (`out["mcp"]`); an expected-status mismatch is not
+  flagged after MCP calls; the planner prompt says so.
+⚬ Tests: new `tests/test_mcp_relay.py` (19; real sandbox-exec + real
+  `McpManager` on `fixtures/fake_mcp_server.py`): enabled + named → result
+  with header; unmarked → own card, declined → server never called; marked
+  → no extra card even in a marked turn; switched off (at load or at call
+  time), built at run time, in a variable, raw socket request → refused;
+  cloud redaction; one ledger row per call; turn marked; card wait vs
+  timeout, and its cap; dry run records and never relays; prompt lists
+  enabled MCP tools only. Full suite: 1906 passed
+  (`-p no:cacheprovider tests`, 104 s).
+⚬ Non-vacuity (each reverted, test file run, restored): literal check off in
+  both layers → 4 fail; sandbox layer only → 3 fail (mcp_client layer then
+  refuses with a different message; it is covered alone by the relay_call
+  test); enabled-now check → 3; card for unmarked → 4; card for marked → 2;
+  taint mark → 1; relay time counted → 1 (timeout test); dry-run fake → 1;
+  dry-run status leniency → 1; prompt section → 1; socket env → 10;
+  redaction in `_untrusted` → 1; pause cap removed → 1.
+⚬ For the runner: LIVING_SPEC §1/§6 row (sandbox relay for MCP; not in this
+  slot's file list).
 Deviations:
+⚬ Child-side module is a new file `tools/mcp.py` (not inside
+  `tool_sandbox.py`): it must import inside the child, where `tools` is a
+  stub package, and in the dry run. Stdlib only.
+⚬ Not in the plan, needed (rule 4): the call timeout pauses during a relayed
+  call. Without it a card waiting more than 60 s killed the child (the
+  timeout test fails without `_wait_line`).
+⚬ `tests/test_egress_log.py`: one `EXEMPT` entry for `tools/mcp.py` (its
+  `socket` import is the AF_UNIX relay; the row is `McpManager.call_tool`'s).
+  The network-site guard failed without it.
+⚬ `call_mcp` in the daemon process raises instead of calling
+  `McpManager.call_tool`: per the USER DECISION the trusted path is left
+  as it is, and an in-process fallback would have been a new ungated path
+  (also under `AGENT_TOOL_SANDBOX=0`). A tool trusted after review that uses
+  `call_mcp` therefore gets `McpCallRefused`; open for the user.
+Live check (not run): Playwright MCP enabled → "make a tool that opens a
+page and returns its title" → review shows `call_mcp("playwright__...")` →
+run → one card per unmarked Playwright call → the title comes back; the
+privacy ledger shows one `mcp_tool` row per call.
 
 ### New built-in tools
 
