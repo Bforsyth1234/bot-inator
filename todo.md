@@ -52,7 +52,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #69
+Next ID: #70
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -1894,6 +1894,67 @@ Results (wave 10, 2026-11-10): NO BUG, no code change in the memory files.
 Deviations: none.
 
 ### Security and providers
+
+#69 — MCP client: use other apps' MCP servers as tools [ ]
+Wave: — (not scheduled) · Agent: _ · Added: 2026-11-10 · Source: user
+Ask: "Should I add an MCP server to this app so it can communicate with
+other apps easier?" Answer given: the app should be an MCP CLIENT (it
+connects to other apps' servers: Slack, GitHub, Notion, Linear, Drive) so
+their tools sit next to the built-ins. That covers cloud services
+AppleScript can't reach and generated tools can't either (the sandbox
+withholds API keys). User: "Yes, add #69".
+DECISIONS (assistant, 2026-11-10; the user can overturn any):
+1. CLIENT ONLY. Not an MCP server: exposing bot-inator's tools to other AI
+   apps would be a second way past the approval cards. Revisit only with a
+   concrete use.
+2. STDIO FIRST. v1 connects only to local stdio servers (a child process,
+   no network listener). Remote (HTTP) servers come later, each behind its
+   own opt-in, because they send data off the Mac (invariant 7c).
+3. EVERY MCP TOOL IS APPROVAL-GATED BY DEFAULT (invariant 7a). A server's
+   read-only hint is the server's claim, not ours: the user marks a tool
+   "runs without asking" per tool in Tool Manager. Nothing from a server
+   may add itself to `READ_ONLY_TOOL_NAMES`.
+4. OFF UNTIL ENABLED, PER TOOL. A new server's tools are listed but not
+   loaded into the agent until the user switches them on, with a cap on
+   loaded MCP tools (start at 15): the local 8B main model picks tools
+   badly from a long list.
+5. TOOL RESULTS ARE UNTRUSTED TEXT. They can hold instructions; they never
+   cause an action without a card (the gate already enforces this for
+   non-read-only tools). Under a cloud engine, personal text passed to or
+   returned from a server follows #31/#52.
+6. Tool names are prefixed with the server name (`slack__post_message`) so
+   they can't shadow a built-in or a generated tool (#24).
+Approach (to decide when scheduled):
+1. Config: `~/.bot-inator/mcp_servers.json` (0600): name, command, args,
+   env. Secrets for a server live there, never in prompts or logs.
+2. New `ai/mcp_client.py`: start/stop each server, list its tools, wrap
+   each as a smolagents tool. smolagents 1.26.0 (installed) has
+   `MCPClient` and `ToolCollection.from_mcp`, and the `mcp` package is
+   installed; `mcpadapt` is NOT and may be required by them: check first.
+   A server that fails to start or dies is reported as a notice (#19), and
+   its tools are dropped with a `tools_changed` broadcast (#29).
+3. Orchestrator: MCP tools go through `_wrap_tool_for_approval` like any
+   built-in; the approval card shows the server name and raw arguments.
+4. Routes in a new `routes/mcp.py` (rule 12): list servers and tools,
+   enable/disable a tool, mark "runs without asking", add/remove a server.
+   New `McpServersView.swift` in Tool Manager or Settings.
+5. Start with one server the user would use daily; ask which.
+Files: new ai/mcp_client.py, new routes/mcp.py, new
+MenuBarUI/MenuBarUI/Views/McpServersView.swift, tests/test_mcp_client.py;
+runner: ai/orchestrator.py tool list, main.py start-up + router,
+requirements.txt, LIVING_SPEC.
+Verify:
+⚬ Tests with a fake stdio server (a tiny Python script in the test): tools
+  listed with the prefix; none loaded until enabled; an enabled tool call
+  raises an approval request; a tool hinted read-only is still gated; the
+  cap holds; a crashed server drops its tools and posts a notice; a name
+  that collides with a built-in is refused. Non-vacuity per rule 5.
+⚬ pytest gate; swiftc typecheck.
+⚬ Live: add one real server → its tools appear switched off → enable one →
+  ask for it in Chat → approval card names the server → it runs.
+Deviations:
+
+---
 
 #27 — HTTP API has no authentication [~] live [Q14]
 Wave: 6 · Agent: _ · Added: 2026-11-09 · Source: spec (§9 Q14)
