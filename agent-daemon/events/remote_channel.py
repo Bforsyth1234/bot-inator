@@ -35,6 +35,14 @@ Egress (7c): the channel is OFF by default (``AGENT_REMOTE``). Every message
 it sends is recorded in the privacy ledger (#82) with kind
 :data:`KIND_IMESSAGE`.
 
+Screenshots (#110): in a phone turn, ``take_screenshot`` and
+``look_at_screen`` hand their capture to :func:`add_capture`; it accepts
+only a file inside :func:`phone_capture_dir` that the daemon itself just
+wrote (:func:`new_capture_path`), never a path the model supplied.
+:meth:`RemoteChannel.send_reply` sends the text, then each capture as an
+attachment to the own handle (the path goes to osascript as argv), one
+ledger row of kind :data:`KIND_IMESSAGE_IMAGE` per image with its size.
+
 The channel's own messages come back as ``is_from_me = 1`` rows in the same
 thread. They are never read as commands: each sent body starts with
 :data:`PREFIX` and is also remembered for ``ECHO_TTL_S``.
@@ -50,6 +58,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +95,21 @@ KIND_IMESSAGE = "imessage"
 EGRESS_HOST = "iMessage (Apple)"
 EGRESS_TOOL = "remote_channel"
 EGRESS_NOTE = "sent to your own Messages thread"
+
+# #110: a screenshot sent to the own thread. Mirrors
+# ``ai.egress_log.KIND_IMESSAGE_IMAGE``.
+KIND_IMESSAGE_IMAGE = "imessage_image"
+EGRESS_IMAGE_NOTE = "screenshot sent to your own Messages thread"
+# Where phone captures wait to be sent. Under ~/Pictures: Messages may not
+# deliver an attachment from a temp folder. 0700, and each file is deleted
+# DELETE_AFTER_S after it was handed to Messages (it uploads in the
+# background), or when older than STALE_AFTER_S (a crash, a turn that
+# never replied).
+CAPTURE_DIR_NAME = "bot-inator phone"
+DELETE_AFTER_S = 300.0
+STALE_AFTER_S = 900.0
+MAX_CAPTURES_PER_TURN = 3
+ATTACHMENT_CHAR = "\ufffc"  # the text of an attachment-only chat.db row
 
 NEVER_FROM_PHONE: frozenset[str] = frozenset({"generate_custom_tool", "run_shortcut"})
 
@@ -197,6 +221,130 @@ def applescript_send(handle: str, body: str) -> bool:
         return False
 
 
+def applescript_send_file(handle: str, path: str) -> bool:
+    """Send the file at ``path`` to ``handle``; both go to osascript as argv."""
+    from tools.send_imessage import osascript_send_file
+
+    try:
+        osascript_send_file(handle, path)
+        return True
+    except Exception as exc:
+        logger.warning("remote channel: file send failed: %s",
+                       getattr(exc, "stderr", None) or exc)
+        return False
+
+
+# ---- phone-turn captures (#110) ------------------------------------------------
+
+_capture_dir_override: Optional[Path] = None  # tests set this
+_phone_lock = threading.Lock()
+_phone_turn: Optional[str] = None
+_captures: list[Path] = []
+
+
+def phone_capture_dir() -> Path:
+    """The folder phone captures are written to (created 0700)."""
+    folder = _capture_dir_override or (Path.home() / "Pictures" / CAPTURE_DIR_NAME)
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(folder, 0o700)
+    except OSError:
+        pass
+    return Path(os.path.realpath(folder))
+
+
+def _delete(path: Path) -> None:
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.debug("remote channel: could not delete %s", path, exc_info=True)
+
+
+def _prune_stale(folder: Path, now: Optional[float] = None) -> None:
+    now = time.time() if now is None else now
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_file() and now - entry.stat().st_mtime > STALE_AFTER_S:
+                _delete(entry)
+        except OSError:
+            continue
+
+
+def begin_phone_turn(event_id: str) -> None:
+    """A phone turn starts: captures from now on go to the phone."""
+    global _phone_turn
+    with _phone_lock:
+        leftovers, _captures[:] = list(_captures), []
+        _phone_turn = str(event_id)
+    for path in leftovers:
+        _delete(path)
+
+
+def end_phone_turn() -> None:
+    """The turn ended: unsent captures are deleted."""
+    global _phone_turn
+    with _phone_lock:
+        leftovers, _captures[:] = list(_captures), []
+        _phone_turn = None
+    for path in leftovers:
+        _delete(path)
+
+
+def phone_turn_active() -> bool:
+    with _phone_lock:
+        return _phone_turn is not None
+
+
+def new_capture_path() -> Path:
+    """A fresh, not yet existing PNG path in :func:`phone_capture_dir`."""
+    folder = phone_capture_dir()
+    _prune_stale(folder)
+    return folder / f"screen-{uuid.uuid4().hex[:12]}.png"
+
+
+def is_capture_path(path: Any) -> bool:
+    """True for a regular, non-empty file directly inside the capture folder
+    (no symlink, no ``..``): a file the daemon wrote, never a model's path."""
+    try:
+        raw = Path(str(path))
+        if not raw.is_absolute() or raw.is_symlink():
+            return False
+        real = Path(os.path.realpath(raw))
+        if real.parent != phone_capture_dir():
+            return False
+        return real.is_file() and real.stat().st_size > 0
+    except (OSError, ValueError):
+        return False
+
+
+def add_capture(path: Any) -> bool:
+    """Queue a capture for the current phone turn's reply. Refuses anything
+    outside the capture folder, and does nothing outside a phone turn."""
+    if not is_capture_path(path):
+        logger.warning("remote channel: refused to queue %r (not a capture)", str(path))
+        return False
+    with _phone_lock:
+        if _phone_turn is None or len(_captures) >= MAX_CAPTURES_PER_TURN:
+            return False
+        _captures.append(Path(os.path.realpath(str(path))))
+    return True
+
+
+def take_captures(event_id: str) -> list[Path]:
+    """The captures queued for ``event_id``'s turn (and forget them)."""
+    with _phone_lock:
+        if _phone_turn != str(event_id):
+            return []
+        out, _captures[:] = list(_captures), []
+    return out
+
+
 def text_from_attributed_body(blob: Any) -> str:
     """Best-effort text from a ``message.attributedBody`` typedstream (newer
     macOS leaves ``message.text`` NULL for many rows)."""
@@ -263,6 +411,7 @@ class RemoteChannel:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         *,
         sender: Optional[Callable[[str, str], bool]] = None,
+        file_sender: Optional[Callable[[str, str], bool]] = None,
         submit: Optional[Callable[[str, bool], bool]] = None,
         idle_seconds: Callable[[], float] = _seconds_since_any_input,
         paused: Callable[[], bool] = lambda: False,
@@ -275,6 +424,8 @@ class RemoteChannel:
         self._db_path = Path(db_path).expanduser()
         self._poll_interval = poll_interval
         self._sender = sender or applescript_send
+        self._file_sender = file_sender or applescript_send_file
+        self._delete_later: Callable[[Path], None] = _delete_later
         self._submit = submit
         self._idle_seconds = idle_seconds
         self._paused = paused
@@ -440,10 +591,16 @@ class RemoteChannel:
             if event_id not in self._open_turns:
                 return False
             self._open_turns.discard(event_id)
+        captures = take_captures(event_id)
         if not self.enabled():
+            for path in captures:
+                _delete(path)
             return False
         text = (reply or "").strip() or "I couldn't find an answer to that."
-        return self._send(text)
+        ok = self._send(text)
+        for path in captures:  # #110: after the text, to the own handle
+            self._send_file(path)
+        return ok
 
     # ---- sending -------------------------------------------------------------
 
@@ -456,15 +613,9 @@ class RemoteChannel:
         if len(body) > MAX_BODY_CHARS:
             body = body[:MAX_BODY_CHARS - 1] + "…"
         with self._lock:
-            now = self._clock()
-            while self._sent_at and now - self._sent_at[0] >= 3600.0:
-                self._sent_at.popleft()
-            if len(self._sent_at) >= self.max_per_hour:
-                logger.info("remote channel: hourly limit (%d) reached; not sent",
-                            self.max_per_hour)
+            if not self._take_slot_locked():
                 return False
-            self._sent_at.append(now)
-            self._echoes.append(_Echo(_norm_text(body[len(PREFIX):]), now))
+            self._echoes.append(_Echo(_norm_text(body[len(PREFIX):]), self._clock()))
         try:
             ok = bool(self._sender(handle, body))
         except Exception:
@@ -473,6 +624,64 @@ class RemoteChannel:
         if ok:
             self._record_egress(body)
         return ok
+
+    def _take_slot_locked(self) -> bool:
+        """Count one send against the hourly limit; False when it is reached."""
+        now = self._clock()
+        while self._sent_at and now - self._sent_at[0] >= 3600.0:
+            self._sent_at.popleft()
+        if len(self._sent_at) >= self.max_per_hour:
+            logger.info("remote channel: hourly limit (%d) reached; not sent",
+                        self.max_per_hour)
+            return False
+        self._sent_at.append(now)
+        return True
+
+    def _send_file(self, path: Path) -> bool:
+        """Send one capture to the configured handle (#110). Only a file in
+        the capture folder; rate-limited with the texts; one ledger row."""
+        path = Path(path)
+        handle = own_handle()
+        if not is_capture_path(path):
+            # Not the daemon's capture: never sent, and never touched.
+            logger.warning("remote channel: %s is not a capture; not sent", path)
+            return False
+        if not handle or not remote_enabled():
+            _delete(path)
+            return False
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return False
+        with self._lock:
+            if not self._take_slot_locked():
+                _delete(path)
+                return False
+        try:
+            ok = bool(self._file_sender(handle, str(path)))
+        except Exception:
+            logger.exception("remote channel: file sender raised")
+            ok = False
+        if ok:
+            self._record_image_egress(size)
+            # Messages uploads in the background: delete a bit later.
+            self._delete_later(path)
+        else:
+            _delete(path)
+        return ok
+
+    def _record_image_egress(self, size: int) -> None:
+        try:
+            if self._egress is not None:
+                record = self._egress.record
+            else:
+                from ai import egress_log
+
+                record = egress_log.record
+            record(KIND_IMESSAGE_IMAGE, EGRESS_HOST, None, None, int(size), 0,
+                   "sent", None, tool=EGRESS_TOOL, note=EGRESS_IMAGE_NOTE)
+        except Exception:
+            logger.exception("remote channel: egress record failed")
 
     def _record_egress(self, body: str) -> None:
         try:
@@ -602,7 +811,9 @@ class RemoteChannel:
             return False
         if row.associated:  # tapbacks and other reactions
             return False
-        text = row.text.strip()
+        # An attachment row (the screenshot the channel sent, #110) has only
+        # U+FFFC as its text: never a command.
+        text = row.text.replace(ATTACHMENT_CHAR, "").strip()
         if not text:
             return False
         return not self._is_own_echo(text)
@@ -619,7 +830,7 @@ class RemoteChannel:
         return prefixed
 
     def _handle_command(self, row: _Row) -> None:
-        text = row.text.strip()
+        text = row.text.replace(ATTACHMENT_CHAR, "").strip()
         match = _REPLY_RE.match(text)
         if match:
             self._handle_reply(match.group(1).lower() in ("yes", "y"), match.group(2).lower())
@@ -663,6 +874,12 @@ class RemoteChannel:
                 self._open_turns.discard(event_id)
 
 
+def _delete_later(path: Path, delay: float = DELETE_AFTER_S) -> None:
+    timer = threading.Timer(delay, _delete, args=(path,))
+    timer.daemon = True
+    timer.start()
+
+
 def _norm_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
@@ -703,9 +920,11 @@ def card_text(
 
 __all__ = [
     "CODE_LENGTH", "DEFAULT_IDLE_MINUTES", "ENABLED_KEY", "HANDLE_KEY", "IDLE_MINUTES_KEY",
-    "KIND_IMESSAGE", "MAX_IDLE_MINUTES", "MAX_PER_HOUR", "MIN_IDLE_MINUTES",
+    "KIND_IMESSAGE", "KIND_IMESSAGE_IMAGE", "MAX_IDLE_MINUTES", "MAX_PER_HOUR", "MIN_IDLE_MINUTES",
     "NEVER_FROM_PHONE", "PREFIX", "REMOTE_SOURCE", "REMOTE_TIMEOUT_S", "RemoteChannel",
-    "applescript_send", "card_text", "excluded_handle", "idle_minutes", "normalize_handle",
+    "add_capture", "applescript_send", "applescript_send_file", "begin_phone_turn",
+    "card_text", "end_phone_turn", "is_capture_path", "new_capture_path",
+    "phone_capture_dir", "phone_turn_active", "take_captures", "excluded_handle", "idle_minutes", "normalize_handle",
     "own_handle", "parse_idle_minutes", "remote_enabled", "same_handle",
     "text_from_attributed_body",
 ]

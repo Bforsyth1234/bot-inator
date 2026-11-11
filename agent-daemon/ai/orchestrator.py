@@ -984,6 +984,9 @@ class Orchestrator:
                 await self._handle_user_message(event, event_id)
             finally:
                 self._turn_from_phone = False
+                from events import remote_channel as remote_mod
+
+                remote_mod.end_phone_turn()
             return
 
         if event.event_type == "daily_brief":
@@ -1057,9 +1060,13 @@ class Orchestrator:
         # #85: a turn the own Messages thread started is answered there, and
         # its cards may be mirrored to the phone. Only the remote channel
         # sets this source (the WS user_message never carries one).
-        from events.remote_channel import REMOTE_SOURCE
+        from events import remote_channel as remote_mod
 
-        self._turn_from_phone = (event.metadata or {}).get("source") == REMOTE_SOURCE
+        self._turn_from_phone = (event.metadata or {}).get("source") == remote_mod.REMOTE_SOURCE
+        if self._turn_from_phone:
+            # #110: a screenshot this turn captures goes to the phone after
+            # the reply (``RemoteChannel.send_reply``).
+            remote_mod.begin_phone_turn(event_id)
         if self.memory is not None and text:
             try:
                 await asyncio.to_thread(
@@ -1138,6 +1145,7 @@ class Orchestrator:
                 self._rerun_tool_name = None
             reply = str(result) if result is not None else reply
 
+        reply = unwrap_answer_blob(reply)  # #110: never a tool-call blob
         await self._emit_thought(event_id, "complete", reply[:500])
         remote = getattr(self, "remote_channel", None)
         if self._turn_from_phone and remote is not None:
@@ -2491,7 +2499,9 @@ def _text_answer(generate: Any, messages: Any, stop_sequences: Any, kwargs: dict
         content = getattr(reply, "content", "")
         text = content.strip() if isinstance(content, str) else ""
         if text:
-            return text
+            # #110: the re-ask can come back as a final_answer call written
+            # as JSON; it would be wrapped again and shown verbatim.
+            return unwrap_answer_blob(text)
         raw = getattr(reply, "raw", None)
         try:
             choice = raw.choices[0]
@@ -2502,6 +2512,53 @@ def _text_answer(generate: Any, messages: Any, stop_sequences: Any, kwargs: dict
         except Exception:
             logger.info("tool-free answer empty (stops=%s)", bool(stops))
     return ""
+
+
+_ANSWER_CALL_NAMES = frozenset({"final_answer", "answer"})
+_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*\n?(.*?)\n?\s*```$", re.DOTALL)
+
+
+def unwrap_answer_blob(text: Any) -> Any:
+    """The answer inside a reply that is a ``final_answer`` call as JSON (#110).
+
+    ``{"name": "final_answer", "arguments": {"answer": "..."}}`` (or the
+    name ``answer``, arguments as an object or a JSON string, optionally in
+    a code fence, nested any number of times) becomes ``"..."``. Anything
+    else comes back unchanged: a tool-call blob is never the answer.
+    """
+    if not isinstance(text, str):
+        return text
+    current = text
+    for _ in range(5):
+        stripped = current.strip()
+        fenced = _FENCE_RE.match(stripped)
+        if fenced:
+            stripped = fenced.group(1).strip()
+        if not (stripped.startswith("{") and stripped.endswith("}")):
+            break
+        try:
+            data = json.loads(stripped)
+        except ValueError:
+            break
+        if not isinstance(data, dict):
+            break
+        function = data.get("function") if isinstance(data.get("function"), dict) else data
+        name = function.get("name")
+        if name not in _ANSWER_CALL_NAMES:
+            break
+        args = function.get("arguments", function.get("parameters"))
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                break
+        if not isinstance(args, dict) or "answer" not in args:
+            break
+        answer = args["answer"]
+        if answer is None:
+            break
+        current = answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
+    return current if current is not text else text
 
 
 _ERROR_IN_RESULT_RE = re.compile(r"""['"]error['"]\s*:\s*['"]([^'"]{1,300})['"]""")
@@ -2638,6 +2695,10 @@ def _make_groq_model_class(base: type) -> type:
                         better = _fallback_from_tool_result(messages)
                     if not _is_bare_done(better):
                         function.arguments = {"answer": better}
+                if getattr(function, "name", None) == "final_answer":
+                    args = getattr(function, "arguments", None)
+                    if isinstance(args, dict) and isinstance(args.get("answer"), str):
+                        args["answer"] = unwrap_answer_blob(args["answer"])
             content = (message.content or "").strip() if isinstance(message.content, str) else ""
             if (
                 tools_to_call_from and not message.tool_calls and not content
@@ -2654,6 +2715,7 @@ def _make_groq_model_class(base: type) -> type:
                 logger.info("Empty reply after a tool result; re-ask gave %r", (content or "")[:120])
                 content = content or _fallback_from_tool_result(messages)
             if tools_to_call_from and not message.tool_calls and content:
+                content = unwrap_answer_blob(content)
                 from smolagents.models import (  # type: ignore
                     ChatMessageToolCall,
                     ChatMessageToolCallFunction,
