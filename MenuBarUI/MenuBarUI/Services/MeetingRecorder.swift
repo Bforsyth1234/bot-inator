@@ -20,7 +20,10 @@ import SwiftUI
 //   `requiresOnDeviceRecognition = true` (never Apple's servers), the
 //   transcript is written to `~/.bot-inator/meetings/<id>.txt` (0600), and
 //   the audio is deleted. With the `whisper` engine the daemon transcribes
-//   and deletes it.
+//   and deletes it; #108: when Whisper fails there, the daemon keeps the
+//   audio with the same `<id>.failed.json` marker (`engine: whisper`) and
+//   says so on `meeting_record_stop` (`transcription: failed`), and the
+//   panel's Retry sends the kept audio to the daemon again.
 // * #105: before an "apple" recording starts, `MeetingDictationCheck` makes
 //   sure macOS will actually recognise speech (it refuses while Siri and
 //   Dictation are both off); if not, nothing is recorded. When on-device
@@ -119,13 +122,37 @@ struct MeetingRecordOfferPayload: Codable, Hashable {
 }
 
 /// Server→client: stop this recording now (the daemon's end + 5 safety net).
+///
+/// #108 (optional fields): with `transcription` set it reports the daemon's
+/// Whisper result for a recording that already stopped: "failed" (`kept`:
+/// the audio is kept with its marker until `expiresAt`) or "done".
 struct MeetingRecordStopPayload: Codable, Hashable {
     let meetingId: String
     let reason: String
+    var transcription: String? = nil
+    var title: String? = nil
+    var error: String? = nil
+    var message: String? = nil
+    var kept: Bool? = nil
+    var audioPath: String? = nil
+    var systemAudioPath: String? = nil
+    var startedAt: String? = nil
+    var endedAt: String? = nil
+    var stopReason: String? = nil
+    var failedAt: String? = nil
+    var expiresAt: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case meetingId = "meeting_id"
         case reason
+        case transcription, title, error, message, kept
+        case audioPath = "audio_path"
+        case systemAudioPath = "system_audio_path"
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
+        case stopReason = "stop_reason"
+        case failedAt = "failed_at"
+        case expiresAt = "expires_at"
     }
 }
 
@@ -209,8 +236,12 @@ struct FailedRecording: Codable, Equatable, Identifiable {
     let failedAt: Date
     var micPath: String?
     var systemPath: String?
+    /// #108: who transcribes a Retry. nil (an #105 marker) = on this Mac;
+    /// `.whisper` = the daemon, which wrote the marker itself.
+    var engine: MeetingTranscriptionEngine? = nil
 
     var id: String { meetingId }
+    var retriesInDaemon: Bool { engine == .whisper }
     var micURL: URL? { micPath.map { URL(fileURLWithPath: $0) } }
     var systemURL: URL? { systemPath.map { URL(fileURLWithPath: $0) } }
     var expiresAt: Date { failedAt.addingTimeInterval(MeetingFiles.keepFailedFor) }
@@ -353,6 +384,8 @@ final class MeetingRecorder: ObservableObject {
     /// Whether the daemon has mlx-whisper (asked when a Whisper button may show).
     @Published private(set) var whisperAvailable = false
     private var expiryLoop: Task<Void, Never>?
+    /// #108: the meeting whose kept audio the daemon is transcribing again.
+    private var daemonRetrying: String?
 
     /// Set by the WebSocket manager: sends one frame to the daemon.
     var send: ((MeetingRecorderOutgoing) -> Void)?
@@ -463,6 +496,7 @@ final class MeetingRecorder: ObservableObject {
     }
 
     func receiveStop(_ payload: MeetingRecordStopPayload) {
+        if payload.transcription != nil { return receiveDaemonTranscription(payload) }
         guard case .recording(let session) = phase, session.meetingId == payload.meetingId else { return }
         Task { await stop(reason: payload.reason) }
     }
@@ -537,6 +571,8 @@ final class MeetingRecorder: ObservableObject {
     func showFailure(_ failed: FailedRecording) {
         switch phase {
         case .idle, .finished, .failed, .blocked, .offered: break
+        // #108: a daemon Retry that never answered (daemon quit) can be reopened.
+        case .transcribing where daemonRetrying == failed.meetingId: daemonRetrying = nil
         default: return
         }
         guard failures.contains(where: { $0.meetingId == failed.meetingId }) else { return }
@@ -548,25 +584,100 @@ final class MeetingRecorder: ObservableObject {
     /// Re-runs on-device transcription on the kept audio.
     func retryTranscription(_ failed: FailedRecording) async {
         guard case .failed(let current) = phase, current.meetingId == failed.meetingId else { return }
+        if failed.retriesInDaemon { return retryInDaemon(failed) }
         phase = .transcribing(failed.title)
         panel.show()
         await transcribeOnDevice(failed: failed)
     }
 
-    /// Hands the kept audio to the daemon's Whisper, which deletes it after
-    /// transcribing (also when that fails).
+    /// Hands the kept audio to the daemon's Whisper, which deletes it once
+    /// transcribed; #108: if that fails too it keeps it (rewriting the
+    /// marker, same 24 hours) and the panel shows the failure again.
     func retryWithWhisper(_ failed: FailedRecording) {
         guard case .failed(let current) = phase, current.meetingId == failed.meetingId,
-              whisperAvailable, send != nil, isConnected() else { return }
+              whisperAvailable else { return }
+        retryInDaemon(failed)
+    }
+
+    /// #108: Retry of a recording the daemon transcribes. The marker stays
+    /// until the daemon reports (it deletes it with the audio on success).
+    private func retryInDaemon(_ failed: FailedRecording) {
+        guard send != nil, isConnected() else {
+            lastError = "bot-inator's daemon isn't running, so Whisper can't transcribe. Try again when it is."
+            var shown = failed
+            shown.error = lastError ?? failed.error
+            phase = .failed(shown)
+            panel.show()
+            return
+        }
         var payload = audioReadyPayload(failed)
         payload.audioPath = failed.micPath
         payload.systemAudioPath = failed.systemPath
-        MeetingFiles.delete(MeetingFiles.markerURL(failed.meetingId))
-        forget(failed)
+        daemonRetrying = failed.meetingId
         send?(.audioReady(payload))
-        phase = .finished("Notes for \(failed.title) are being transcribed with Whisper on this Mac; "
-                          + "the recording is deleted when it finishes.")
+        phase = .transcribing(failed.title)
         panel.show()
+    }
+
+    /// #108: the daemon's Whisper result for a recording that already stopped.
+    private func receiveDaemonTranscription(_ payload: MeetingRecordStopPayload) {
+        let mid = payload.meetingId
+        let title = payload.title ?? failures.first { $0.meetingId == mid }?.title ?? "Meeting"
+        let wasRetrying = daemonRetrying == mid
+        if wasRetrying { daemonRetrying = nil }
+        let showing: Bool = {
+            switch phase {
+            case .idle, .finished, .blocked: return true
+            case .failed(let f): return f.meetingId == mid || wasRetrying
+            case .transcribing: return wasRetrying
+            default: return false  // recording / offered / starting: the menu row has it
+            }
+        }()
+        if payload.transcription == "done" {
+            let had = failures.contains { $0.meetingId == mid }
+            failures.removeAll { $0.meetingId == mid }
+            guard had || wasRetrying else { return }
+            if showing {
+                let message = payload.message ?? ""
+                phase = .finished(message.isEmpty
+                    ? "Notes for \(title) are ready; a card with the follow-ups will appear."
+                    : "Notes for \(title): \(message). The recording was deleted.")
+                panel.show()
+            }
+            return
+        }
+        let error = payload.error ?? "Whisper couldn't transcribe the recording."
+        guard payload.kept == true else {
+            failures.removeAll { $0.meetingId == mid }
+            lastError = error
+            if showing {
+                phase = .finished("Notes for \(title) failed: \(error) The recording was deleted.")
+                panel.show()
+            }
+            return
+        }
+        let earlier = failures.first { $0.meetingId == mid }
+        let failedAt = payload.failedAt.flatMap(Self.parseDate) ?? earlier?.failedAt ?? Date()
+        let failed = FailedRecording(
+            meetingId: mid, title: title,
+            startedAt: payload.startedAt ?? earlier?.startedAt ?? "",
+            endedAt: payload.endedAt ?? earlier?.endedAt ?? "",
+            stopReason: payload.stopReason ?? earlier?.stopReason, error: error, failedAt: failedAt,
+            micPath: payload.audioPath, systemPath: payload.systemAudioPath, engine: .whisper)
+        // Only audio in our own folder is listed (the daemon checks the same).
+        let inFolder = [failed.micURL, failed.systemURL].compactMap { $0 }.allSatisfy {
+            $0.deletingLastPathComponent().standardizedFileURL.path == MeetingFiles.audioDir.standardizedFileURL.path
+        }
+        guard inFolder, failed.micURL != nil || failed.systemURL != nil else { return }
+        failures.removeAll { $0.meetingId == mid }
+        failures.insert(failed, at: 0)
+        lastError = error
+        if showing {
+            expiryTask?.cancel()
+            phase = .failed(failed)
+            panel.show()
+        }
+        watchExpiry()
     }
 
     func deleteRecording(_ failed: FailedRecording) {
@@ -1158,7 +1269,7 @@ struct MeetingRecorderPanelView: View {
                     if failed.dictationOff {
                         Button("Open Dictation Settings") { recorder.openDictationSettings() }
                     }
-                    if recorder.whisperAvailable {
+                    if recorder.whisperAvailable, !failed.retriesInDaemon {
                         Button("Use Whisper") { recorder.retryWithWhisper(failed) }
                     }
                 }

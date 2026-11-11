@@ -458,10 +458,28 @@ class MeetingRecordOfferPayload(BaseModel):
 
 
 class MeetingRecordStopPayload(BaseModel):
-    """Server→client: stop the recording (the meeting ended + grace)."""
+    """Server→client: stop the recording (the meeting ended + grace).
+
+    #108 (additive, all optional): with ``transcription`` set it instead
+    reports the daemon's Whisper result for a recording that already
+    stopped: ``failed`` (``kept`` → the audio is kept with the #105 marker
+    until ``expires_at``; the app offers Retry / Delete / Later) or ``done``
+    (the audio is gone; ``message`` is set when no card follows)."""
 
     meeting_id: str
     reason: str = "meeting_ended"
+    transcription: Literal["failed", "done"] | None = None
+    title: str | None = None
+    error: str | None = None
+    message: str | None = None
+    kept: bool | None = None
+    audio_path: str | None = None
+    system_audio_path: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    stop_reason: str | None = None
+    failed_at: str | None = None
+    expires_at: str | None = None
 
 
 class MeetingRecordStatePayload(BaseModel):

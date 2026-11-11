@@ -21,8 +21,15 @@ Flow (the menu bar app records; the daemon never can):
    ``requiresOnDeviceRecognition``; the default, engine ``apple``) or
    ``audio_path`` (engine ``whisper``: :func:`transcribe_audio` runs
    ``mlx_whisper`` here, when installed). Audio is deleted once the
-   transcript exists AND on every failure (:func:`delete_audio`; only files
-   inside :func:`audio_dir`, never a path a frame names elsewhere).
+   transcript exists (:func:`delete_audio`; only files inside
+   :func:`audio_dir`, never a path a frame names elsewhere). #108: when
+   Whisper fails here, the audio is KEPT (same folder, 0600) with the app's
+   #105 ``<id>.failed.json`` marker (:func:`keep_failed`), so the app's
+   24-hour purge applies, and the app is told with a ``meeting_record_stop``
+   frame carrying ``transcription: "failed"``; the panel's Retry sends the
+   same ``meeting_audio_ready`` again. A later success (``transcription:
+   "done"``) deletes the audio and the marker and publishes the one card.
+   Any other failure (an ``error`` from the app, a bad id) still deletes.
 4. :meth:`MeetingNotes.process` stores the transcript (0600, in
    :func:`notes_dir`), extracts decisions, action items and a follow-up
    with local rules (:func:`extract`), optionally words a short summary with
@@ -54,7 +61,7 @@ import pwd
 import re
 import threading
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 
@@ -236,16 +243,120 @@ def _whisper_transcribe(path: str) -> str:
     return str((out or {}).get("text") or "")
 
 
+def _transcribe_file(path: Any, transcriber: Optional[Callable[[str], str]] = None) -> str:
+    p = Path(str(path)).expanduser()
+    if p.suffix.lower() not in AUDIO_SUFFIXES or not _inside(p, audio_dir(create=False)):
+        raise TranscriptionError("audio must be in ~/.bot-inator/meetings/audio")
+    return (transcriber or _whisper_transcribe)(str(p))
+
+
 def transcribe_audio(path: Any, transcriber: Optional[Callable[[str], str]] = None) -> str:
-    """Local transcription of one recording; the audio is deleted afterwards
-    whether it worked or not."""
+    """Local transcription of one recording. The audio is deleted once it is
+    transcribed; on a failure it is left for the caller (#108: kept for a
+    Retry by :meth:`MeetingNotes.process`)."""
+    text = _transcribe_file(path, transcriber)
+    delete_audio(path)
+    return text
+
+
+# ---- #108 a failed Whisper transcription keeps its audio ----------------------
+
+KEEP_FAILED_FOR = timedelta(hours=24)
+# The app's marker is Swift's JSONEncoder output for `FailedRecording`, whose
+# Date is seconds since 2001-01-01 UTC (Foundation's reference date).
+_APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
+
+
+def marker_path(meeting_id: str) -> Path:
+    """The #105 marker the app's purge honours: ``<id>.failed.json``."""
+    return audio_dir(create=False) / f"{meeting_id}.failed.json"
+
+
+def _keepable(path: Any) -> Optional[Path]:
+    if not path:
+        return None
+    p = Path(str(path)).expanduser()
+    if (p.suffix.lower() not in AUDIO_SUFFIXES or p.is_symlink() or not p.is_file()
+            or not _inside(p, audio_dir(create=False))):
+        return None
+    return p
+
+
+def read_marker(meeting_id: str) -> Optional[dict[str, Any]]:
+    if not _ID_RE.match(meeting_id or ""):
+        return None
+    path = marker_path(meeting_id)
+    if path.is_symlink() or not path.is_file():
+        return None
     try:
-        p = Path(str(path)).expanduser()
-        if p.suffix.lower() not in AUDIO_SUFFIXES or not _inside(p, audio_dir(create=False)):
-            raise TranscriptionError("audio must be in ~/.bot-inator/meetings/audio")
-        return (transcriber or _whisper_transcribe)(str(p))
-    finally:
-        delete_audio(path)
+        data = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("meetingId") != meeting_id:
+        return None
+    return data
+
+
+def _marker_failed_at(data: Optional[Mapping[str, Any]]) -> Optional[datetime]:
+    value = (data or {}).get("failedAt")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return _APPLE_EPOCH + timedelta(seconds=float(value))
+
+
+def delete_marker(meeting_id: str) -> bool:
+    if not _ID_RE.match(meeting_id or ""):
+        return False
+    path = marker_path(meeting_id)
+    if not (path.is_symlink() or path.exists()):
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def keep_failed(meeting_id: str, payload: Mapping[str, Any], error: str,
+                now: datetime) -> Optional[dict[str, Any]]:
+    """Keep a recording whose transcription failed: its audio (only regular
+    files inside :func:`audio_dir`) goes 0600 and a #105 marker is written
+    (0600), with ``failedAt`` from an earlier marker so the 24 hours run from
+    the first failure. None (nothing kept: delete it) when no file qualifies
+    or the first failure is already 24 hours old."""
+    if not _ID_RE.match(meeting_id or ""):
+        return None
+    mic = _keepable(payload.get("audio_path"))
+    other = _keepable(payload.get("system_audio_path"))
+    if mic is None and other is None:
+        return None
+    now = now if now.tzinfo else now.astimezone()
+    failed_at = _marker_failed_at(read_marker(meeting_id)) or now
+    if now - failed_at >= KEEP_FAILED_FOR:
+        return None
+    for p in (mic, other):
+        if p is not None:
+            os.chmod(p, 0o600)
+    record = {
+        "meetingId": meeting_id,
+        "title": str(payload.get("title") or "Meeting")[:MAX_TITLE],
+        "startedAt": str(payload.get("started_at") or ""),
+        "endedAt": str(payload.get("ended_at") or ""),
+        "stopReason": payload.get("stop_reason") or None,
+        "error": error,
+        "failedAt": (failed_at - _APPLE_EPOCH).total_seconds(),
+        "micPath": str(mic) if mic else None,
+        "systemPath": str(other) if other else None,
+        "engine": "whisper",
+    }
+    path = marker_path(meeting_id)
+    if path.is_symlink():
+        path.unlink()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(record, fh)
+    os.chmod(path, 0o600)
+    return {**record, "failed_at": failed_at, "expires_at": failed_at + KEEP_FAILED_FOR}
 
 
 # ---- people -------------------------------------------------------------------
@@ -905,12 +1016,15 @@ class MeetingNotes:
     # 3. audio / transcript -> one card ---------------------------------------
 
     async def process(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Handle ``meeting_audio_ready``. Returns ``{status, reason?}``;
+        """Handle ``meeting_audio_ready``. Returns ``{status, reason?, kept?}``;
         ``status`` is ``offered``, ``empty`` or ``error``. The audio is
-        deleted on every path."""
+        deleted on every path except a failed Whisper transcription here
+        (#108), where it is kept for the app's Retry (``kept: True``)."""
         audio = payload.get("audio_path")
         system_audio = payload.get("system_audio_path")
         mid = str(payload.get("meeting_id") or "")
+        whisper = bool(audio or system_audio) and not payload.get("transcript_path")
+        kept: Optional[dict[str, Any]] = None
         try:
             if not _ID_RE.match(mid):
                 return {"status": "error", "reason": "bad meeting id"}
@@ -918,25 +1032,70 @@ class MeetingNotes:
                 return {"status": "error", "reason": str(payload["error"])[:300]}
             if payload.get("transcript_path"):
                 text = await asyncio.to_thread(read_transcript, payload["transcript_path"])
-            elif audio or system_audio:
-                # Microphone = the user's channel, system audio = the others'.
-                parts = []
-                for tag, path in (("me", audio), ("others", system_audio)):
-                    if path:
-                        said = await asyncio.to_thread(transcribe_audio, path, self._transcriber)
-                        if said.strip():
-                            parts.append(f"[{tag}] {said.strip()}")
-                text = "\n".join(parts)
+            elif whisper:
+                try:
+                    text = await self._transcribe_channels(audio, system_audio)
+                except Exception as exc:
+                    logger.exception("meeting notes: transcription failed")
+                    reason = str(exc)[:300] or type(exc).__name__
+                    kept = await asyncio.to_thread(keep_failed, mid, payload, reason, self._clock())
+                    self._tell_failed(mid, payload, reason, kept)
+                    return {"status": "error", "reason": reason, "kept": kept is not None}
             else:
                 return {"status": "error", "reason": "no audio or transcript"}
         except Exception as exc:
             logger.exception("meeting notes: transcription failed")
             return {"status": "error", "reason": str(exc)[:300]}
         finally:
-            await asyncio.to_thread(delete_audio, audio)
-            await asyncio.to_thread(delete_audio, system_audio)
+            if kept is None:
+                await asyncio.to_thread(delete_audio, audio)
+                await asyncio.to_thread(delete_audio, system_audio)
+                await asyncio.to_thread(delete_marker, mid)
             if self._recording == mid:
                 self._recording = None
+        result = await self._finish(mid, payload, text)
+        if whisper:
+            # #108: the app forgets a kept failure (its Retry worked).
+            self.link.send(FRAME_STOP, {
+                "meeting_id": mid, "reason": "transcription_done", "transcription": "done",
+                "title": str(payload.get("title") or "Meeting")[:MAX_TITLE],
+                "message": str(result.get("reason") or ""),
+            })
+        return result
+
+    async def _transcribe_channels(self, audio: Any, system_audio: Any) -> str:
+        """Microphone = the user's channel, system audio = the others'. Both
+        are transcribed before either is deleted, so a failure on the second
+        keeps both for the Retry (#108)."""
+        said: list[tuple[str, str]] = []
+        for tag, path in (("me", audio), ("others", system_audio)):
+            if path:
+                said.append((tag, await asyncio.to_thread(_transcribe_file, path, self._transcriber)))
+        return "\n".join(f"[{tag}] {text.strip()}" for tag, text in said if text.strip())
+
+    def _tell_failed(self, mid: str, payload: Mapping[str, Any], reason: str,
+                     kept: Optional[Mapping[str, Any]]) -> bool:
+        """#108: tell the app; its #105 panel offers Retry / Delete / Later."""
+        frame: dict[str, Any] = {
+            "meeting_id": mid, "reason": "transcription_failed", "transcription": "failed",
+            "title": str(payload.get("title") or "Meeting")[:MAX_TITLE],
+            "error": reason, "kept": kept is not None,
+            "started_at": str(payload.get("started_at") or ""),
+            "ended_at": str(payload.get("ended_at") or ""),
+            "stop_reason": payload.get("stop_reason") or None,
+        }
+        if kept is not None:
+            frame.update({
+                "audio_path": kept["micPath"], "system_audio_path": kept["systemPath"],
+                "failed_at": kept["failed_at"].isoformat(timespec="seconds"),
+                "expires_at": kept["expires_at"].isoformat(timespec="seconds"),
+            })
+        sent = self.link.send(FRAME_STOP, frame)
+        if not sent:
+            logger.info("meeting notes: no menu bar app connected to hear the failure of %s", mid)
+        return sent
+
+    async def _finish(self, mid: str, payload: Mapping[str, Any], text: str) -> dict[str, Any]:
         if not text.strip():
             return {"status": "empty", "reason": "nothing was transcribed"}
         path = await asyncio.to_thread(write_transcript, mid, text)
@@ -987,8 +1146,8 @@ class MeetingNotes:
 __all__ = [
     "ActionItem", "ENABLED_KEY", "ENGINE_KEY", "ENGINES", "FRAME_OFFER", "FRAME_STOP",
     "FollowUp", "MANUAL_MAX", "MeetingNotes", "RecorderLink", "STOP_GRACE", "Summary",
-    "audio_dir", "build_offer", "delete_audio", "engine", "extract", "find_due",
-    "local_evaluator", "make_idea", "meeting_id_for", "my_names", "notes_dir", "notes_enabled",
-    "parse_transcript", "read_transcript", "settings_view", "stop_at", "transcribe_audio",
+    "KEEP_FAILED_FOR", "audio_dir", "build_offer", "delete_audio", "delete_marker", "engine", "extract", "find_due", "keep_failed",
+    "local_evaluator", "make_idea", "marker_path", "meeting_id_for", "my_names", "notes_dir", "notes_enabled",
+    "parse_transcript", "read_marker", "read_transcript", "settings_view", "stop_at", "transcribe_audio",
     "update_settings", "write_transcript",
 ]
