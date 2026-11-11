@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #110
+Next ID: #111
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -1984,7 +1984,7 @@ in the thread with ’ / → intact. Not done by the agent.
 
 ---
 
-#109 — iPhone remote: send the screenshot itself to the phone, and stop raw JSON replies [ ]
+#110 — iPhone remote: send the screenshot itself to the phone, and stop raw JSON replies [ ]
 Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-19: "I want to see my laptop screen")
 Ask: From the phone the user asked for a screenshot, approved "a", and got
 back raw JSON (`{"name": "final_answer", "arguments": {"answer": "I
