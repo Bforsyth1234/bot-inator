@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #103
+Next ID: #114
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -102,6 +102,10 @@ API auth → sandbox for installed tools → live checks.
 | 15 | A: #83 · B: #81 · C: #82 · D: #87 · E: #88 · F: #90 | A new `ai/action_journal.py`, `routes/actions.py`, `ActionHistoryView.swift`, `tools/notes.py`, `tools/calendar_access.py`, `CalendarBridge.swift`, `ApprovalPresenter.swift`, `ApprovalAlert.swift`, `schemas/ws_messages.py`, `WSMessage.swift` (sole owner of the schema files this wave) · B new `ai/taint.py` · C new `ai/egress_log.py`, `routes/egress.py`, `PrivacyLedgerView.swift` · D new `ai/delivery.py`, `routes/delivery.py`, `OfferInboxView.swift`, `events/mac_listeners.py`, `events/clipboard_watcher.py`, `tools/read_active_tab.py` · E new `ai/watches.py`, `routes/watches.py`, `WatchesView.swift` · F new `ai/tool_health.py`, `routes/tool_health.py`, `tools/meta_tool_generator.py`, `CodeReviewAlert.swift`, `ToolDetailView.swift` (+ each slot's tests). B/D/F report their schema + card fields; the runner adds them at close. Runner: `ai/orchestrator.py`, `main.py`, `ai/groq_engine.py`, `ai/mlx_engine.py`, `ai/mcp_client.py`, `tools/tool_sandbox.py`, `tools/open_url.py`, `ai/idea_outcomes.py`, `user_settings.py`, Swift app/settings/debug views, LIVING_SPEC | [x] closed 2026-11-10 (all `[~] live`) |
 | 16 | A: #78 · B: #89 · C: #84 · D: #86 · E: #85 (A–C accepted 2026-11-10) | A new `ai/standing_rules.py`, `routes/rules.py`, `RulesView.swift` · B new `Services/ScreenTextBridge.swift`, `tools/read_front_window.py`, `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift` · C new `ai/demonstration.py`, `DemonstrationPanel.swift`, `Services/HotKey.swift` · D new `Services/MeetingRecorder.swift`, `events/meeting_notes.py`, `MeetingNotesSettingsView.swift`, `Info.plist`, `ai/permissions.py` · E new `events/remote_channel.py`, `RemoteSettingsView.swift`, `events/imessage_watcher.py`. Runner: orchestrator approval path, `main.py`, `tools/__init__.py`, `ai/privacy.py`, `requirements.txt`, Settings, LIVING_SPEC §1 | [x] closed 2026-11-11 (all `[~] live`) |
 | 17 | runner: #98 #99 #100 #101 #91 #92 #96 (prep) · subagent: #97 #93 (#94 #95 deleted by the user 2026-11-11) | runner `ai/permissions.py`, `PanelPlacement.swift`, `DemonstrationPanel.swift`, `MeetingRecorder.swift`, `PermissionsView.swift`, `MeetingNotesSettingsView.swift`, `MenuBarUIApp.swift` footer, `LICENSE`, `README.md`, `install.sh`, `run.sh`, `scripts/release/`, `docs/releasing.md` · subagent (worktree) providers, first run, `SettingsView.swift`, `docs/providers.md` | [x] closed 2026-11-11 (all `[~] live`; #96 signing prep only; 1678 tests) |
+| 18 | A: #102 #103 · B: #96 (the rest: daemon in the app, login switch, update notice) · C: #104 | A new `tools/quit_app.py`, new `tools/take_screenshot.py`, `tools/__init__.py`, `tools/meta_tool_generator.py` (prompt only), `ai/tool_health.py`, new tests · B `scripts/release/`, `docs/releasing.md`, new `Services/DaemonLauncher.swift`, `MenuBarUIApp.swift` (AppDelegate launch/stop only), `SettingsView.swift` (+ new settings view), `Info.plist`, `config.py` / `user_settings.py` (writable-path overrides only), new tests. C new `ai/tool_trust.py`, `Orchestrator._load_tool` (+ the trusted flag on approval payloads), tool routes in `routes/tool_detail.py`, `ToolDetailView.swift`, `ToolManagerView.swift`, `CodeReviewAlert.swift`, `ApprovalAlert.swift` (one label), `schemas/ws_messages.py` + `WSMessage.swift` (one optional field), new tests. Runner: disables generated `close_app` / `capture_screenshot` / `list_recent_emails` once their built-ins land, the tool_health sentence (A) pointing at trust (C), README, todo, LIVING_SPEC | [x] closed 2026-11-11 (#102 #103 #104 #96 `[~] live`; 1774 tests; #105 added, not scheduled) |
+| 19 | A: #106 · B: #105 · C: #107 (user 2026-11-11: "implement the other open todos") | A `events/remote_channel.py`, `tools/send_imessage.py`, `tests/test_remote_channel.py`, new tests · B `MenuBarUI/MenuBarUI/Services/MeetingRecorder.swift`, `Views/MeetingNotesSettingsView.swift`, `Info.plist` (usage text only), `events/meeting_notes.py` only if retry needs it · C new `tools/look_at_screen.py`, new `ai/vision_engine.py`, `config.py`, `user_settings.py`, `providers.py` / `routes/providers.py`, `ai/privacy.py`, `ai/egress_log.py`, `SettingsView.swift` (+ new vision settings view), `tools/__init__.py`, `tools/meta_tool_generator.py` (prompt), `requirements.txt`, `main.py` (engine setup only), new tests. Runner: merge, `ai/taint.py` (look_at_screen = window), README, todo, LIVING_SPEC | [x] closed 2026-11-11 (#105 #106 #107 `[~] live`; 1834 tests; #108 added) |
+| 20 | A: #110 · B: #108 · C: #109 (user 2026-11-11: "implement the open todos … use subagents and complete them at once") | A `ai/orchestrator.py` (reply unwrap only), `events/remote_channel.py`, `tools/send_imessage.py`, `tools/take_screenshot.py`, `tools/look_at_screen.py`, new tests · B `events/meeting_notes.py`, `Services/MeetingRecorder.swift` (daemon-side retry only), new tests · C `ai/egress_log.py`, `Orchestrator._wrap_tool_for_approval` (the forward call only), `ai/tool_trust.py` (`NETWORK_NOTE`), `PrivacyLedgerView.swift`, new tests. A and C both add egress kinds in `ai/egress_log.py` (A: image to phone; C: trusted_tool): additive, runner merges. Runner: `main.py` no extra notification on a kept failure (#108). | [x] closed 2026-11-11 (#108 #109 #110 `[~] live`; 1887 tests) |
+| 21 | A: #112 · B: #111 (user 2026-11-11: "go through the open todos … use subagents to complete them") | A `tools/tool_sandbox.py` (relay + child shim), `tools/meta_tool_generator.py` (prompt), `tools/draft_dry_run.py`, `ai/mcp_client.py` (relay entry), `ai/orchestrator.py` (relayed-call cards), README, new tests · B `tools/look_at_screen.py` (visible-area check), `events/remote_channel.py` `card_text` (skip empty args), the Mac card renderer only if it shows nulls, new tests | [x] closed 2026-11-11 (#111 #112 `[~] live`; 1923 tests; #113 added, not scheduled) |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -161,6 +165,11 @@ None open from waves 1–12 (marked done by the user 2026-11-10; list in DONE.md
 - #84 Watch me: rebuild the app; ⌃⌥⌘R → record glyph, 5:00 countdown → download a PDF, move it to ~/Documents/Receipts, open that folder → ⌃⌥⌘R → ~3 steps → "File invoice PDFs into Receipts and open the folder" → idea card → code card → run it on a second PDF. Mail during the recording gets its card after the stop.
 - #86 Meeting notes: Settings → Meeting notes on; a meeting with one other attendee → "Take notes for <title>?" at prep time → click → Microphone + Speech prompts → say "I'll send the deck by Friday" → Stop → `~/.bot-inator/meetings/audio/` empty → one card: Friday reminder, draft to the attendee, note → Approve.
 - #85 iPhone remote: grant Automation → Messages; Settings → iPhone remote → your handle → on; leave the Mac idle 10 min; mail yourself a deadline → the card in your own thread with a code → "yes <code>" → reminder created, Mac card closes. Text "what's on my calendar tomorrow?" → answer in the thread. Check the self-sent row is `is_from_me=1` in chat.db.
+
+Wave 18 (slot A):
+
+- #102 Quit / screenshot: restart the daemon; Chat "quit Spotify" → one `quit_app` card whose Reasoning names Spotify and com.spotify.client → Approve → Spotify quits. With a TextEdit doc unsaved, "quit TextEdit" → its save prompt appears. "quit Finder" → its card says it will refuse; Approve → refused, Finder stays. "take a screenshot" → one `take_screenshot` card ("Captures everything visible on screen and saves it to ~/Desktop/Screenshot ….png") → Approve → PNG on the Desktop showing other apps' windows (if only the wallpaper: grant Screen Recording, the reply says so). Neither request drafts a new tool. Then, after the runner disables `close_app`, run a generated tool that hits -10004 (or re-enable the old one briefly) → the reply names "macOS refuses this Apple Event to any sandboxed tool…" in one line, not "grant Automation".
+- #103 Recent mail: "what are my last 5 emails?" in Chat → no tool drafted, no card (read-only), five senders/subjects newest first, none from Sent/Junk/Trash. "…in my INBOX" filters. With main on Groq (personal text off) the subjects show as the placeholder. Without Full Disk Access for the daemon → the reply says to grant it.
 
 ---
 
@@ -366,6 +375,50 @@ Verify:
 ⚬ Live: email yourself "Can you send me the report by Friday?" from
   another account → one card with a drafted reply → Approve → a threaded,
   unsent draft in Mail.
+Deviations:
+
+---
+
+#113 — BUG: reply drafts open as a new email instead of a reply in the thread [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-20: "the reply draft should be a reply to the email chain. Not a new email")
+Ask: For a recruiter's email ("26-02884::Agentic AI Engineer /
+Architect::Remote", Nishat Khan) the app opened a NEW Mail message with
+"Re: …" typed into the subject: no quoted original, not threaded.
+Findings (assistant, 2026-11-11, daemon log + code):
+1. `tools/email_draft.py` already makes real threaded replies: with
+   `reply_to_message_id` set it finds the message and runs Mail's `reply
+   … with opening window` (quoted original, In-Reply-To). With 0 it runs
+   `make new outgoing message`.
+2. The agent read the email (`read_email` → `message_id` 449983), then
+   called `draft_email(…, subject="Re: 26-02884::…", reply_to_message_id=0)`.
+   The mail prompt (`Orchestrator._build_mail_prompt`, added for "the
+   agent should read email") tells the agent to read the email but never
+   to pass its id when replying; the model filled in "Re:" by hand.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. DETERMINISTIC, NOT ONLY A PROMPT: in a turn about one email
+   (`mail_received`, or a turn whose `read_email` / `list_recent_emails`
+   returned exactly one message the draft answers), when `draft_email` is
+   called with `reply_to_message_id=0` and its `to` is that email's sender
+   (or its subject is "Re: <that subject>"), the orchestrator sets
+   `reply_to_message_id` to that message's id before the card. The card
+   says "Reply in the thread with <sender>".
+2. PROMPTS: `_build_mail_prompt` and the #70 needs-reply follow-up say
+   "to reply, call draft_email with reply_to_message_id=<id>; don't type
+   Re: yourself".
+3. A reply's subject comes from Mail (`reply` sets "Re: …"); a model-typed
+   subject on a reply is ignored rather than doubled ("Re: Re:").
+4. If the lookup by id fails (message moved/deleted), say so in the result
+   and fall back to a new message only after the card says it will.
+Files: ai/orchestrator.py (the fill-in before the card + mail prompt),
+tools/email_draft.py (subject handling on replies), ai/needs_reply.py
+(#70 prompt), tests.
+Verify:
+⚬ Tests: the logged call (to = sender, subject "Re: …", id 0) in a
+  mail_received turn → `reply_to_message_id` 449983 on the card; a draft
+  to someone else stays a new message; no "Re: Re:". Non-vacuity per
+  rule 5.
+⚬ Live: an email that asks a question arrives → the reply card → Approve
+  → Mail opens a reply under the original, quoted, not a new message.
 Deviations:
 
 ---
@@ -721,6 +774,140 @@ Verify:
   it twice → a repair card with the diff → Approve → it runs.
 Deviations:
 
+#112 — Generated tools can call enabled MCP tools (through a daemon relay) [~] live
+Wave: 21 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user ("can a generated tool access mcp servers?" → "Yes, add it")
+Ask: Let a generated tool use the MCP tools the user switched on (e.g.
+Playwright MCP for the browser), so a browser task done once in chat can
+become a reusable tool.
+Today (2026-11-11, read from the source, not run):
+1. The drafting prompt lists only built-in and generated tools; MCP tools
+   are in `orchestrator.tools` but skipped (`tools/meta_tool_generator.py`,
+   the `builtin_names` / `dynamic_names` loop).
+2. MCP sessions live in the daemon (`ai/mcp_client.McpManager`, own
+   asyncio loop). A sandboxed tool is a separate process that may exec
+   only Python, osascript, shortcuts, mdfind, cannot read `~/.bot-inator`
+   (server config, app token), and no route runs an MCP tool
+   (`routes/mcp.py`: list / add / delete / restart / tool flags).
+3. A trusted tool (#104) runs in the daemon and could call
+   `meta_tool_generator._ORCHESTRATOR.mcp_manager.call_tool(...)`, which
+   has no gate of its own ("Called after the approval gate"), or start its
+   own server. Unsupported, visible only in code review.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. RELAY, NOT DIRECT ACCESS. The sandboxed child asks the daemon over the
+   per-call unix socket (as the `open` / `osascript` shims do, #53); the
+   daemon runs the MCP tool. The child never gets the config, the token
+   or a server process.
+2. ONLY ENABLED TOOLS, NAMED IN THE SOURCE. The relay runs a tool only if
+   it is enabled now and its name appears as a literal in the reviewed
+   source (checked from the AST at load, like `network_allowed`).
+3. RESULTS ARE OUTSIDE TEXT. Same `_untrusted` header, truncation and
+   cloud redaction as an agent call; the turn is marked (#81).
+4. Ledger: one `mcp_tool` row per relayed call, as today (#82).
+5. CARDS (user, 2026-11-11: "no extra card for MCP tools you've set to
+   run without asking, and a card for the rest"). A relayed call to an
+   MCP tool the user marked "runs without asking" is covered by the
+   generated tool's own card: no extra card. Every other relayed MCP call
+   raises its own card. Unlike an agent turn, the #81 taint does not take
+   that bypass away inside the tool, because the user reviewed the source
+   naming the call (assistant's reading of the user's choice; overturn if
+   wrong).
+OPEN (the user decides when scheduled): should the trusted path (finding
+3) be closed, e.g. by giving trusted tools the same relay and making
+`call_tool` refuse calls that did not pass the gate?
+USER DECISION (2026-11-11): NO, leave it. Trusted tools (#104) may keep
+calling `McpManager.call_tool` directly; the relay and its checks are for
+sandboxed tools. (Offered: close it by giving trusted tools the relay.)
+Files:
+⚬ OWNED: `tools/tool_sandbox.py` (relay + child shim module),
+  `tools/meta_tool_generator.py` (prompt lists enabled MCP tools with
+  call signatures and the import line), `tools/draft_dry_run.py` (fake
+  MCP calls in the dry run), new tests.
+⚬ EDITED (additive): `ai/mcp_client.py` (a relay entry point that keeps
+  the gate rules), `ai/orchestrator.py` (card for relayed calls per
+  decision 5), LIVING_SPEC, README "How generated tools run".
+Approach (to decide when scheduled):
+1. Child side: `from tools.mcp import call_mcp` →
+   `call_mcp("playwright__browser_navigate", {"url": ...})` sends JSON on
+   the per-call socket and returns the text.
+2. Daemon side: check decision 2, raise a card per decision 5, call
+   `McpManager.call_tool`, return the text.
+3. Dry run: `call_mcp` records the call and returns a canned result.
+Verify:
+⚬ Tests: a sandboxed tool calls an enabled MCP tool named in its source →
+  result returned; a disabled tool, a name not in the source, a name
+  built at runtime → refused; result carries the untrusted header and is
+  redacted under a cloud engine without the opt-in; a ledger row per
+  call; a marked MCP tool runs with no extra card, an unmarked one raises a card (decision 5); dry run never reaches a real
+  server. Non-vacuity per rule 5.
+⚬ pytest gate (rule 8).
+⚬ Live: with Playwright MCP enabled, ask for a tool that opens a page and
+  returns its title → review → run → the title comes back.
+Results (subagent, wave 21 slot A, 2026-11-11):
+⚬ Child side: new `tools/mcp.py` (stdlib only): `call_mcp(name, arguments)`
+  sends `{"cmd": "mcp", ...}` on the per-call socket named by
+  `AGENT_TOOL_RELAY_SOCKET` (the only env var added to the child) and
+  returns the text, or raises `McpCallRefused`. No socket (daemon process:
+  trusted tool or `AGENT_TOOL_SANDBOX=0`) → raises.
+⚬ `tools/tool_sandbox.py`: `mcp_tool_names(source)` = string literals passed
+  to `call_mcp(...)` (first arg or `name=`; `as` aliases and
+  `<mod>.call_mcp` count; concatenation / f-string / variable never do),
+  read at load into `SandboxedTool.mcp_names`. `_OpenProxy` answers
+  `cmd: mcp` through the call's relay: name not in `mcp_names` → refused;
+  else `meta_tool_generator._ORCHESTRATOR.relay_mcp_call(...)`. Time spent
+  in a relayed call does not count toward `AGENT_TOOL_SANDBOX_TIMEOUT` (a
+  card can wait for the user), capped at 1800 s per call
+  (`MAX_RELAY_PAUSE_SECONDS`) so a loop of relayed calls can't keep a child
+  alive. No new executables or profile rules.
+⚬ `ai/mcp_client.py`: `McpManager.relay_call(name, args, allowed=, ask=)`:
+  literal check again, loaded NOW, `ask` (a card) unless the user marked it
+  "runs without asking", then `call_tool` (ledger row, header, truncation,
+  cloud redaction, unchanged). `call_tool` / the trusted path untouched.
+⚬ `ai/orchestrator.py`: `relay_mcp_call` (≈45 lines): the card ("The
+  generated tool 'x' wants to call srv__tool (a tool from the MCP server
+  'srv')"), card edits honoured, then `_taint.mark_read(..., is_mcp=True)`.
+⚬ Drafting prompt: enabled MCP tools (those in `orchestrator.tools`) get a
+  section with the import line, `call: call_mcp("srv__tool", {"arg": type})`
+  and the literal-name rule. Dry run: `tools.mcp` is a recorder returning
+  placeholder text (`out["mcp"]`); an expected-status mismatch is not
+  flagged after MCP calls; the planner prompt says so.
+⚬ Tests: new `tests/test_mcp_relay.py` (19; real sandbox-exec + real
+  `McpManager` on `fixtures/fake_mcp_server.py`): enabled + named → result
+  with header; unmarked → own card, declined → server never called; marked
+  → no extra card even in a marked turn; switched off (at load or at call
+  time), built at run time, in a variable, raw socket request → refused;
+  cloud redaction; one ledger row per call; turn marked; card wait vs
+  timeout, and its cap; dry run records and never relays; prompt lists
+  enabled MCP tools only. Full suite: 1906 passed
+  (`-p no:cacheprovider tests`, 104 s).
+⚬ Non-vacuity (each reverted, test file run, restored): literal check off in
+  both layers → 4 fail; sandbox layer only → 3 fail (mcp_client layer then
+  refuses with a different message; it is covered alone by the relay_call
+  test); enabled-now check → 3; card for unmarked → 4; card for marked → 2;
+  taint mark → 1; relay time counted → 1 (timeout test); dry-run fake → 1;
+  dry-run status leniency → 1; prompt section → 1; socket env → 10;
+  redaction in `_untrusted` → 1; pause cap removed → 1.
+⚬ For the runner: LIVING_SPEC §1/§6 row (sandbox relay for MCP; not in this
+  slot's file list).
+Deviations:
+⚬ Child-side module is a new file `tools/mcp.py` (not inside
+  `tool_sandbox.py`): it must import inside the child, where `tools` is a
+  stub package, and in the dry run. Stdlib only.
+⚬ Not in the plan, needed (rule 4): the call timeout pauses during a relayed
+  call. Without it a card waiting more than 60 s killed the child (the
+  timeout test fails without `_wait_line`).
+⚬ `tests/test_egress_log.py`: one `EXEMPT` entry for `tools/mcp.py` (its
+  `socket` import is the AF_UNIX relay; the row is `McpManager.call_tool`'s).
+  The network-site guard failed without it.
+⚬ `call_mcp` in the daemon process raises instead of calling
+  `McpManager.call_tool`: per the USER DECISION the trusted path is left
+  as it is, and an in-process fallback would have been a new ungated path
+  (also under `AGENT_TOOL_SANDBOX=0`). A tool trusted after review that uses
+  `call_mcp` therefore gets `McpCallRefused`; open for the user.
+Live check (not run): Playwright MCP enabled → "make a tool that opens a
+page and returns its title" → review shows `call_mcp("playwright__...")` →
+run → one card per unmarked Playwright call → the title comes back; the
+privacy ledger shows one `mcp_tool` row per call.
+
 ### New built-in tools
 
 Shared DECISIONS for #43–#47 (user + assistant, 2026-11-09):
@@ -797,8 +984,8 @@ Deviations:
 
 ---
 
-#102 — Built-in quit_app and take_screenshot (generated versions can't work in the sandbox) [ ]
-Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-17 build: "it denied that too")
+#102 — Built-in quit_app and take_screenshot (generated versions can't work in the sandbox) [~] live
+Wave: 18 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-17 build: "it denied that too")
 Ask: The user asked the app to close Spotify, and later to take a
 screenshot. Each time the agent wrote a tool (`close_app`,
 `capture_screenshot` in `tools/generated/`) that the user approved, and
@@ -865,6 +1052,401 @@ Verify:
   screenshot" → one `take_screenshot` card → Approve → PNG on the Desktop.
   Neither request drafts a new tool.
 Deviations:
+⚬ (slot A, 2026-11-11) RULE 4 (built-ins are not callable from inside a
+  generated tool): the decision says "callable from generated tools through
+  the existing built-in path", but that path imports the built-in INSIDE the
+  sandboxed child (`tool_sandbox` docstring), where quit and screencapture
+  fail the same way. Making them work there needs a daemon proxy in
+  `tools/tool_sandbox.py`, which this slot may not edit. So both detect the
+  child (`TMPDIR` contains `/tool-sandbox-`) and return "call the X tool
+  directly instead"; the drafting prompt says the same and tells the
+  drafter to return an error naming the built-in rather than write such a
+  tool. The agent calls them as top-level tools.
+⚬ Card: no Swift change. The card's Reasoning line carries a per-tool
+  `card_note` ("Quits Spotify (com.spotify.client). Like Quit in its menu,
+  it asks to save unsaved work." / "Captures everything visible on screen
+  and saves it to ~/Desktop/Screenshot ….png."), read by 7 lines in
+  `Orchestrator._wrap_tool_for_approval` (`getattr(tool, "card_note")`).
+  The app icon is not shown (would need a new card field in
+  `ApprovalAlert.swift`; the bundle id names the app).
+⚬ Protected apps: also the Dock, SystemUIServer, Control Center and
+  WindowManager (quitting them blanks system UI), and background-only
+  processes (activation policy "prohibited") are never matched.
+⚬ take_screenshot paths compare case-insensitively (found by a test:
+  APFS is case-insensitive, so `~/library/x.png` IS `~/Library`), refuse
+  non-.png suffixes (no suffix gets .png), require the folder to exist,
+  and never overwrite. The deny list is read from `tool_sandbox`'s own
+  constants (imported, not edited).
+⚬ tool_health: Apple Event -10004 / "privilege violation" moved from
+  "permission" to "sandbox" with its own reason (Automation was granted in
+  both live failures; the old reason told the user to grant a permission).
+  -1743 stays "permission". A denied screencapture/exec gets a reason naming
+  take_screenshot. `record_call` attaches `tell_user: "Tell the user in one
+  line why <tool> can't work: <reason>"` to a failed result dict (or
+  appends it to the raised error's message), so the reply names it. All in
+  `ai/tool_health.py`; no orchestrator change for this part.
+⚬ Not done here: disabling the generated `close_app` /
+  `capture_screenshot` (runner, decision 3); LIVING_SPEC §4/§6 rows
+  (runner, rule 9).
+Results (slot A, 2026-11-11): new `tools/quit_app.py`,
+`tools/take_screenshot.py`; registered in `tools/__init__.py` (both gated,
+not read-only); drafting prompt "Sandbox limits" block and a
+generate_custom_tool docstring line in `tools/meta_tool_generator.py`;
+`ai/tool_health.py` as above; `ai/orchestrator.py` +7 lines (card_note).
+Tests: new `tests/test_quit_app.py` (16), `tests/test_take_screenshot.py`
+(23), `tests/test_drafting_prompt_limits.py` (3),
+`tests/test_tool_health_sandbox_reason.py` (7). NSRunningApplication and
+subprocess faked; nothing quit or captured. Full suite (with #103):
+1745 passed. Non-vacuity (each guard broken on a copy, its test failed,
+restored): not-running refusal, protected bundle ids, own pid,
+background-process skip, in-sandbox note (both tools), gated (adding
+either to READ_ONLY_TOOL_NAMES fails 3 tests), card_note hook, home check,
+denied trees, case fold, no overwrite, empty capture → error, -10004 →
+sandbox, executable reason, note attached, no note when repairable,
+prompt limits, generate_custom_tool docstring: all 19 FAIL when broken.
+Live check: see Live checks (wave 18).
+
+---
+
+#103 — Built-in list_recent_emails (Mail won't give message data to a sandboxed tool) [~] live
+Wave: 18 (slot A, with #102) · Agent: subagent · Added: 2026-11-11 · Source: user (live run: pasted the app's reply)
+Ask: The agent wrote `list_recent_emails` (`tools/generated/`, AppleScript
+`messages of inbox`), the user approved it, and it failed with -10004.
+The app then told the user to grant Automation → Mail, which was already
+granted: wrong advice.
+Findings (assistant, 2026-11-11, on this Mac): under a `sandbox-exec`
+profile of only `(allow default)`, `tell application "Mail" to count
+messages of inbox` and `get subject of item 1 of (messages of inbox)`
+both fail with -10004; the same calls unsandboxed work (6206 messages).
+`activate` works sandboxed. So Mail's message data is closed to every
+generated tool, like `quit` (#102).
+DECISIONS (assistant, 2026-11-11):
+1. A READ-ONLY built-in `list_recent_emails(count=10, mailbox="")` in the
+   daemon, reading Mail's Envelope Index read-only (reuse
+   `events/mail_watcher.py`'s schema helpers and `tools/read_email.py`'s
+   paths; no AppleScript): sender, subject, date, mailbox, message_id for
+   the newest `count` (cap 50), skipping junk/trash/sent/drafts like the
+   watcher. Bodies stay with `read_email(message_id)`.
+2. PRIVACY: under a cloud main engine, subjects are redacted exactly like
+   `read_email` results (#31/#52) unless the user allowed personal text;
+   needs Full Disk Access like the watcher, and says so on failure.
+3. The drafter prompt (#102 decision 4) also says: Mail message data,
+   like quitting apps, isn't reachable from a generated tool; use
+   `list_recent_emails` / `read_email`.
+4. The runner disables the generated `list_recent_emails` (name clash).
+Verify:
+⚬ Tests on a fixture Envelope Index: newest-first, cap, mailbox filter,
+  skipped mailboxes, redaction under a cloud main engine, missing FDA →
+  a clear error. Non-vacuity per rule 5.
+⚬ Live: "what are my last 5 emails?" in Chat → no new tool drafted, no
+  card (read-only), five senders/subjects listed.
+Deviations:
+⚬ (slot A, 2026-11-11) Junk / Trash are skipped by a regex in
+  `tools/list_recent_emails.py` on top of the watcher's own-mail rule
+  (`mail_watcher.is_own_mailbox`, imported): the watcher itself skips only
+  Sent / Drafts / Outbox, and changing it would change `mail_received`.
+  Also skipped: rows with `messages.deleted` set (when the column exists),
+  and the same `global_message_id` seen in a second Gmail mailbox.
+  `mail_watcher.py` not edited.
+⚬ RULE 4 (taint): added `"list_recent_emails": "email"` to
+  `ai/taint.OUTSIDE_TEXT_TOOLS` (one line). Subjects and senders are
+  outside text like `read_email`; without it, a card after "list my
+  emails" would not carry the #81 origin notes. Not in the slot's file
+  list; documented here.
+⚬ Redaction: `redact_result` in the new module applies
+  `privacy.redact_email_result` to each listed email (one note on the
+  list, not per item); the orchestrator applies it in the same place as
+  read_email's (+4 lines, `elif tool_name == "list_recent_emails"`).
+  `ai/privacy.py` not edited.
+⚬ Ordered by `date_received DESC, ROWID DESC`; scans at most 5,000 rows
+  in batches of 200 to fill `count` past skipped mailboxes. The mailbox
+  filter matches the whole name or its last part, ignoring case ("INBOX",
+  "work"); a skipped mailbox stays skipped even when named.
+Results (slot A, 2026-11-11): new `tools/list_recent_emails.py`, registered
+read-only in `tools/__init__.py`; drafting prompt names it (and that Mail
+data isn't reachable from a generated tool) with read_email; tool_health
+-10004 reason names it. Tests: new `tests/test_list_recent_emails.py`
+(17) on a fixture Envelope Index: newest-first, cap 50, mailbox filter,
+skipped mailboxes (8 cases), deleted/duplicate rows, missing FDA (exact
+error), no index, AGENT_MAIL_ROOT, read-only + taint registration,
+redaction through the real approval wrapper (local / cloud / opted in,
+and the UI thought). Full suite 1745 passed. Non-vacuity: newest-first,
+cap, mailbox filter, junk/trash skip, dedupe, FDA message (first version
+of that test was vacuous: the fallback message also said "Full Disk
+Access"; tightened to the exact error, now fails when broken),
+orchestrator redaction, read-only registration, taint mark: all FAIL
+when broken.
+Live check: see Live checks (wave 18).
+
+---
+
+#104 — Per-tool trust: run a reviewed generated tool outside the sandbox [~] live
+Wave: 18 (slot C) · Agent: subagent · Added: 2026-11-11 · Source: user ("i really think the sandbox is holding the app back"; chose A, "build A and add it to wave 18")
+Ask: Some useful generated tools can never work sandboxed: macOS refuses
+`quit` (#102) and Mail message data (#103) to ANY `sandbox-exec` process,
+whatever the profile. Let the user choose, per tool, to run a tool they
+reviewed outside the sandbox, instead of only waiting for built-ins.
+Options offered 2026-11-11: A per-tool trust (chosen), B
+`AGENT_TOOL_SANDBOX=0` for everything (exists, not recommended), C keep
+it strict and only add built-ins.
+DECISIONS (assistant, 2026-11-11, from option A as offered; the user can
+overturn any):
+1. SANDBOX STAYS THE DEFAULT. A tool runs outside it only when the user
+   marked it trusted. Invariant 7b holds: reviewed code, plus an explicit
+   per-tool choice.
+2. ONLY THE USER SETS IT, from the app: Tool Manager → tool detail
+   ("Run outside the sandbox" toggle with a confirm sheet that says what
+   the sandbox was blocking: home-folder writes in ~/Library/~/.ssh/
+   ~/.bot-inator, the API token and memory, Terminal/Finder Apple Events,
+   other executables, network unless imported), and an off-by-default
+   checkbox on the code review card. No tool, chat command, rule (#78) or
+   watch (#88) can set it; the HTTP route needs the app's token like every
+   other route (#27).
+3. TIED TO THE CODE: stored as tool name + SHA-256 of its source in
+   `~/.bot-inator/tool_trust.json` (0600). Any change to the file (edit,
+   repair #90, reinstall) clears trust; the tool loads sandboxed again.
+4. EVERY CALL STILL ASKS (7a unchanged). The approval card for a trusted
+   tool says "Runs outside the sandbox". Tool Manager shows a badge.
+5. Loading: `Orchestrator._load_tool` imports a trusted tool in-process
+   (the existing `AGENT_TOOL_SANDBOX=0` path) and sandboxes the rest. When
+   a tool fails with a sandbox reason (`ai/tool_health`: "not repairable
+   (sandbox)"), the user is told they can trust it in Tool Manager.
+6. Network from a trusted tool is not seen by the privacy ledger (#82);
+   the confirm sheet says so when the tool imports a network module.
+Files: see the wave 18 row (slot C).
+Verify:
+⚬ Tests: untrusted → sandboxed proxy; trusted (matching hash) →
+  in-process; source changed → sandboxed again and trust dropped; the
+  route refuses without the token; no tool / rule / watch path can write
+  the trust file; the approval payload carries the "outside the sandbox"
+  flag. Non-vacuity per rule 5.
+⚬ Live: Tool Manager → `close_app` → Run outside the sandbox → confirm →
+  "quit Spotify" → card says "Runs outside the sandbox" → Approve →
+  Spotify quits. Edit the file → it's sandboxed again.
+Results (subagent, wave 18 slot C, 2026-11-11):
+⚬ New `ai/tool_trust.py`: `ToolTrust` store at `~/.bot-inator/tool_trust.json`
+  (or `$AGENT_TOOL_TRUST_PATH`; `path=None` = memory), atomic write, 0600.
+  Entry = name + SHA-256 of the file's bytes + `trusted_at` + `via`
+  (`tool_manager` / `code_review`). `check()` (the loader) drops an entry
+  whose hash no longer matches, so an edit / repair / reinstall puts the
+  tool back in the sandbox for good (restoring the old bytes does not
+  re-trust it). `SANDBOX_BLOCKS` + `NETWORK_NOTE` = the confirm-sheet text.
+⚬ `Orchestrator._load_tool`: in-process import when `AGENT_TOOL_SANDBOX=0`
+  OR the store says trusted; otherwise the sandboxed proxy. Names loaded
+  in-process go in `_unsandboxed_tools`; `_request_approval` sets
+  `outside_sandbox` on the card from it. `request_code_approval`: an approved
+  response with `outside_sandbox` registers a pending trust for the
+  approved source (`edited_code or code`); the next load trusts it only if
+  the installed file has exactly that hash (meta_tool_generator untouched).
+⚬ Routes (`routes/tool_detail.py`, already included in main.py; app token via
+  the middleware): `GET /api/tools/{name}` gains `trust` {trusted, sha256,
+  trusted_at, can_trust, sandbox_blocks, network_note} for generated tools,
+  and the sandbox note says "runs in the daemon process" when trusted;
+  `POST /api/tools/{name}/trust` {trusted, sha256}: trusting needs the hash the
+  detail showed (409 if the file changed), only for an enabled tool (409 for
+  built-ins / disabled / quarantined), then reloads the generated tools;
+  `GET /api/tool-trust` lists tools trusted at their current source (badge).
+⚬ Swift: Tool detail → Sandbox section "Run outside the sandbox" switch →
+  `TrustConfirmSheet` (the blocked list, the privacy-ledger note when it
+  imports a network module, "every call still asks"); off needs no confirm.
+  Tool Manager row badge "Runs outside the sandbox". Code review card:
+  off-by-default checkbox. Approval card header: "Runs outside the sandbox".
+⚬ Tests: new `tests/test_tool_trust.py` (18). Full suite 1696 passed
+  (`.venv/bin/python -m pytest -q -p no:cacheprovider tests`, 85 s). Swift
+  `swiftc -O` build to a scratch path: OK, no warnings.
+⚬ Non-vacuity (each reverted, test_tool_trust run, restored): loader check
+  removed → trusted-loads-in-process fails; hash-mismatch keep → 2 fail;
+  `outside_sandbox=` dropped from the card → card test fails; review
+  pending not recorded → checkbox test fails; expected-sha check off → 2
+  fail (store + route); pending applied without hash match → exact-source
+  test fails; an import of `ai.tool_trust` added to `tools/notes.py` →
+  only-loader-and-routes test fails; middleware removed from the fixture →
+  token test fails. Not covered by a failing revert: the 0600 chmod
+  (mkstemp already creates 0600, so removing chmod keeps 0600).
+⚬ For the runner (ai/tool_health.py, slot A's file): append to
+  `REASONS[CATEGORY_SANDBOX]`: "If you reviewed this tool and trust it, you
+  can let it run outside the sandbox: Tool Manager → the tool → Run outside
+  the sandbox." Note `-10004` / "privilege violation" (the #102/#103 quit
+  and Mail refusals) currently classify as CATEGORY_PERMISSION, so the
+  sentence only shows for them if #102/#103 reclassify sandboxed -10004 as
+  sandbox (or the same sentence is added to the permission reason).
+Deviations:
+⚬ Two optional schema fields, not one (rule 4: one field can't carry both
+  directions): `ApprovalRequestPayload.outside_sandbox` (daemon → app) and
+  `CodeApprovalResponsePayload.outside_sandbox` (app → daemon, the
+  checkbox). Swift mirrors both.
+⚬ Two small edits outside the slot's list, owned by no wave-18 slot:
+  `Services/WebSocketManager.swift` (`sendCodeApprovalResponse` gains a
+  defaulted `outsideSandbox` param) and `Services/ApprovalPresenter.swift`
+  (the code-review closure forwards it). Without them the checkbox can't
+  reach the daemon.
+⚬ `tests/conftest.py`: one `AGENT_TOOL_TRUST_PATH` line, so tests never read
+  or rewrite the developer's real trust file (the loader drops stale
+  entries).
+⚬ When the sandbox is on but unusable (`_refuse_unsandboxed`), trusted tools
+  are refused too (unchanged behaviour; kept small).
+⚬ Known limit: a trusted tool runs with full user access, so it could
+  itself write `~/.bot-inator/tool_trust.json`; that's what trusting means
+  (same as `AGENT_TOOL_SANDBOX=0`), and the confirm sheet says so.
+Live check (batched): the runner's plan disables the generated `close_app`
+once `quit_app` lands, and the route only trusts an enabled tool. So run it
+before that, or with any enabled generated tool: Tool Manager → tool → ⓘ →
+Run outside the sandbox → confirm sheet lists the blocks → Run Outside the
+Sandbox → row badge shows → ask for it in Chat → card says "Runs outside the
+sandbox" → Approve → it works (for `close_app`: Spotify quits). Then edit the
+file (one character) → reload → badge gone, detail switch off, card has no
+label. Also: draft a new tool with the review checkbox ticked → after
+install the badge shows.
+
+---
+
+#107 — Vision: "look at my screen" with a local vision model [~] live
+Wave: 19 (slot C) · Agent: subagent · Added: 2026-11-11 · Source: user ("can the app view the screen?" → "add vision to todo")
+Ask: The app can read screen TEXT (front window #89, browser tab #59,
+window titles) and, with #102, save a screenshot, but no model ever looks
+at an image: Groq's gpt-oss and the local Qwen/Hermes text models are
+text-only. Let the user ask about what's on screen ("what does this chart
+say?", "what's wrong with this layout?", text inside an image).
+Today (2026-11-11, this Mac): MLX vision models already cached:
+`mlx-community/Qwen3-VL-2B-Instruct-4bit` and `…-4B-Instruct-4bit` (the
+plain `Qwen/Qwen3-VL-*` and `Qwen2.5-VL-7B` folders are near-empty
+stubs). `mlx-vlm` is NOT installed in the daemon venv. Screen Recording
+and Accessibility are granted to the daemon's responsible process.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. ONE BUILT-IN, `look_at_screen(question, target="front_window")`:
+   capture (front window by default, `screen` for the whole display) with
+   `screencapture` in the daemon (not the sandbox, #102), ask a vision
+   model the question about the image, return the answer as text, delete
+   the image. Approval-gated like `take_screenshot` (the card says what
+   will be captured: window title or "the whole screen"), so nothing is
+   looked at without a click. No continuous or background capture.
+2. LOCAL BY DEFAULT: a fourth engine role, `vision`, default
+   `mlx-community/Qwen3-VL-4B-Instruct-4bit` via `mlx-vlm` (2B as the
+   small-Mac choice, tie into #93's memory check), loaded lazily on first
+   use, not at start. Add `mlx-vlm` to requirements only if it resolves
+   with the current pins (mlx-lm ≥0.32, transformers 5.x, #27 PR).
+3. CLOUD ONLY WITH THE SAME OPT-IN AS PERSONAL TEXT: a screenshot holds
+   mail, messages and more, so sending it to a cloud vision model (a #97
+   provider with an image-capable model) requires
+   `AGENT_CLOUD_PERSONAL_TEXT=1` (#31/#52) AND a vision model chosen in
+   Settings; otherwise local, or refuse with the reason. Every cloud
+   image is a privacy-ledger row (#82) with its size.
+4. SKIP SENSITIVE WINDOWS like #89: refuse to capture when 1Password /
+   a password field / a secure-input app is frontmost, and say so.
+5. The drafter prompt (#102 decision 4) names `look_at_screen`, so the
+   agent doesn't write capture tools.
+Files: new tools/look_at_screen.py, new ai/vision_engine.py (or an mlx-vlm
+path in ai/mlx_engine.py), config.py / user_settings.py (vision role),
+providers (#97) for an image-capable cloud model, SettingsView (vision
+model picker), tools/__init__.py, tools/meta_tool_generator.py (prompt),
+requirements.txt, tests.
+Verify:
+⚬ Tests with capture and model mocked: approval-gated; image deleted after
+  success and failure; cloud refused without the opt-in; ledger row when
+  sent; sensitive front app refused. Non-vacuity per rule 5.
+⚬ Measure on this Mac: load time and memory of the 4B model, seconds per
+  answer for one window screenshot.
+⚬ Live: open a chart in Numbers or a web page → Chat "what does the chart
+  in this window show?" → one card naming the window → Approve → a
+  correct description; no PNG left on disk.
+Deviations (slot C, 2026-11-11):
+⚬ Decision 3 "otherwise local, or refuse": REFUSE. A cloud vision provider
+  without the opt-in, without a chosen `<PREFIX>_VISION_MODEL` (no preset
+  has a default) or without a key is refused with the reason BEFORE
+  anything is captured; it never silently switches to the local model (an
+  unexpected 3 GB load) or the other way. A loopback preset (Ollama, LM
+  Studio) is local and needs no opt-in (#97 decision 6).
+⚬ Also only in a turn the user started (#89's `user_asked()`: chat / quick
+  ask). The card is consent, but this is what makes "no background capture"
+  hold: an event, idea or timer turn gets an error and nothing is captured.
+⚬ The ANSWER is personal text too (7c): under a cloud MAIN engine without
+  the opt-in it is the #31 placeholder (+ note), even with local vision. So
+  cloud-main users must opt in to use it; local-main users are unaffected.
+⚬ Decision 4 widened: refuse on secure input (`IsSecureEventInputEnabled`
+  via ctypes; unknown counts as on; Terminal's Secure Keyboard Entry
+  blocks every look), a never-watch app in front OR as the target, for
+  `screen` any never-watch app window on screen, private browser windows
+  (title markers), and Chrome/Safari tabs on the #58 sensitive-site list
+  (URL via `read_active_tab`'s AppleScript; if the URL can't be read the
+  check passes and the card still names the window). Browsers are NOT
+  refused, unlike #89 (a chart on a web page is the main use).
+  bot-inator's own windows are skipped: "front window" is the first layer-0
+  window of another app, so asking from the chat panel looks behind it.
+⚬ The card's window is pinned (window id, 5 min): if the user clicks
+  elsewhere before Approve, the window named on the card is the one
+  captured (all checks re-run on it).
+⚬ Images are scaled to a 1,600 px long side before the model (measured:
+  2880x1800 = 5,064 image tokens, 8.3 s; 1280 px = 1,024 tokens, 1.3 s;
+  same answer). Captured with `-x -o -l <id>` (no shadow) / `-x -m`, into a
+  0700 `botinator-look-*` temp folder removed in `finally`.
+⚬ The local model unloads after 10 idle minutes (frees ~4.4 GB) and holds
+  `MLXEngine._metal_lock` while loading and generating (two MLX
+  generations at once abort the process). Never in `_build_engines` or
+  eager loading; `main.py` only unloads it at shutdown.
+⚬ Vision is not an `ENGINE_ROLES` role (that would build and eager-load
+  it). Settings: `AGENT_VISION_PROVIDER` ("local" | preset),
+  `MLX_VISION_MODEL`, `<PREFIX>_VISION_MODEL`, read live; route
+  `GET/PUT /api/providers/vision` in `routes/providers.py` (no `main.py`
+  route change, no restart). Default model by memory: 2B below 24 GB
+  (#93's threshold), else 4B.
+⚬ The Vision settings section has its own copy of the personal-text
+  toggle (same `PUT /api/settings cloud_personal_text`): the existing one
+  only shows when a TEXT engine is cloud, so a local-text + cloud-vision
+  user could not reach it.
+⚬ Cloud calls use a plain OpenAI client and `egress_log.record_image`
+  (kind `inference`, role `vision`, tool `look_at_screen`, note "one
+  screenshot (N KB)", bytes = image + prompt), NOT the wrapped client,
+  which would store the base64 image as the row's text. Only the prompt
+  is ever kept (when keep-text is on).
+⚬ RULE 4: one line in `tests/test_egress_log.py` (not an owned file):
+  `HOOK_POINTS["ai/vision_engine.py"] = "_answer_cloud"`. The #82 guard
+  fails on any new network import without a hook point; the model download
+  (`_load_mlx_vlm`) is checked in `tests/test_vision_engine.py` (the guard
+  takes one point per file).
+⚬ For the runner (files not owned): `ai/taint.py` OUTSIDE_TEXT_TOOLS
+  `"look_at_screen": "window"` (screen text can carry injected
+  instructions, like read_front_window); LIVING_SPEC §4/§6 rows; README.
+Results (slot C, 2026-11-11):
+⚬ mlx-vlm 0.6.13 RESOLVED with the pins in a scratch venv (requirements +
+  mlx-vlm): mlx 0.32.4, mlx-lm 0.32.2, transformers 5.22.2 unchanged; it
+  adds llguidance, miniaudio, mlx-audio, opencv-python, sounddevice. Then
+  `uv pip install` into `agent-daemon/.venv` (dry run: 6 additions, no
+  upgrades); `requirements.txt` has `mlx-vlm>=0.6.13,<0.7`.
+⚬ Measured on this Mac (128 GB, warm disk cache, generated test chart,
+  never a real screenshot): 4B load 0.5-1.3 s; peak 4.3 GB (1200x800) to
+  4.8 GB (2880x1800), max RSS 3.9 GB; 1.1-2.1 s per answer at 1200x800,
+  8.3 s at 2880x1800. Through the real code path (`look_at_screen_impl`,
+  capture and window list faked, real 4B): first answer 3.7 s including
+  the load, second 1.1 s, both correct ("Q2, 340"; "Quarterly sales
+  (units)"), peak 4.38 GB, no image or folder left. 2B: load 0.7 s, peak
+  3.4 GB, 1.0 s at 1280 px, correct but wordy. A cold (not cached in RAM)
+  load was not measured.
+⚬ Files: new `tools/look_at_screen.py`, `ai/vision_engine.py`,
+  `MenuBarUI/.../Views/VisionSettingsView.swift`, `tests/test_look_at_screen.py`
+  (31), `tests/test_vision_engine.py` (21); edited `config.py`,
+  `user_settings.py`, `providers.py`, `routes/providers.py`,
+  `ai/privacy.py`, `ai/egress_log.py`, `tools/__init__.py` (registered,
+  gated, not read-only), `tools/meta_tool_generator.py` (prompt + docstring),
+  `requirements.txt`, `main.py` (shutdown unload), `SettingsView.swift`
+  (embeds the section), `tests/test_egress_log.py` (one line).
+⚬ Tests: 1828 passed. Swift typecheck clean; full `swiftc` build to a
+  scratch path links.
+⚬ Non-vacuity (each guard broken, its tests FAIL, restored): gated (in
+  READ_ONLY), image deleted (no rmtree), cloud opt-in, cloud needs a chosen
+  model, ledger row, refused before capture, secure input, unknown secure
+  = on, never-watch front / target / on screen, private window, sensitive
+  site, user turn only, own window skipped, answer redaction, scale-down,
+  card pin, Metal lock, lazy load once, drafter prompt: all 21 FAIL.
+Live check (needs the user): restart the daemon (new tool + mlx-vlm) and
+the app (Vision section). (1) Numbers chart or a web chart in front, Chat
+"what does the chart in this window show?" → ONE `look_at_screen` card
+naming that window and "the local vision model (Qwen3-VL-4B…)" → Approve →
+a correct description in a few seconds; `ls $TMPDIR | grep botinator-look`
+is empty. (2) Deny the card → nothing captured. (3) 1Password in front, or
+a password field focused → refused, no card action. (4) Settings → Vision
+shows "Screenshots stay on this Mac". Not verified here: a real capture
+(never taken, by instruction), the card's wording in the real app, the
+idle unload in a long-running daemon, a cloud vision provider.
 
 ### Privacy
 
@@ -926,6 +1508,181 @@ Verify:
   the main engine to Groq, send one chat → rows with sizes.
 Deviations:
 
+#109 — Privacy ledger: show where a trusted tool connected [~] live
+Wave: 20 (slot C) · Agent: subagent · Added: 2026-11-11 · Source: user ("can we add a todo to add the network use to the privacy ledger? or would that not work?")
+Ask: A generated tool the user trusted (#104) runs in the daemon process
+and leaves no row in the privacy ledger (#82). #104 decision 6 accepted
+that, and the confirm sheet says so (`ai.tool_trust.NETWORK_NOTE`). The
+user wants that network use in the ledger.
+Today (2026-11-11, read from the source): a network-enabled SANDBOXED
+tool gets one row per call from `SandboxedTool.forward`
+(`tools/tool_sandbox.py`): tool name, size of the arguments, no host,
+note "ran with network access; what it sent is not visible to
+bot-inator" (#82 decision 1). A trusted tool is imported by
+`Orchestrator._import_tool_module` and never passes through that proxy,
+so it gets no row at all, whether or not it imports a network module.
+Findings (assistant, 2026-11-11, run on this Mac with the daemon's venv,
+Python 3.14.8, loopback only; a scratch script, not kept in the repo):
+1. A Python audit hook (`sys.addaudithook`) in the same process sees
+   `socket.getaddrinfo` (the host name) and `socket.connect` (IP, port)
+   for a raw socket, `urllib`, `requests` and `httpx`, and
+   `urllib.Request` (URL and body) for `urllib`.
+2. A contextvar set around the call names the tool for every event
+   raised in the calling thread. In a thread the tool starts, the events
+   are still seen but the contextvar is empty
+   (`sys.flags.thread_inherit_context` is 0 on this build).
+3. A program the tool launches shows up only as `subprocess.Popen` with
+   its arguments (`/usr/bin/curl ... <url>`). Its own connections are
+   not seen.
+4. Not tested: `http.client.send` (byte counts; the loopback connect was
+   refused before anything was sent), asyncio, a real remote host, the
+   hook's cost on the daemon (it runs on every audit event).
+5. `EgressLog.stats` says "Nothing left this Mac today" only when the
+   day has zero rows, and counts every row as a request that left.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. BEST EFFORT, AND THE LEDGER SAYS SO. Rows show what Python code in the
+   daemon process connected to while the tool ran. They cannot show what
+   a launched program sent (finding 3), and code written to hide (ctypes,
+   a helper process) can avoid the hook. It is a record for tools the
+   user reviewed, not a boundary: `LIMIT_NOTE` and the trust confirm
+   sheet each get one line that says this.
+2. ONE ROW PER HOST for every non-loopback connection seen during a
+   trusted call, network module imported or not: outside the sandbox
+   "no network unless imported" does not hold. A loopback connection
+   never left the Mac: no row. A call with no connection and no launched
+   program: no row.
+3. HOSTS, NOT CONTENT. Host name (the IP when no name was resolved) and
+   bytes out where `http.client` reports them. URLs and bodies the hook
+   saw are never stored; the kept text is the call's arguments, under the
+   existing keep-text switch (#82 decision 2).
+4. Recording never fails or delays the tool (#82 decision 4): the hook
+   returns at once for events it does not track and when no trusted tool
+   is running, and catches everything (an exception in an audit hook
+   would otherwise surface inside the tool's own call).
+5. No new consent and no new bypass: cards, trust (#104) and the sandbox
+   are unchanged (7a, 7b).
+OPEN (the user decides when this is scheduled): a trusted call that
+launched a program and made no visible connection (finding 3). Either
+(a) one row with no host and the note "ran <executable>; what it sent,
+if anything, is not visible" (executable only, never its arguments), or
+(b) no row, and `LIMIT_NOTE` says launched programs are not covered.
+With (a) as the ledger counts today (finding 5), a tool such as
+`close_app` that runs `osascript` on every call would end "Nothing left
+this Mac today". Assistant's suggestion: (a), with those rows kept out
+of the day's "left this Mac" total.
+USER DECISION (2026-11-11): (a): one row naming the executable (never
+its arguments), note "what it sent, if anything, is not visible", and
+kept out of the day's "left this Mac" total.
+Files:
+⚬ OWNED: `ai/egress_log.py` (new kind + hook), new test file.
+⚬ EDITED (additive, earlier wave): `Orchestrator._wrap_tool_for_approval`
+  in `ai/orchestrator.py` (the `original_forward(...)` call),
+  `ai/tool_trust.py` (`NETWORK_NOTE`), `PrivacyLedgerView.swift` (label
+  for the new kind), README "How generated tools run", LIVING_SPEC.
+Approach (to decide when scheduled):
+1. `ai/egress_log.py`: kind `trusted_tool` (also in `KINDS`); a context
+   manager `trusted_tool_run(tool, arguments)` that sets the contextvar,
+   collects the events and writes the rows on exit. The hook is
+   installed once, on first use (an audit hook cannot be removed).
+2. `Orchestrator._wrap_tool_for_approval`: when the tool's name is in
+   `_unsandboxed_tools`, run `original_forward(...)` inside it.
+3. Threads (finding 2). Fallback if they cannot be attributed safely:
+   record calling-thread events only and say so in the note. Do not
+   attribute un-owned events by timing: the daemon's own engine calls
+   and model downloads run in other threads at the same time and
+   already have their own rows.
+4. Not in scope unless the user asks: the same hook inside the sandboxed
+   child (`_CHILD` in `tools/tool_sandbox.py`), so a network-enabled
+   sandboxed tool shows hosts instead of an empty one. That report would
+   come from a process the tool controls.
+Verify:
+⚬ Tests: a trusted fake tool that connects to a non-loopback address
+  (the connect may fail; the event is raised first) → one `trusted_tool`
+  row with the tool's name and host; a loopback connection → no row; no
+  connection and no program → no row; a sandboxed tool and a daemon
+  engine call → no `trusted_tool` row; the hook or the ledger raising
+  does not fail the tool call; the OPEN case as decided. Non-vacuity per
+  rule 5 (take the wrapper out, the first test fails).
+⚬ pytest gate (rule 8); swiftc typecheck for the Swift change.
+⚬ Live: trust a generated tool that fetches a URL, run it, open Settings
+  → Privacy ledger → a row with that tool's name and that host.
+Results (wave 20 slot C, 2026-11-11):
+1. `ai/egress_log.py`: kind `trusted_tool` (added to `KINDS` in its own
+   block, `KINDS = KINDS | {...}`, so slot A's kind edit doesn't collide);
+   context manager `trusted_tool_run(tool, arguments, log=None)`; audit
+   hook `_audit_hook`, installed once on first use. Tracked events:
+   `socket.getaddrinfo` (the name), `socket.connect` / `socket.sendto`
+   (non-loopback, non-AF_UNIX address → host row; the last name resolved
+   in the call names it, else the IP), `http.client.send` (bytes out, by
+   the connection's host), and `subprocess.Popen`, `os.system`,
+   `os.posix_spawn`, `os.spawn`, `os.exec` (program file name only;
+   `sh -c "FOO=1 curl …"` → `curl`). Rows are written after the call,
+   raised or not: one per host (note `TRUSTED_NOTE`, plus "size not
+   visible" when http.client gave no count, plus "also ran X" when a
+   program ran), or, with no host but a program, one row host `None`, note
+   "ran X; what it sent, if anything, is not visible" (decision (a)).
+   Kept text = the call's arguments under keep-text; URLs/bodies never.
+2. `stats`: rows `kind = trusted_tool AND host IS NULL` are out of
+   `count`, the byte totals, `by_kind` and `by_host`; new `not_visible`
+   count; summary "Nothing left this Mac today that bot-inator could see;
+   1 program a trusted tool ran (what they sent, if anything, is not
+   visible)" (or "N requests left …; …" when there are others). Exactly
+   "Nothing left this Mac today" still when there are no rows.
+3. `Orchestrator._wrap_tool_for_approval`: `original_forward(...)` runs
+   inside `trusted_tool_run` when the tool's name is in
+   `_unsandboxed_tools` (read per call), else `contextlib.nullcontext()`.
+4. `LIMIT_NOTE` and `tool_trust.NETWORK_NOTE` each say best effort / a
+   record, not a boundary / launched programs not visible. Swift: label
+   "Trusted tool <name>", destination "a program it launched" for a
+   host-less trusted row. README "How generated tools run": one sentence.
+5. Threads (finding 2): fallback taken. Only calling-thread (and
+   context-copying, e.g. `asyncio.to_thread`) events are attributed; a
+   thread the tool starts is not, and nothing is attributed by timing.
+   `TRUSTED_NOTE` says "not threads or programs it started".
+Verify (done here):
+⚬ New `tests/test_trusted_tool_egress.py`, 19 tests: non-loopback connect
+  → one row with tool + host; one row per host, IP when unnamed; text only
+  under keep-text, never the URL; real loopback socket/`::1`/0.0.0.0/AF_UNIX
+  → no row; real `urllib` against a loopback HTTP server with the loopback
+  test patched off → row "localhost" with http.client bytes, query string
+  not stored; no connection/no program → no row; launched program → one
+  row naming `true`, arguments absent; those rows out of the day's total;
+  outside a run (incl. a Groq `record_completion`) → no row; hook cost;
+  a started thread not attributed; hook raising, ledger raising, default
+  log raising, hook install raising → tool unaffected; tool exception
+  propagates with its row kept; nested runs; through the real approval
+  wrapper trusted → row, sandboxed (not in `_unsandboxed_tools`) → none.
+  Non-remote connects are simulated with `sys.audit("socket.connect",
+  …)` (the event the interpreter raises before connecting); no packet
+  leaves the Mac.
+⚬ Non-vacuity (rule 5), each reverted after: wrapper condition → `False`:
+  `test_trusted_tool_through_the_gate_gets_a_row` fails; stats exclusion
+  disabled: `test_launched_program_rows_are_out_of_the_days_total` fails;
+  hook catch-all narrowed: `test_hook_error_does_not_fail_the_tool` fails.
+⚬ Hook cost on this Mac (Python 3.14.8): ~37 ns per untracked audit
+  event, ~48 ns for a tracked one with no trusted call running.
+⚬ pytest gate: 1853 passed (1834 before + 19 new), 0 failed.
+⚬ `xcrun swiftc -O -parse-as-library -target arm64-apple-macos14` full
+  build to a scratch path: 0 errors.
+Deviations:
+⚬ LIVING_SPEC not edited (listed under Files, but outside this slot's
+  boundaries): runner, please add the `trusted_tool` kind and the
+  `not_visible` stats field to the ledger rows in LIVING_SPEC.
+⚬ Also counts tools loaded in-process because `AGENT_TOOL_SANDBOX=0`
+  (they are in `_unsandboxed_tools` too); same exposure, same row.
+⚬ When a call both connected and launched a program, the host rows carry
+  "also ran X" instead of a separate not-visible row.
+Unverified: a real remote host (not contacted by rule); `requests` /
+`httpx` / asyncio streams through this hook (finding 1 saw their
+connect events; not re-tested here); connection-pool reuse (a reused
+keep-alive connection raises no new connect, so no row); the Swift label
+on screen.
+Live check: trust a generated tool that fetches a URL (e.g. `urllib` GET
+of a public page), run it, open Settings → Privacy ledger → a row
+"Trusted tool <name>" with that host. Trust a tool that runs `osascript`
+(e.g. close_app) and run it → a row "a program it launched", note "ran
+osascript; …", and the day's summary does not count it as a request.
+
 ### Test hygiene
 
 ### Events and listeners
@@ -960,6 +1717,102 @@ Verify:
   unsent reply draft.
 Deviations:
 
+
+---
+
+#111 — BUG: screenshots refused when a never-watch window is open but fully covered [~] live
+Wave: 21 (slot B) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-20: "show me my screen" from the phone)
+Ask: From the phone, "show me my screen" → the card said "Passwords (on
+the never-watch list) has a window on screen; nothing was captured", while
+the visible screen showed only Messages and Mail.
+Findings (assistant, 2026-11-11, `CGWindowListCopyWindowInfo` on this
+Mac): Passwords had one window, 900×530 at (510, 297), reported
+`kCGWindowIsOnscreen = True`, but completely behind Messages and Mail.
+"On screen" in Quartz means "in the current Space and not minimized", not
+"visible"; a whole-screen capture would not have contained any of it. The
+check (`tools/look_at_screen.py` `resolve`, `NEVER_WATCH_ON_SCREEN`, used
+by `take_screenshot` (#102/#110) and `look_at_screen` (#107)) refuses on
+any such window.
+Also seen: the phone card showed `path: null` for an argument the model
+left empty.
+DECISIONS (assistant, 2026-11-11; ALL THREE CONFIRMED by the user the same day: "1) refuse only when some part of a never-watch window is actually visible. 2) yes 3) yes"):
+1. REFUSE ONLY WHEN SOME OF IT IS VISIBLE. Walk the on-screen list front to
+   back (Quartz returns it in z-order), subtract every opaque window above
+   (layer ≥ the never-watch window's, alpha 1, not the desktop) from the
+   never-watch window's rectangle; refuse if any area is left (a sliver
+   counts). Treat windows with alpha < 1 as see-through (they don't cover).
+   When the list can't be read, refuse as today.
+2. Same rule for both tools and both targets ("screen" and "front_window":
+   the front window is visible by definition, so the front-app check is
+   unchanged).
+3. CARDS hide arguments whose value is null or empty (phone and Mac).
+Files: tools/look_at_screen.py (`resolve` + a small visible-area helper),
+events/remote_channel.py `card_text` (skip empty args), the Mac card
+renderer only if it shows nulls too, tests.
+Verify:
+⚬ Tests on fixture window lists: fully covered → allowed; 1 px showing →
+  refused; covered only by a translucent window → refused; minimized →
+  allowed; list unreadable → refused. `card_text` drops `path: null`.
+  Non-vacuity per rule 5.
+⚬ Live: Passwords open behind other windows → "show me my screen" → the
+  screenshot arrives; drag Passwords partly into view → refused.
+Results (wave 21 slot B, 2026-11-11):
+⚬ `tools/look_at_screen.py`: `_window_list` now keeps each window's x/y and
+  returns `None` when Quartz fails or returns nothing; `visible_parts(raw, i)`
+  subtracts every covering window in front (`raw[:i]`, front to back) from
+  the window's rectangle (`_subtract`, at most 4 pieces per cut). A window
+  covers when alpha ≥ 1, its layer is ≥ the never-watch window's and below
+  `COVER_LAYER_LIMIT = 20` (kCGDockWindowLevel: Dock, menu bar, status
+  items and Window Server overlays never cover; floating panels do).
+  `resolve("screen")` refuses on a never-watch window only when
+  `visible_parts` is non-empty (any area, a 1 px sliver too); an
+  unreadable list refuses both targets (`WINDOW_LIST_UNREADABLE`). The
+  front-app and front-window checks are unchanged. `take_screenshot`
+  (#102/#110) calls `resolve("screen")` already, so no change there.
+⚬ `events/remote_channel.py` `card_text`: `_is_empty_arg` drops `None`,
+  blank strings, `[]`, `{}` (positional ones keep their numbers); `0` and
+  `false` stay.
+⚬ Mac card: `ApprovalAlert.swift` showed `"path" : null` in the raw JSON
+  arguments view (and the compact card's one-line fallback).
+  `JSONValue.withoutEmptyArgs()` (display only; the approved payload is
+  unchanged) drops empty kwargs and an empty `args` list. Typecheck: 0
+  errors; a scratch build of the helper printed only the non-empty keys.
+⚬ Tests: new `tests/test_never_watch_visibility.py` (17): the user's real
+  2026-11-11 list (Mail, Messages over Passwords, plus Dock/menu bar) →
+  allowed; two windows together cover → allowed; 1 px showing on each edge
+  and a 1 px gap between two covers → refused; translucent cover →
+  refused; Dock/menu bar don't cover; window behind doesn't cover;
+  minimized (absent) → allowed; list `None` → refused (both targets);
+  Quartz returning `None` or raising → `None`; front-app check unchanged;
+  both tools (`look_at_screen_impl` captures / refuses; `take_screenshot`
+  `_sensitive_refusal` and phone `card_note`); geometry; `card_text`.
+  Full suite: 1904 passed.
+⚬ Non-vacuity (each mutation, then restored, files compared): old rule
+  (refuse on any never-watch window) → 5 fail; translucent covers → 1;
+  layer limit lifted (Dock/menu bar cover) → 1; unreadable list allowed →
+  1; `card_text` shows empties → 1.
+⚬ This Mac (window list read once, no capture): Quartz order is front to
+  back (Window Server/Control Center/Dock first, then Mail, …, Passwords
+  at index 47, 900×530 at (510, 297)); `visible_parts` for Passwords = []
+  → the screenshot would now be allowed.
+Deviations:
+⚬ An EMPTY window list also counts as unreadable (a real Mac always lists
+  the menu bar); stricter than "can't be read", same direction.
+⚬ Updated `test_whole_screen_refused_while_a_password_manager_is_visible`:
+  its 1Password fixture sat exactly under Numbers (same bounds), which is
+  "fully covered" and now allowed by decision 1; moved it to x = 1100 so
+  part shows. The assertion is unchanged.
+⚬ Not changed (outside the decisions): for "screen", a PRIVATE browser
+  window still refuses even when fully covered; the same visibility rule
+  could apply there (follow-up if wanted).
+⚬ Known limits, both on the refuse side or flagged: parts under the menu
+  bar or off every display count as visible (conservative); an app's
+  see-through overlay window that reports alpha 1 at layer 0–19 would count
+  as covering (Quartz can't tell drawn from transparent pixels).
+Live check (needs the user): Passwords open behind Mail/Messages → phone
+"show me my screen" → the screenshot arrives; drag a corner of Passwords
+into view → refused naming Passwords; the phone card no longer shows
+`path: null`, nor the Mac card `"path" : null`.
 
 ---
 
@@ -1050,6 +1903,232 @@ Verify:
   by Friday") → one card with a Friday reminder and a follow-up draft →
   Approve → reminder created, unsent draft open.
 Deviations:
+
+---
+
+#105 — BUG: meeting notes fail when Dictation is off, and the recording is deleted [~] live
+Wave: 19 (slot B) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-18 build: "why does this happen")
+Ask: After a meeting recording the app showed "Notes for Meeting failed:
+Siri and Dictation are disabled The recording was deleted."
+Findings (assistant, 2026-11-11, from the code and the message):
+1. The "apple" engine uses `SFSpeechRecognizer` with
+   `requiresOnDeviceRecognition = true` (`Services/MeetingRecorder.swift`,
+   `MeetingTranscriber.transcribe`). macOS refuses recognition while Siri
+   and Dictation are both turned off, even on-device; the error text is
+   macOS's own. Recording itself worked.
+2. Nothing checks this before recording: `supportsOnDeviceRecognition` is
+   only checked after the meeting, and the Speech Recognition permission
+   (#99) can be granted while Dictation is off.
+3. On ANY transcription failure both audio files are deleted
+   (`MeetingFiles.delete(micURL/systemURL)` right after the `catch`), so
+   the meeting is lost. Deleting after a SUCCESSFUL transcript is the
+   privacy promise in Info.plist ("deleted once it is transcribed"); on a
+   failure it only loses the user's data.
+User workaround today: System Settings → Keyboard → Dictation → On, or
+Settings → Meeting notes → Transcribe with → Whisper (MLX) after
+`agent-daemon/.venv/bin/pip install mlx-whisper`.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. CHECK BEFORE RECORDING: when "apple" is the engine, a quick test
+   recognition (or the error from a 0.5 s silent buffer) at "Take notes"
+   time; if Dictation/Siri is off, don't start: say "Turn on Dictation
+   (System Settings → Keyboard → Dictation) or switch to Whisper" with a
+   button that opens that pane. Show the same status in Settings →
+   Meeting notes next to the #99 permission rows.
+2. KEEP AUDIO ON FAILURE: on a transcription error keep the files (still
+   only in `~/.bot-inator/meetings/audio/`, 0600) and show "Retry" and
+   "Delete recording" in the panel; Retry re-runs transcription (e.g.
+   after turning Dictation on or switching engine). Unretried audio is
+   deleted after 24 hours by the existing purge at launch, so the
+   "deleted once transcribed" promise only bends for a failed one, for a
+   day; say so in the panel and update the Info.plist text if needed.
+3. Fall back automatically to Whisper when it's installed and "apple"
+   fails? NO: the user picked an engine; offer it as a button instead.
+Files:
+⚬ OWNED: MenuBarUI/MenuBarUI/Services/MeetingRecorder.swift,
+  MenuBarUI/MenuBarUI/Views/MeetingNotesSettingsView.swift; Info.plist
+  (usage text only, if changed); events/meeting_notes.py only if the
+  retry needs a daemon change.
+Verify:
+⚬ swiftc build; pytest gate if Python changes.
+⚬ Live: Dictation off → Take notes → refused before recording, with the
+  pane button. Turn Dictation on → record 1 minute → notes ready, audio
+  folder empty. Force a failure (e.g. switch to Whisper without
+  mlx-whisper installed) → "Retry" and "Delete recording" shown, audio
+  still present → install it / switch back → Retry → notes ready, audio
+  gone.
+Results (wave 19 slot B, 2026-11-11):
+1. CHECK BEFORE RECORDING. New `MeetingDictationCheck.check()` in
+   `Services/MeetingRecorder.swift` (never prompts) returns `SpeechReadiness`
+   (.ready / .dictationOff / .unavailable / .unknown). With Speech
+   Recognition allowed it runs an on-device recognition of 0.5 s of silence
+   (8 s timeout): kLSRErrorDomain 201 or macOS's "Siri and Dictation are
+   disabled" text → .dictationOff; "no speech" or a result → .ready. It also
+   reads the stored switches (`com.apple.assistant.support` "Dictation
+   Enabled" / "Assistant Enabled", CFPreferences; the app isn't sandboxed),
+   used when the probe can't run (not authorized yet) or gives an odd
+   error. `begin()` runs it after the mic + speech permission steps for the
+   apple engine; .dictationOff/.unavailable → nothing is recorded, panel
+   "Notes for X didn't start" with the message "Turn on Dictation (System
+   Settings → Keyboard → Dictation) or switch to Whisper", buttons Open
+   Dictation Settings (`x-apple.systempreferences:com.apple.preference.keyboard?Dictation`),
+   Cancel, Use Whisper (only when the daemon reports mlx-whisper), Try
+   again; the daemon gets `state: failed` with the message. .unknown never
+   blocks (a failure now keeps the audio). Settings → Meeting notes: new
+   `MeetingDictationRow` under the #99 rows (dot + "on / off / …", Open
+   Settings when off, orange explanation when the engine in use is apple),
+   re-checked when the app becomes active.
+2. KEEP AUDIO ON FAILURE. On a transcription error the files stay in
+   `~/.bot-inator/meetings/audio/` (0600) with a `<id>.failed.json` marker
+   (0600); panel "Notes for X failed" shows the error, "The recording is
+   kept on this Mac (only you can read it) so you can retry. If you don't,
+   it is deleted automatically <date> (24 hours)", and Retry / Delete
+   recording / Later, plus Open Dictation Settings (when that was the
+   error) and Use Whisper (when installed). Retry re-runs on-device
+   transcription (24 h counted from the first failure); Later keeps it in
+   the menu ("Meeting notes failed: X (Retry or delete)…"). Expiry: a
+   10-minute wall-clock check while the app runs, and
+   `purgeLeftoverAudio` at launch now deletes everything EXCEPT audio with
+   a valid marker < 24 h old whose files are inside the audio folder;
+   such a kept failure re-opens its panel at launch. Info.plist
+   NSMicrophoneUsageDescription, the offer panel and Settings text now say
+   a failed one is kept up to 24 hours.
+3. No automatic Whisper fallback; Use Whisper is a button (blocked start:
+   records with engine whisper; failed one: sends the kept audio to the
+   daemon, which deletes it after transcribing, success or not).
+Daemon: unchanged. `MeetingNotes.process` keeps no per-meeting "done"
+state, so a later `meeting_audio_ready` with `transcript_path` for the same
+meeting id still publishes the one card. The app no longer sends an
+`error` audioReady on an on-device failure (the panel is the UI; the
+daemon's `_recording`/stop timer are already cleared by `state: stopped`),
+so the daemon's "Meeting notes: <error>" notification no longer duplicates
+the panel.
+Verify (done here):
+⚬ `xcrun swiftc -O -parse-as-library -target arm64-apple-macos14` full
+  build to a scratch path: 0 errors.
+⚬ Scratch Swift harness compiled from the file's own MeetingFiles /
+  FailedRecording / MeetingDictationCheck code (audio dir redirected to a
+  scratch HOME): 15/15 pass: marker 0600; purge keeps only the < 24 h
+  failure with its marker, deletes crash leftovers, a 25 h failure, audio
+  without a marker and a marker pointing outside the folder (the outside
+  file is untouched); Delete recording empties the folder; kLSRErrorDomain
+  201 / the macOS text = off, "No speech detected" ≠ off; only off /
+  unavailable block. Non-vacuity: with the old purge (delete everything)
+  "fresh audio kept" and "fresh marker kept" fail.
+⚬ On this Mac (macOS 26.6.2, Dictation currently ON): the stored switch
+  reads `Dictation Enabled = true` (matches System Settings),
+  `Assistant Enabled` absent; `supportsOnDeviceRecognition` true; no prompt
+  shown. The scratch binary has no Speech Recognition grant (status
+  not_determined) and asking would prompt, so check() returned .unknown
+  there and the silent-buffer probe itself did not run.
+⚬ Daemon, with a temporary test (not committed): error frame then a
+  transcript for the same meeting → one card; transcript with no earlier
+  error frame → one card.
+Deviations:
+⚬ `startManual` (menu "Take meeting notes now") used engine "apple"
+  always, so "switch to Whisper" did nothing for menu recordings; it now
+  asks the daemon (`GET /api/meeting-notes`, `engine_in_use`) and falls
+  back to apple when the daemon can't be reached.
+⚬ No `error` audioReady is sent on an on-device failure (see Daemon).
+⚬ A Whisper failure in the DAEMON still deletes the audio (process()'s
+  `finally`); unchanged, as #105 is about the app's on-device failure and
+  the app never hears about a daemon failure. Follow-up if wanted.
+Unverified: the probe with Dictation OFF (needs the app's Speech grant and
+the user turning Dictation off; not done to avoid changing system
+settings); that the `?Dictation` anchor scrolls to the switch (the URL
+opens Keyboard either way); the panel layout.
+Live check: Dictation off → Take notes → "didn't start" panel, nothing in
+`~/.bot-inator/meetings/audio/`, Open Dictation Settings opens Keyboard.
+Settings → Meeting notes → Dictation row says off. Turn Dictation on →
+Try again → record 1 minute → notes ready, audio folder empty. Force a
+failure (e.g. start with Dictation on, turn it off before Stop) → "failed"
+panel with Retry / Delete recording, audio + marker present → turn it on
+→ Retry → notes ready + card, audio gone. Later → menu row → Delete
+recording → folder empty. Quit/relaunch with a kept failure → panel
+returns.
+
+---
+
+#108 — Meeting notes: a Whisper failure in the daemon still deletes the audio [~] live
+Wave: 20 (slot B) · Agent: subagent · Added: 2026-11-11 · Source: assistant (wave 19 slot B report on #105)
+Ask: #105 keeps the audio when the app's "apple" transcription fails and
+offers Retry / Delete. With the "whisper" engine the daemon transcribes
+(`events/meeting_notes.py`), and on a failure there the audio is still
+deleted (unchanged by #105), so the meeting is lost the same way.
+Approach: same rule as #105 decision 2 on the daemon side: keep the files
+(0600, marked, purged after 24 h), report the failure to the app, and let
+the panel's Retry re-run the daemon's transcription.
+Verify: a test with mlx-whisper mocked to fail → audio kept, failure
+reported; Retry after the mock succeeds → one card, audio gone.
+Non-vacuity per rule 5.
+Results (wave 20 slot B, 2026-11-11):
+1. DAEMON (`events/meeting_notes.py`). `process()` on the whisper path
+   (audio, no transcript) transcribes both channels before deleting
+   either; on an exception `keep_failed()` keeps the audio (only regular
+   files inside `audio_dir()`, chmod 0600) and writes the app's #105
+   marker `<id>.failed.json` (0600, O_NOFOLLOW) in the app's
+   `FailedRecording` JSON shape (camelCase keys, `failedAt` = seconds since
+   2001-01-01 UTC) plus `"engine": "whisper"`. `failedAt` is carried over
+   from an existing marker (24 h from the first failure, also when #105's
+   "Use Whisper" hands an on-device failure over); a failure ≥ 24 h after
+   the first keeps nothing. Returns `{status: error, reason, kept}`. On
+   success the audio AND the marker are deleted, then the one card is
+   published as before. `transcribe_audio()` now deletes only on success.
+   Unchanged: an app-reported `error`, a bad id, or audio outside the
+   folder still deletes / never keeps.
+2. TELLING THE APP. `meeting_record_stop` gains optional fields
+   (`transcription: "failed"|"done"`, `title`, `error`, `message`, `kept`,
+   `audio_path`, `system_audio_path`, `started_at`, `ended_at`,
+   `stop_reason`, `failed_at`, `expires_at`) in `schemas/ws_messages.py`
+   and Swift `MeetingRecordStopPayload`. "failed" after a kept failure,
+   "done" after any whisper-path result. An old app ignores it (its
+   receiveStop only acts on the meeting it is recording).
+3. APP (`Services/MeetingRecorder.swift`). `FailedRecording.engine`
+   (optional; nil = #105 on-device marker). `receiveStop` routes
+   transcription frames to `receiveDaemonTranscription`: "failed"+kept →
+   added to `failures` (menu row, 10-min expiry loop) and the #105 failed
+   panel (Retry / Delete recording / Later) unless a recording/offer is
+   on screen; not kept → "failed … The recording was deleted."; "done" →
+   the failure is forgotten, "Notes … are ready". Retry on a whisper
+   failure re-sends `meeting_audio_ready` with the kept paths (marker left
+   for the daemon to delete); daemon not connected → the error is shown
+   and nothing is lost. "Use Whisper" is hidden for a whisper failure, and
+   no longer deletes the marker first. Delete recording / Later / the
+   24 h purge are #105's, unchanged.
+Verify (done here):
+⚬ pytest full gate: 1843 passed (new `tests/test_meeting_notes_whisper_retry.py`,
+  9 tests; 3 tests in `tests/test_meeting_notes.py` changed from "audio
+  deleted on failure" to "kept", see Deviations). mlx-whisper is never
+  imported: injected fakes, and `sys.modules["mlx_whisper"]` stubbed.
+⚬ Non-vacuity: (a) finally always deleting (the old behaviour) → 9 fail
+  (7 new + the 2 changed); (b) not deleting the marker on success → 2
+  fail (Retry one-card test, 24 h test). Restored → all pass.
+⚬ `xcrun swiftc -O -parse-as-library -target arm64-apple-macos14` full
+  build to a scratch path: 0 errors.
+⚬ Interop harness (scratch, not committed): the daemon's real
+  `process()` wrote a marker into a scratch HOME; a Swift binary built from
+  MeetingRecorder.swift's own `FailedRecording`/`MeetingFiles` code ran
+  `purgeLeftoverAudio`: 8/8 pass (marker decodes, engine whisper → Retry
+  in daemon, audio + marker kept, crash leftover purged, an #105 marker
+  without `engine` still decodes as on-device, all purged at +25 h).
+Deviations:
+⚬ No new frame: main.py's `_MEETING_FRAMES` (runner-owned) only maps
+  offer/stop, so the result rides on `meeting_record_stop` as optional
+  fields. Runner may split it into its own frame later.
+⚬ Changed 3 existing tests (`test_audio_deleted_when_transcription_fails`,
+  `test_transcribe_audio_deletes_on_its_own`,
+  `test_second_audio_deleted_when_first_fails`) that asserted the bug.
+⚬ main.py `_process_meeting_audio` still shows a "Meeting notes: <error>"
+  notification on a kept failure, alongside the panel (test pins one
+  call). Runner: skip it when `result.get("kept")` if wanted.
+Unverified: the panel flow in the running app (no live daemon/app touched);
+a real mlx-whisper failure.
+Live check: Settings → Meeting notes → Whisper with mlx-whisper NOT
+installed → record 30 s → Stop → "Notes for X failed" panel with Retry /
+Delete recording / Later; `~/.bot-inator/meetings/audio/` has the .m4a +
+`.failed.json` (0600) → install mlx-whisper → Retry → notes ready, one
+card, folder empty. Repeat → Later → menu row → Delete recording → folder
+empty. Quit/relaunch with a kept whisper failure → panel returns, Retry
+goes to the daemon.
 
 ### Approvals and UI
 
@@ -1257,7 +2336,199 @@ Verify:
 ⚬ Live: with the Mac idle, mail yourself a deadline → the reminder card
   arrives on the phone → reply "yes <code>" → reminder created. Text
   "what's on my calendar tomorrow?" → the answer in the thread.
+⚬ 2026-11-11 (user: "can we make the codes more normal and shorter. like
+  yes a no b"): codes are now one lowercase letter per open card (a, b, …;
+  i/l/o skipped; two letters only past 23 open cards). Replies `yes a`,
+  `y a`, `no a`, `n a`, any case; a bare yes still does nothing. An ended
+  letter rests for 15 min (`CODE_REUSE_S`) so a late reply can't approve a
+  newer card with the same letter. `tests/test_remote_channel.py` +2 (25);
+  non-vacuity: no resting → 1 fails; no y/n → 1 fails.
 Deviations:
+
+---
+
+#106 — BUG: iPhone remote never replies (AppleScript breaks on ’, → and other non-ASCII) [~] live
+Wave: 19 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user ("send the responses back via imessage when the user messages the app")
+Ask: The user wants the app's answers sent back by iMessage when they text
+it. That is #85, built and turned on (`/api/remote`: enabled, handle
+2032467111, idle 1 min), but no reply arrives.
+Cause (assistant, 2026-11-11, CONFIRMED): `events/remote_channel.py`
+`applescript_send` fills `tools/send_imessage._SCRIPT_TEMPLATE` with
+`json.dumps(handle)` / `json.dumps(body)`. `json.dumps` writes non-ASCII as
+`\uXXXX`, which AppleScript string literals don't understand: `return
+"it\u2019s 3 \u2192 4"` → "syntax error: Expected “"” but found unknown
+token. (-2741)", while an ASCII-only string works. The daemon log has
+three such failures today (11:36, 11:45, 11:50). The model's replies
+nearly always contain ’ — → or emoji, so the remote almost never replies.
+`tools/send_imessage.py` (unregistered built-in) and the generated
+`send_imessage` share the same bug.
+Approach: stop building AppleScript source from data. Pass handle and body
+as arguments: `osascript -e 'on run argv' -e 'tell application "Messages"
+… send (item 2 of argv) to buddy (item 1 of argv) …' -e 'end run' --
+<handle> <body>`, one shared helper used by the remote channel and
+`tools/send_imessage.py`. This also removes AppleScript injection through
+a reply's text.
+Files: events/remote_channel.py, tools/send_imessage.py, tests.
+Verify:
+⚬ Test: the helper's argv carries the body unchanged (’ → " \ newline
+  emoji) and the script text never contains the body; non-vacuity: the
+  old json.dumps path fails the test.
+⚬ Live: Mac idle 1 min → text the app "what's on my calendar tomorrow?"
+  from the phone → the answer arrives in the same thread, with any ’ or →
+  intact.
+Results (wave 19 slot A, 2026-11-11): one helper,
+`tools/send_imessage.osascript_argv` / `osascript_send`, builds
+`osascript -e 'on run argv' … -e 'end run' -- <handle> <body>`. The script
+lines (`_SCRIPT_LINES`, replaces `_SCRIPT_TEMPLATE`) hold no data. Both
+`remote_channel.applescript_send` and the `send_imessage` built-in call it
+(unused `json`/`subprocess` imports dropped). `--` keeps a body that starts
+with "-" from being read as an osascript option. Reply text can no longer
+inject AppleScript. New `tests/test_imessage_send.py` (4): the argv carries
+’ → " \ newline emoji and an injection attempt unchanged and the script
+text never contains them (remote channel and tool); a failed send still
+reports; a real `osascript` echo script (`return item 2 of argv`, no
+Messages) gets the body back byte for byte. Full suite: 1780 passed.
+Non-vacuity: old `remote_channel.py` + `send_imessage.py` → 3 of 4 fail;
+helper mutated back to json.dumps-in-script → the same 3 fail (the
+failure-path test passes on both, as intended). By hand: `osascript -e
+'return "it’s…"'` → -2741, the argv form returns the text intact, and
+`osacompile` of the real send script succeeds (compiled only, never run,
+nothing sent).
+NOTE for the user: your generated `tools/generated/send_imessage.py` (not
+in git, not touched) has the same json.dumps bug. Repair or regenerate it,
+or have it call `tools.send_imessage.osascript_send`.
+Deviations: the tests went in a new `tests/test_imessage_send.py` rather
+than `tests/test_remote_channel.py` (they cover both callers);
+`test_remote_channel.py` is unchanged (25 pass).
+Live check: needs a daemon restart on this code. Mac idle 1 min → text the
+app "what's on my calendar tomorrow?" from the phone → the answer arrives
+in the thread with ’ / → intact. Not done by the agent.
+
+---
+
+#110 — iPhone remote: send the screenshot itself to the phone, and stop raw JSON replies [~] live
+Wave: 20 (slot A) · Agent: subagent · Added: 2026-11-11 · Source: user (live run, wave-19: "I want to see my laptop screen")
+Ask: From the phone the user asked for a screenshot, approved "a", and got
+back raw JSON (`{"name": "final_answer", "arguments": {"answer": "I
+captured a screenshot and saved it to your Desktop at/…png"}}`) instead
+of the screen. They want to SEE the laptop screen on the phone.
+Findings (assistant, 2026-11-11, from the daemon log and the code):
+1. RAW JSON (bug, not phone-specific): the model's turn ended empty after
+   the tool result; the re-ask in `ai/orchestrator.py` (~line 2654,
+   "Empty reply after a tool result; re-ask gave …") returned text that
+   was itself a `final_answer` call written as JSON, and it was wrapped
+   again as `final_answer(answer=<that JSON>)`. The same reply would show
+   in the Mac's Chat.
+2. NO IMAGE (tool limit, not a macOS one): `take_screenshot` (#102) only
+   saves a PNG on the Desktop, and the remote channel (#85) only sends
+   text. Messages' AppleScript can send a file to a buddy (`send (POSIX
+   file p) to …`), so attaching the screenshot is possible.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. UNWRAP: when a reply (re-ask or normal) is a JSON object naming
+   `final_answer` / `answer` with `arguments.answer`, use that string;
+   never send or show a tool-call blob as the answer. Test with the exact
+   string from the log.
+2. ATTACH IN PHONE TURNS: when a phone turn's `take_screenshot` (or
+   `look_at_screen`, which can keep its capture for this) produced an
+   image, the remote channel sends it to the OWN handle as an attachment
+   after the text reply, via the #106 argv helper (`on run argv`; the
+   path as an argument). Only the own thread (#85 decision 1), only files
+   the daemon itself just captured (path under the capture dir, never a
+   model-supplied path).
+3. CONSENT AND PRIVACY: the approval card in a phone turn says "Takes a
+   screenshot and sends it to your phone". The image leaves the Mac
+   through iMessage (Apple, end-to-end encrypted, to the user's own
+   account): one privacy-ledger row (#82) per image with its size. The
+   screenshot is captured scaled (≈1600 px, like #107) to keep it small;
+   the Desktop copy is kept only when the user asked to save one.
+4. Sensitive windows refused as in #107 decision 4.
+Files: ai/orchestrator.py (reply unwrap), events/remote_channel.py (send
+file), tools/send_imessage.py (#106 helper: a file variant),
+tools/take_screenshot.py / tools/look_at_screen.py (expose the capture to
+the phone turn), ai/egress_log.py, tests.
+Verify:
+⚬ Tests: the logged JSON string becomes the plain answer; a phone turn
+  with a screenshot sends text then the file (argv carries the path; the
+  script holds no data); a non-phone turn sends nothing; a path outside
+  the capture dir is refused; one ledger row. Non-vacuity per rule 5.
+⚬ Live: from the phone, "show me my screen" → card "Takes a screenshot and
+  sends it to your phone" → "yes a" → the screenshot arrives in the
+  thread, and the reply is plain text.
+Results (wave 20 slot A, 2026-11-11):
+1. UNWRAP: `ai/orchestrator.unwrap_answer_blob` turns a reply that is a
+   `final_answer` / `answer` call written as JSON (arguments as an object
+   or a JSON string, OpenAI `{"function": …}` shape, a ```json fence,
+   nested) into its `answer` string; anything else is unchanged. Applied
+   in `_text_answer` (both re-asks: "Empty reply…" and "Bare 'Done.'…"),
+   to a plain-text reply before it is wrapped as `final_answer`, to a
+   `final_answer` call whose answer is itself a blob, and to the chat
+   turn's final reply in `_handle_user_message` (Mac chat and phone alike).
+2. ATTACH: phone turns are marked in `events/remote_channel`
+   (`begin_phone_turn` where `_turn_from_phone` is set, `end_phone_turn`
+   in the `_handle_event` finally that resets it; the only orchestrator
+   hook). In a phone turn `take_screenshot` captures into
+   `~/Pictures/bot-inator phone/` (0700; `new_capture_path`), scales to
+   1600 px (`vision_engine.prepare_image`), and queues it with
+   `add_capture`, which takes only a regular, non-symlink file directly in
+   that folder; a model path is never queued. `look_at_screen` copies its
+   (already scaled) capture there too. `RemoteChannel.send_reply` sends the
+   text, then each capture with the new #106-style helper
+   `tools/send_imessage.osascript_file_argv` / `osascript_send_file`
+   (`POSIX file (item 2 of argv)`; the script holds no data), to the
+   configured handle only, inside the hourly limit. A sent file is deleted
+   5 min later (Messages uploads in the background); unsent ones at turn
+   end; strays older than 15 min at the next capture. The attachment's
+   echo row (text U+FFFC) is not read as a command.
+3. CONSENT/PRIVACY: the phone-turn card says "Takes a screenshot and sends
+   it to your phone." (", and saves it to <path>" when a path was given);
+   one ledger row per image, kind `imessage_image` (new in
+   `ai/egress_log.KINDS`, additive line after `PERSONAL_REPLACED`),
+   `bytes_out` = file size. The Desktop copy is made only when the model
+   passed a `path` (the user asked to save one).
+4. SENSITIVE: a phone-turn screenshot first runs `look_at_screen.resolve
+   ("screen")` (#107 decision 4); a refusal is shown on the card and the
+   tool returns `refused: …` without capturing.
+Tests: new `tests/test_phone_screenshot.py` (25): the exact logged string
+→ plain answer; 5 other blob shapes; 6 non-blobs unchanged; the Groq
+re-ask / plain-text / nested final_answer paths; the turn reply reaching
+`send_reply` unwrapped; a phone turn sends text then the file (argv ends
+`-- <handle> <path>`, the script text holds neither; image ≤ 1600 px; one
+`imessage_image` row with the file's size; no Desktop file); a given path
+keeps the Desktop copy; a Mac turn sends nothing and queues nothing;
+sensitive window refused before capture (and on the card); the card text;
+a path outside the folder, a `..` path and a symlink are refused, and a
+direct `_send_file` of an outside file neither sends nor deletes it; no
+queueing outside a phone turn; the U+FFFC echo row; `look_at_screen`
+keeps its capture only in a phone turn; a real `osascript` echo script
+returns a path with ’ " → and spaces byte for byte. Full suite: 1859
+passed (1834 + 25). `osacompile` of the real file-send script succeeds
+(compiled only, never run, nothing sent).
+Non-vacuity: unwrap made identity → 9 fail; no `begin_phone_turn` hook
+→ 2 fail; no capture-folder check → 1; no ledger row → 1; no sensitive
+refusal → 1; old card note → 2; no attachment send → 2; no scaling → 1;
+U+FFFC row read as text → 1. (The outside-path test also caught a real
+bug during the build: `_send_file` deleted a refused file; it now never
+touches a file outside the folder.)
+RUNNER: `PrivacyLedgerView.swift` (slot C's file) should label
+`imessage_image` (e.g. "Screenshot to your phone"); until then the row
+shows the raw kind.
+Deviations:
+1. The capture folder is `~/Pictures/bot-inator phone/`, not a temp
+   folder: Messages is widely reported not to deliver AppleScript
+   attachments from /tmp or other temp locations (not verified here; the
+   live check will tell). Files are short-lived (see Results 2).
+2. "The user asked to save one" is read as "the model passed a `path`":
+   with no path the screenshot only goes to the phone. A spoken "save it"
+   without a path is not detected.
+3. The sensitive-window check runs only for phone-turn screenshots; a Mac
+   turn's `take_screenshot` is unchanged (#102), to avoid a regression in
+   the Mac flow.
+Live check: needs a daemon restart on this code, remote on. From the
+phone: "show me my screen" → card "Takes a screenshot and sends it to your
+phone." → "yes a" → a plain-text reply, then the screenshot in the same
+thread; a row "imessage_image" in the privacy ledger; nothing new on the
+Desktop. Also check that the image actually arrives (the attachment
+location is the open question). Not done by the agent.
 
 ---
 
@@ -1926,7 +3197,7 @@ Results (wave 17, 2026-11-11, commits d328716, 386610e):
 ⚬ Live (user): in a new clone, ./install.sh then ./run.sh → the app opens.
 Deviations:
 
-#96 — A signed, notarized app download for people who do not use a terminal [~] signing prep done
+#96 — A signed, notarized app download for people who do not use a terminal [~] live (wave 18 B built; needs the user's signing run)
 Wave: 17 (prep only; user, 2026-11-11: "Prep, I'll sign"; A answered) · Agent: _ · Added: 2026-11-10 · Source: assistant (get-users review, user: "add all of this to the todo.md")
 Ask: Everything before this reaches developers only. A non-developer
 needs one download that opens without a Gatekeeper warning and starts its
@@ -1967,9 +3238,149 @@ Results (wave 17 prep, 2026-11-11, commit 931e8bc):
   binary, version 0.2.0-dryrun, CFBundleName bot-inator). shellcheck clean.
 ⚬ `docs/releasing.md`: enrol, Developer ID certificate, `notarytool
   store-credentials`, each-release command, `gh release create`, failures.
-⚬ STILL OPEN: decisions 2–4 (Python + daemon inside the .app, the app
-  starting/stopping it, start at login, update notice). Until then a
-  release still needs ./install.sh and ./run.sh for the daemon.
+⚬ (wave 17) STILL OPEN then: decisions 2–4. Done in wave 18, below.
+Results (wave 18 slot B, 2026-11-11):
+⚬ PYTHON CHOICE: python-build-standalone CPython 3.14.10, release
+  20261026, `aarch64-apple-darwin-install_only_stripped` (URL in
+  `scripts/release/bundle-daemon.sh`; SHA-256
+  95eb8c87d16af37c54e9765e31d8c56c0d8ffa9968ea0f704f73a9b83f84e9f9, matches
+  GitHub's asset digest; 27 MB download, 69 MB unpacked). Why: the smallest
+  thing that loads MLX. It links only system libraries, ships sqlite with
+  `enable_load_extension` (sqlite-vec works), and pip installs the same
+  cp314 wheels as the dev venv (also 3.14), so nothing is rebuilt or
+  patched. Not chosen: copying Homebrew's Python (not relocatable, links
+  /opt/homebrew), the system python3 (a stub on Macs without the command
+  line tools), py2app/PyInstaller (a frozen app breaks the sandbox child
+  and the dry run, which re-run `sys.executable -c ...`). Release 20261110
+  skipped: a day old.
+⚬ SIZE: app 1.5 GB on disk (Python + packages 1.5 GB, of which torch,
+  pulled in by sentence-transformers, is 634 MB and .pyc 90 MB; daemon
+  sources 4 MB; menu bar app 7.5 MB); zip 482 MB. Models are not bundled.
+⚬ `scripts/release/bundle-daemon.sh` (called by `build-release.sh`): pinned
+  download into `dist/cache/` + checksum, pip install of requirements.txt
+  minus browser-use and playwright, tracked daemon sources only (no tests,
+  evals, .env, generated tools), prunes Tk/IDLE/pip/headers, compiles
+  unchecked-hash .pyc so the signed bundle is never written to (the app
+  runs Python with `-I -B`), then imports mlx.core. `build-release.sh` now
+  signs every Mach-O inside-out (283 files, found by `list-macho.py`), the
+  bundled Python with `Python.entitlements`, the app last, runs `codesign
+  --verify --deep --strict`, then `smoke-test.sh`. Without DEVELOPER_ID it
+  signs ad hoc and stops before notarizing. `BUNDLE_DAEMON=0` /
+  `SMOKE_TEST=0` opt out.
+⚬ ENTITLEMENTS (bundled Python only): `personal-information.calendars`, for
+  the daemon's in-process EventKit backend (calendar_access.py,
+  reminders.py). Tested under the hardened runtime: ctypes callbacks, PyObjC
+  blocks, mx.compile on GPU and CPU, torch and sqlite-vec all work without
+  `allow-jit` and `allow-unsigned-executable-memory`, so neither is added.
+  Library validation stays ON for Developer ID (every library is in the
+  bundle with the same Team ID; `-I` keeps user site-packages out). The
+  ad-hoc build adds `disable-library-validation` (`Python-adhoc.entitlements`):
+  without it the ad-hoc import of mlx.core failed with "mapping process and
+  mapped file (non-platform) have different Team IDs". The smoke test runs
+  the SIGNED binary, so the release run proves library validation with the
+  real Team ID before notarization.
+⚬ WRITABLE HOME: the only writes into the daemon's own tree were `.env`
+  (read) and `tools/generated` (+ nested repo, `disabled/`, `quarantine/`);
+  everything else already lives in `~/.bot-inator`, the HF cache or temp
+  dirs. New in `config.py`: `AGENT_DATA_DIR` moves both to `<dir>/.env` and
+  `<dir>/tools/generated` (created at import); `AGENT_GENERATED_TOOLS_DIR`
+  moves only the tools; unset = the dev layout, unchanged. A meta-path
+  finder points the `tools.generated` package at the moved dir, so one
+  generated tool still imports another in-process. `tool_sandbox.py`: the
+  data dir and moved generated dir are write-denied and `<data dir>/.env`
+  read-denied (added paths), and the child adds the module's own dir to
+  `tools.generated.__path__` (one line, see Deviations). The app sets
+  `AGENT_DATA_DIR=~/Library/Application Support/bot-inator` (also under the
+  existing ~/Library deny rule).
+⚬ APP: `Services/DaemonLauncher.swift` starts the bundled daemon only when
+  `Contents/Resources/python` + `agent-daemon/main.py` exist AND nothing
+  answers 127.0.0.1:8000/health; log `~/Library/Logs/bot-inator/daemon.log`
+  (rotated at 10 MB); on quit SIGTERM, SIGKILL after 5 s; restart with
+  backoff 1, 2, 4, 8, 16 s, reset after 120 s up; after 5 quick failures an
+  alert with the log tail (port-in-use named), Try Again / Show Log. A pid
+  file lets the next launch adopt (and later stop) its own daemon left by a
+  force quit; any other daemon is "external" and never touched.
+  `MenuBarUIApp.swift`: start() at launch, stop() in
+  applicationWillTerminate, nothing else. Info.plist unchanged.
+⚬ START AT LOGIN: Settings → App → "Start bot-inator at login"
+  (new `Views/AppLifecycleSettingsView.swift`, one line in SettingsView),
+  `SMAppService.mainApp`, off by default (never registered until switched
+  on); shows the "needs approval in Login Items" state.
+⚬ UPDATE NOTICE: `Services/UpdateChecker.swift` + Settings → App → "Check
+  for new versions", DEFAULT OFF. Why: 7c is local by default; the check
+  sends no user data (not even the version: the comparison is local), but
+  it is a new request that tells GitHub this Mac's IP runs bot-inator, so
+  it waits for the user. "Check now" works with the switch off (the click
+  is consent for one request). What it sends: one `GET
+  https://api.github.com/repos/Bforsyth1234/bot-inator/releases/latest`,
+  headers `Accept: application/vnd.github+json`, `User-Agent: bot-inator`,
+  ephemeral session (no cookies, no cache); daily while on. A newer tag →
+  one alert per version ("Open Release Page") and a link in Settings. It
+  runs IN THE APP, so the privacy ledger (ai/egress_log.py, the daemon's own
+  sends) doesn't see it: it must work when the daemon is down or won't
+  start, and the daemon has no route for app-originated rows. The Settings
+  caption says so and names the URL.
+⚬ Tests: new `tests/test_bundled_data_dir.py` (8): dev layout unchanged;
+  data dir moves .env + generated tools; `tools.generated` import from the
+  moved dir; profile rules; real sandbox-exec: a generated tool imports
+  another from the data dir, its write there and its read of `.env` are
+  PermissionError, and with the #96 rules removed the same tool writes and
+  reads. Rule 5, each fix reverted on its own: child `__path__` line → 2
+  fail; finder → 1 fails; dotenv path → 1 fails; sandbox rules → 2 fail;
+  restored → 8 pass. Full suite: 1686 passed. Swift typecheck clean. A
+  swiftc harness (scratch, not committed) checked version compare, backoff,
+  argv/env, layout detection, and the lifecycle against the real bundled
+  daemon on port 8766 with a throwaway HOME: start + quit (process gone);
+  SIGKILL → restarting(1 s) → new pid healthy; force-quit orphan adopted,
+  then stopped (port free); a fake /health already answering → "external",
+  nothing started, still answering after stop. shellcheck clean.
+⚬ Live check done here (ad hoc): `ALLOW_DIRTY=1 VERSION=0.2.0-dryrun
+  scripts/release/build-release.sh` → 283 nested files signed, `codesign
+  --verify --deep --strict` valid, the signed Python imported mlx 0.32.4 on
+  the GPU + torch + PyObjC + sqlite-vec, daemon on a free port answered
+  /health, nothing written inside the bundle; the zip round-trips (the
+  unzipped copy verifies). In the bundle, a generated tool in the data dir
+  loaded sandboxed, called another, and was refused the write to the data
+  dir and the .env read.
+⚬ UNVERIFIED: notarization and `spctl --assess` (no certificate); library
+  validation with a real Team ID (the release run's smoke test checks it);
+  that the notary accepts Mach-O under Contents/Resources (codesign strict
+  does); the menu bar app itself starting the daemon (the launcher ran in a
+  harness, not in the app, because the app would join the user's daemon on
+  8000); permission prompts naming bot-inator for the daemon (Full Disk
+  Access for chat.db, Automation via osascript, EventKit from the bundled
+  Python); the failure alert UI; SMAppService on a signed build; a Mac that
+  has never had the repo.
+⚬ FOR THE RUNNER / USER: (1) on a Mac without the Xcode command line tools
+  `/usr/bin/git` is a stub that offers to install developer tools when a
+  generated tool is committed (`_git_commit` in tools/meta_tool_generator.py,
+  slot A's file this wave); it needs an `xcode-select -p` guard or a
+  bundled git. → DONE by the runner at wave-18 close: `_git_available()`
+  (git on PATH; if it's `/usr/bin/git`, `xcode-select -p` must succeed,
+  which never prompts) guards `_git_commit`, `_git_read` and the identity
+  lookup; without it the tool installs with "git isn't installed …" and no
+  history. `tests/test_git_stub_guard.py` 3; non-vacuity: drop the guard →
+  2 fail. (2) torch is 634 MB of the 1.5 GB, only for memory
+  embeddings (sentence-transformers); leaving it out halves the download
+  but memory recall falls back to hash embeddings. Kept for parity: the
+  user's call. (3) the dry-run probe (`tools/draft_dry_run.py`) runs with a
+  minimal env, so a DRAFT that imports a generated tool may fail its dry
+  run in the bundled build; untested.
+⚬ Live (user): `DEVELOPER_ID=… NOTARY_PROFILE=… VERSION=0.2.0
+  scripts/release/build-release.sh` passes the smoke test, notarizes,
+  `spctl` accepts; stop any ./run.sh daemon; open the zip's app from
+  Applications → Settings → App says "Assistant running"; first-run screen
+  (#93), one approved action; Calendar / Full Disk Access prompts name
+  bot-inator; quit → port 8000 free; Start at login on → it starts after
+  logging in; Check now → "Up to date" or the release link.
 Deviations:
+⚬ The bundle installs requirements.txt minus browser-use and playwright:
+  nothing in agent-daemon imports them outside tests (grep).
+⚬ `tool_sandbox.py` got one line beyond protected paths (the child's
+  `tools.generated.__path__` includes the module's dir): without it a
+  generated tool that imports another fails in the bundled build
+  (test_sandboxed_tool_composes_... fails when it is reverted).
+⚬ `BOT_INATOR_PORT` (as in run.sh) also moves DaemonLauncher's port, for
+  testing the launcher off 8000; the app's clients still use 8000.
 
 ---

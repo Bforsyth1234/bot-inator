@@ -45,6 +45,9 @@ struct ApprovalRequestPayload: Codable, Hashable {
     /// turn: email from ...", "to: from the email, not from you"). nil on
     /// unmarked turns and from older daemons.
     var originNotes: [String]? = nil
+    /// #104: a generated tool the user trusted to run outside the sandbox.
+    /// The card says "Runs outside the sandbox". nil (older daemons) = false.
+    var outsideSandbox: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -57,6 +60,7 @@ struct ApprovalRequestPayload: Codable, Hashable {
         case actions
         case reversible
         case originNotes = "origin_notes"
+        case outsideSandbox = "outside_sandbox"
     }
 }
 
@@ -299,13 +303,19 @@ struct CodeApprovalResponsePayload: Codable, Hashable {
     /// server should persist the originally-proposed code.
     let editedCode: String?
     let userNote: String?
+    /// #104: the review card's off-by-default "Run outside the sandbox"
+    /// checkbox. The daemon trusts the tool only if the installed file is
+    /// exactly the approved source.
+    var outsideSandbox: Bool = false
 
     init(requestId: String, approved: Bool,
-         editedCode: String? = nil, userNote: String? = nil) {
+         editedCode: String? = nil, userNote: String? = nil,
+         outsideSandbox: Bool = false) {
         self.requestId = requestId
         self.approved = approved
         self.editedCode = editedCode
         self.userNote = userNote
+        self.outsideSandbox = outsideSandbox
     }
 
     enum CodingKeys: String, CodingKey {
@@ -313,6 +323,7 @@ struct CodeApprovalResponsePayload: Codable, Hashable {
         case approved
         case editedCode = "edited_code"
         case userNote = "user_note"
+        case outsideSandbox = "outside_sandbox"
     }
 }
 

@@ -34,16 +34,23 @@ Hook helpers (called by the runner at each egress site):
 * :func:`record_open_url` for ``open_url``.
 * :func:`model_download` (context manager) around a model load that may
   download weights.
+* :func:`trusted_tool_run` (context manager) around a call of a generated
+  tool that runs in the daemon process (#109): an audit hook lists the
+  hosts its Python code connected to.
 """
 
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import dataclasses
+import ipaddress
 import json
 import logging
 import os
+import shlex
 import sqlite3
+import sys
 import threading
 import time
 from datetime import date as _date, datetime, timezone, tzinfo
@@ -73,13 +80,32 @@ KINDS = frozenset({
     KIND_INFERENCE, KIND_MCP_TOOL, KIND_SANDBOXED_TOOL, KIND_OPEN_URL,
     KIND_MODEL_DOWNLOAD, KIND_IMESSAGE,
 })
+# #109: a call of a generated tool the user trusted (#104), which runs in
+# the daemon process. Kept apart from ``KINDS`` above so other kinds can be
+# added there without touching this block.
+KIND_TRUSTED_TOOL = "trusted_tool"
+KINDS = KINDS | {KIND_TRUSTED_TOOL}
+TRUSTED_NOTE = (
+    "trusted tool, ran inside bot-inator: its Python code connected to this "
+    "host (best effort; not threads or programs it started)"
+)
+SIZE_NOT_VISIBLE = "size not visible"
+LAUNCHED_NOTE = "ran {program}; what it sent, if anything, is not visible"
+# A row for a launched program with no connection seen: not "left this Mac".
+_NOT_VISIBLE_SQL = "(kind = ? AND host IS NULL)"
 PERSONAL_SENT = "sent"
 PERSONAL_REPLACED = "replaced"
+# #110: a screenshot the iPhone remote sent to the own Messages thread
+# (bytes_out is the image's size).
+KIND_IMESSAGE_IMAGE = "imessage_image"
+KINDS = KINDS | {KIND_IMESSAGE_IMAGE}
 
 NOTHING_TODAY = "Nothing left this Mac today"
 LIMIT_NOTE = (
     "MCP servers and tools with network access run as their own processes: "
-    "the ledger shows that they ran, not what they sent."
+    "the ledger shows that they ran, not what they sent. For a trusted tool "
+    "it lists the hosts its Python code connected to, best effort: not what "
+    "a program it started sent."
 )
 PROCESS_NOTE = "ran with network access; what it sent is not visible to bot-inator"
 OPEN_URL_NOTE = "opened in your browser; the browser made the request"
@@ -402,28 +428,48 @@ class EgressLog:
             return self.connect().execute("SELECT COUNT(*) FROM egress").fetchone()[0]
 
     def stats(self, day: Optional[_date | str] = None) -> dict[str, Any]:
-        """Totals for one local day (default today)."""
+        """Totals for one local day (default today).
+
+        A program a trusted tool launched with no connection seen (#109,
+        user decision (a)) is not counted as something that left the Mac:
+        those rows are left out of ``count``, the byte totals, ``by_kind``
+        and ``by_host``, and counted in ``not_visible`` instead.
+        """
         if day is None:
             day = self._local(time.time()).date()
         key = day if isinstance(day, str) else day.isoformat()
+        left = f"date = ? AND NOT {_NOT_VISIBLE_SQL}"
         with self._lock:
             conn = self.connect()
             n, out_b, in_b = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(bytes_out), 0), COALESCE(SUM(bytes_in), 0)"
-                " FROM egress WHERE date = ?", (key,),
+                f" FROM egress WHERE {left}", (key, KIND_TRUSTED_TOOL),
             ).fetchone()
             by_kind = dict(conn.execute(
-                "SELECT kind, COUNT(*) FROM egress WHERE date = ? GROUP BY kind", (key,),
+                f"SELECT kind, COUNT(*) FROM egress WHERE {left} GROUP BY kind",
+                (key, KIND_TRUSTED_TOOL),
             ).fetchall())
             by_host = dict(conn.execute(
-                "SELECT COALESCE(host, ''), COUNT(*) FROM egress WHERE date = ?"
-                " GROUP BY host", (key,),
+                "SELECT COALESCE(host, ''), COUNT(*) FROM egress"
+                f" WHERE {left} GROUP BY host", (key, KIND_TRUSTED_TOOL),
             ).fetchall())
             sent = conn.execute(
                 "SELECT COUNT(*) FROM egress WHERE date = ? AND personal_text = ?",
                 (key, PERSONAL_SENT),
             ).fetchone()[0]
+            not_visible = conn.execute(
+                f"SELECT COUNT(*) FROM egress WHERE date = ? AND {_NOT_VISIBLE_SQL}",
+                (key, KIND_TRUSTED_TOOL),
+            ).fetchone()[0]
             total = conn.execute("SELECT COUNT(*) FROM egress").fetchone()[0]
+        summary = NOTHING_TODAY if n == 0 else _summary(n, out_b, in_b)
+        if not_visible:
+            noun = "program" if not_visible == 1 else "programs"
+            summary += (
+                f" that bot-inator could see; {not_visible} {noun} a trusted tool ran"
+                if n == 0 else
+                f"; {not_visible} {noun} a trusted tool ran"
+            ) + " (what they sent, if anything, is not visible)"
         return {
             "day": key,
             "count": n,
@@ -432,7 +478,8 @@ class EgressLog:
             "by_kind": by_kind,
             "by_host": by_host,
             "personal_text_sent": sent,
-            "summary": NOTHING_TODAY if n == 0 else _summary(n, out_b, in_b),
+            "not_visible": not_visible,
+            "summary": summary,
             "total_rows": total,
             "keep_text": self.keep_text,
             "retention_days": self.retention_days,
@@ -626,6 +673,39 @@ def record_tool_run(
         return False
 
 
+def record_image(
+    *, model: Optional[str], api_base: Optional[str], image_bytes: int,
+    question: str, response: Any = None, error: Optional[BaseException] = None,
+    tool: str = "look_at_screen", log: Optional[EgressLog] = None,
+) -> bool:
+    """One screenshot sent to a cloud vision model (#107 decision 3). Never raises.
+
+    ``bytes_out`` is the image plus the question; the note gives the image
+    size. Only the question is kept as text (while keep-text is on), never
+    the image. A loopback ``api_base`` never left the Mac: no row.
+    """
+    try:
+        import providers as _providers  # noqa: WPS433
+
+        if _providers.is_loopback_url(api_base or ""):
+            return False
+        size = max(0, int(image_bytes or 0))
+        q = str(question or "")
+        tokens_out, tokens_in = _usage(response)
+        note = f"one screenshot ({_human_bytes(size)})"
+        if error is not None:
+            note += f"; failed: {type(error).__name__}"
+        return (log or default_log()).record(
+            KIND_INFERENCE, host_of(api_base), "vision", model,
+            size + len(q.encode("utf-8")), payload_size(response),
+            PERSONAL_SENT, q or None,
+            tool=tool, note=note, tokens_out=tokens_out, tokens_in=tokens_in,
+        )
+    except Exception:
+        logger.exception("egress record failed")
+        return False
+
+
 def record_open_url(url: str, *, log: Optional[EgressLog] = None) -> bool:
     """``open_url`` handed ``url`` to the browser. Only the host is kept by default."""
     try:
@@ -699,13 +779,244 @@ def model_download(
                 logger.exception("egress record failed")
 
 
+# ---- trusted tools (#109) ------------------------------------------------------
+#
+# A trusted generated tool runs in the daemon process, so the sandbox proxy's
+# row (#82 decision 1) never happens. An audit hook (PEP 578) sees the
+# connections Python code makes; a contextvar set around the call names the
+# tool. DECISIONS (todo #109):
+#
+# 1. Best effort, and the ledger says so (``TRUSTED_NOTE``, ``LIMIT_NOTE``):
+#    a thread the tool starts gets an empty context (finding 2), so its
+#    events are not attributed; a launched program's own connections are not
+#    seen (finding 3); ctypes or a helper process avoid the hook.
+# 2. One row per non-loopback host; a loopback connection is no row; a call
+#    with no connection and no launched program is no row. A launched
+#    program with no connection seen is one row naming the program (never
+#    its arguments), host ``None``, kept out of the day's total (``stats``).
+# 3. Hosts, not content: the name the code resolved (the IP when none was),
+#    and bytes out where ``http.client`` reports them. URLs and bodies the
+#    hook sees are never stored; the kept text is the call's arguments,
+#    under the keep-text switch.
+# 4. The hook returns at once for events it does not track and when no
+#    trusted call is running, and catches everything: it never raises into,
+#    blocks or slows the tool. Rows are written after the call returns.
+
+_CONNECT_EVENTS = frozenset({"socket.connect", "socket.sendto"})
+_LAUNCH_EVENTS = frozenset({
+    "subprocess.Popen", "os.system", "os.posix_spawn", "os.spawn", "os.exec",
+})
+_TRACKED_EVENTS = frozenset(
+    {"socket.getaddrinfo", "http.client.send"} | _CONNECT_EVENTS | _LAUNCH_EVENTS
+)
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish"})
+
+
+class _TrustedRun:
+    __slots__ = ("tool", "hosts", "programs", "last_name", "http_hosts")
+
+    def __init__(self, tool: str) -> None:
+        self.tool = tool
+        self.hosts: dict[str, int] = {}       # host -> bytes out (http.client)
+        self.http_hosts: set[str] = set()     # hosts http.client reported
+        self.programs: dict[str, None] = {}   # launched program names, in order
+        self.last_name: Optional[str] = None  # last name resolved in this call
+
+
+_RUN: contextvars.ContextVar[Optional[_TrustedRun]] = contextvars.ContextVar(
+    "egress_trusted_run", default=None,
+)
+_hook_installed = False
+_hook_lock = threading.Lock()
+
+
+def _text(value: Any) -> str:
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", "replace")
+    if isinstance(value, os.PathLike):
+        return os.fsdecode(value)
+    return value if isinstance(value, str) else ""
+
+
+def _is_local_host(host: str) -> bool:
+    """Loopback (or the unspecified address, which connects locally)."""
+    h = host.strip().strip("[]").lower()
+    if not h:
+        return True
+    if h == "localhost" or h.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h.split("%", 1)[0])
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_unspecified
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]").split("%", 1)[0])
+        return True
+    except ValueError:
+        return False
+
+
+def _command_word(command: str) -> Optional[str]:
+    """The first word of a shell command that is not ``NAME=value``."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        words = command.split()
+    for word in words:
+        if "=" in word and not word.startswith(("/", ".")):
+            continue
+        return os.path.basename(word) or None
+    return None
+
+
+def _program_name(executable: Any, argv: Any) -> Optional[str]:
+    """The program's file name, never its arguments. ``sh -c "curl …"`` is
+    named by the command's first word (``curl``)."""
+    if isinstance(argv, (str, bytes, os.PathLike)):
+        args: list[Any] = [argv]
+    else:
+        args = list(argv or ())
+    exe = _text(executable) or (_text(args[0]) if args else "")
+    name = os.path.basename(exe.strip())
+    if name in _SHELLS and len(args) > 2 and _text(args[1]) == "-c":
+        name = _command_word(_text(args[2])) or name
+    return name or None
+
+
+def _note_connect(run: _TrustedRun, address: Any) -> None:
+    if not isinstance(address, tuple) or not address:
+        return  # AF_UNIX path: stays on this Mac
+    host = _text(address[0])
+    if not host or _is_local_host(host):
+        return
+    name = host
+    if _is_ip(host) and run.last_name:
+        name = run.last_name
+    run.hosts.setdefault(name, 0)
+
+
+def _audit_hook(event: str, args: tuple[Any, ...]) -> None:
+    """Never raises (decision 4): an exception here would surface in the
+    caller's own ``connect`` / ``Popen``."""
+    if event not in _TRACKED_EVENTS:
+        return
+    try:
+        run = _RUN.get()
+        if run is None:
+            return
+        if event == "socket.getaddrinfo":
+            host = _text(args[0]) if args else ""
+            if host and not _is_ip(host) and not _is_local_host(host):
+                run.last_name = host.lower()
+        elif event in _CONNECT_EVENTS:
+            _note_connect(run, args[1] if len(args) > 1 else None)
+        elif event == "http.client.send":
+            conn, data = (tuple(args) + (None, None))[:2]
+            host = _text(getattr(conn, "host", "")).lower()
+            if host and not _is_local_host(host) and isinstance(data, (bytes, bytearray)):
+                run.hosts[host] = run.hosts.get(host, 0) + len(data)
+                run.http_hosts.add(host)
+        elif event == "os.system":
+            name = _command_word(_text(args[0])) if args else None
+            if name:
+                run.programs.setdefault(name, None)
+        else:
+            rest = tuple(args[1:]) if event == "os.spawn" else tuple(args)
+            executable, argv = (rest + (None, None))[:2]
+            name = _program_name(executable, argv)
+            if name:
+                run.programs.setdefault(name, None)
+    except Exception:
+        pass
+
+
+def _install_hook() -> bool:
+    """Add the audit hook once (it cannot be removed). Never raises."""
+    global _hook_installed
+    if _hook_installed:
+        return True
+    try:
+        with _hook_lock:
+            if not _hook_installed:
+                sys.addaudithook(_audit_hook)
+                _hook_installed = True
+        return True
+    except Exception:
+        logger.exception("egress audit hook not installed")
+        return False
+
+
+def _write_trusted_rows(
+    run: _TrustedRun, arguments: Any, log: Optional[EgressLog],
+) -> int:
+    target = log or default_log()
+    text = payload_text(arguments) if arguments is not None else None
+    programs = ", ".join(run.programs)
+    written = 0
+    if run.hosts:
+        for host, sent in run.hosts.items():
+            note = TRUSTED_NOTE
+            if host not in run.http_hosts:
+                note += f"; {SIZE_NOT_VISIBLE}"
+            if programs:
+                note += "; also " + LAUNCHED_NOTE.format(program=programs)
+            written += bool(target.record(
+                KIND_TRUSTED_TOOL, host, None, None, sent, 0, None, text,
+                tool=run.tool, note=note,
+            ))
+    elif programs:
+        written += bool(target.record(
+            KIND_TRUSTED_TOOL, None, None, None, 0, 0, None, text,
+            tool=run.tool, note=LAUNCHED_NOTE.format(program=programs),
+        ))
+    return written
+
+
+@contextlib.contextmanager
+def trusted_tool_run(
+    tool: str, arguments: Any = None, *, log: Optional[EgressLog] = None,
+) -> Iterator[None]:
+    """Wrap one call of a trusted (in-process) generated tool (#109).
+
+    Rows are written when the call ends, raised or not. Recording errors
+    are swallowed; the tool's own exceptions propagate unchanged.
+    """
+    token = None
+    run: Optional[_TrustedRun] = None
+    try:
+        if _install_hook():
+            run = _TrustedRun(str(tool))
+            token = _RUN.set(run)
+    except Exception:
+        logger.exception("egress trusted-tool start failed")
+        token = run = None
+    try:
+        yield
+    finally:
+        if token is not None:
+            try:
+                _RUN.reset(token)
+            except Exception:
+                _RUN.set(None)
+        if run is not None:
+            try:
+                _write_trusted_rows(run, arguments, log)
+            except Exception:
+                logger.exception("egress record failed")
+
+
 __all__ = [
     "COLUMNS", "DB_PATH_ENV", "DEFAULT_MAX_ROWS", "EgressLog", "KEEP_TEXT_KEY",
     "KINDS", "KIND_IMESSAGE", "KIND_INFERENCE", "KIND_MCP_TOOL", "KIND_MODEL_DOWNLOAD",
-    "KIND_OPEN_URL", "KIND_SANDBOXED_TOOL", "LIMIT_NOTE", "NOTHING_TODAY",
+    "KIND_OPEN_URL", "KIND_SANDBOXED_TOOL", "KIND_TRUSTED_TOOL", "LIMIT_NOTE",
+    "NOTHING_TODAY",
     "PERSONAL_REPLACED", "PERSONAL_SENT", "RETENTION_DAYS", "TEXT_RETENTION_DAYS",
     "clear", "default_db_path", "default_log", "host_of", "keep_text_enabled",
-    "model_download", "payload_size", "personal_text_flag", "record",
+    "model_download", "payload_size", "personal_text_flag", "record", "record_image",
     "record_completion", "record_open_url", "record_tool_run", "rows",
-    "set_default_log", "stats", "wrap_openai_client",
+    "set_default_log", "stats", "trusted_tool_run", "wrap_openai_client",
 ]

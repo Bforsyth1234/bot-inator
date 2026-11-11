@@ -96,6 +96,12 @@ struct ApprovalAlert: View {
                 Text(payload.toolName)
                     .appFont(.label, design: .monospaced)
                     .foregroundStyle(.secondary)
+                if payload.outsideSandbox == true {
+                    // #104: the user trusted this generated tool's code.
+                    Label("Runs outside the sandbox", systemImage: "lock.open.fill")
+                        .appFont(.secondary, weight: .semibold)
+                        .foregroundStyle(.orange)
+                }
             }
             Spacer()
             if let timeout = payload.timeoutSeconds {
@@ -140,7 +146,7 @@ struct ApprovalAlert: View {
         VStack(alignment: .leading, spacing: 4) {
             caption("Arguments")
             ScrollView {
-                Text(payload.toolArgs.prettyPrinted())
+                Text(payload.toolArgs.withoutEmptyArgs().prettyPrinted())
                     .appFont(.secondary, design: .monospaced)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -424,6 +430,34 @@ struct CompactApprovalCard: View {
     }
 }
 
+/// Display-only clean-up of a card's arguments (#111): an argument the
+/// model left empty (`null`, `""`, `[]`, `{}`) is not shown, as on the
+/// phone (`card_text`). `false` and `0` are values and stay. Positional
+/// args keep their places (removing one would renumber the rest); an empty
+/// `args` list is dropped. The payload sent back on approval is unchanged.
+extension JSONValue {
+    var isEmptyArg: Bool {
+        switch self {
+        case .null: return true
+        case .string(let v): return v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .array(let v): return v.isEmpty
+        case .object(let v): return v.isEmpty
+        default: return false
+        }
+    }
+
+    func withoutEmptyArgs() -> JSONValue {
+        guard case .object(var top) = self else { return self }
+        if case .object(let kwargs)? = top["kwargs"] {
+            top["kwargs"] = .object(kwargs.filter { !$0.value.isEmptyArg })
+        } else if top["args"] == nil {
+            top = top.filter { !$0.value.isEmptyArg }
+        }
+        if top["args"]?.isEmptyArg == true { top["args"] = nil }
+        return .object(top)
+    }
+}
+
 /// Pure logic for the light card (#83).
 enum CompactCard {
     /// A reversible one-call card (not a #76 bundle, not an idea card).
@@ -451,7 +485,7 @@ enum CompactCard {
     static func lines(_ payload: ApprovalRequestPayload) -> [ApprovalInfoRow] {
         guard let spec = ApprovalEditSpec.spec(for: payload.toolName, toolArgs: payload.toolArgs) else {
             return [ApprovalInfoRow(label: "Arguments",
-                                    value: payload.toolArgs.prettyPrinted()
+                                    value: payload.toolArgs.withoutEmptyArgs().prettyPrinted()
                                         .split(whereSeparator: \.isNewline).joined(separator: " "))]
         }
         let merged = ApprovalEditSpec.mergedKwargs(payload.toolArgs, params: spec.params)

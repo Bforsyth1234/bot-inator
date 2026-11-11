@@ -221,7 +221,8 @@ def test_audio_deleted_after_transcription() -> None:
     assert not audio.exists() and len(published) == 1
 
 
-def test_audio_deleted_when_transcription_fails() -> None:
+def test_audio_kept_when_transcription_fails() -> None:
+    # #108 (was "deleted when transcription fails"): kept for the Retry.
     audio = _audio()
 
     def boom(path: str) -> str:
@@ -229,7 +230,8 @@ def test_audio_deleted_when_transcription_fails() -> None:
 
     notes, _, _, published = make(transcriber=boom)
     out = asyncio.run(notes.process({"meeting_id": "m1", "audio_path": str(audio)}))
-    assert out["status"] == "error" and not audio.exists() and published == []
+    assert out["status"] == "error" and out["kept"] is True
+    assert audio.exists() and MN.marker_path("m1").exists() and published == []
 
 
 def test_audio_deleted_when_the_app_reports_failure() -> None:
@@ -382,7 +384,7 @@ def test_transcribe_audio_deletes_on_its_own() -> None:
 
     with pytest.raises(MN.TranscriptionError):
         MN.transcribe_audio(bad, boom)
-    assert not bad.exists()
+    assert bad.exists()  # #108: a failure leaves it to the caller (kept for a Retry)
 
 
 def test_whisper_engine_tags_channels_and_deletes_both() -> None:
@@ -398,7 +400,7 @@ def test_whisper_engine_tags_channels_and_deletes_both() -> None:
     assert reminders == ["Send the deck"]  # the others' "I'll" is not the user's
 
 
-def test_second_audio_deleted_when_first_fails() -> None:
+def test_both_audio_kept_when_first_fails() -> None:
     mic, sys_audio = _audio("m2-me.m4a"), _audio("m2-others.m4a")
 
     def boom(path: str) -> str:
@@ -407,4 +409,5 @@ def test_second_audio_deleted_when_first_fails() -> None:
     notes, *_ = make(transcriber=boom)
     out = asyncio.run(notes.process({"meeting_id": "m2", "audio_path": str(mic),
                                      "system_audio_path": str(sys_audio)}))
-    assert out["status"] == "error" and not mic.exists() and not sys_audio.exists()
+    # #108 (was "second audio deleted"): both kept for the Retry.
+    assert out["status"] == "error" and mic.exists() and sys_audio.exists()

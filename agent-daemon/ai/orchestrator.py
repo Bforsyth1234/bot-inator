@@ -479,9 +479,17 @@ class Orchestrator:
         )
         await self._send(msg)
         try:
-            return await asyncio.wait_for(
+            resp = await asyncio.wait_for(
                 fut, timeout=self.code_approval_timeout
             )
+            if resp.approved and resp.outside_sandbox:
+                # #104: the review card's checkbox; trusted at the next load
+                # only if the installed file is exactly this source.
+                from ai import tool_trust
+
+                tool_trust.store_for(self).offer_from_review(
+                    tool_name, resp.edited_code or code)
+            return resp
         except asyncio.TimeoutError:
             # Atomically pop to avoid race with submit_code_approval_response
             self._pending_code.pop(request_id, None)
@@ -709,11 +717,26 @@ class Orchestrator:
     def _load_tool(
         self, name: str, path: Path, exclude: frozenset[str] = frozenset()
     ) -> Any:
-        """Load ``path`` as a sandboxed proxy, or in-process when opted out (#22)."""
+        """Load ``path`` as a sandboxed proxy, or in-process when opted out (#22)
+        or when the user trusted this exact source (#104, ``ai.tool_trust``)."""
+        from ai import tool_trust
         from tools import tool_sandbox
 
-        if not tool_sandbox.sandbox_enabled():
-            return self._import_tool_module(name, path, exclude)
+        unsandboxed = self.__dict__.setdefault("_unsandboxed_tools", set())
+        unsandboxed.discard(name)
+        mcp_names = self.__dict__.setdefault("_unsandboxed_mcp_names", {})
+        mcp_names.pop(name, None)
+        if not tool_sandbox.sandbox_enabled() or tool_trust.store_for(self).check(name, path):
+            tool_obj = self._import_tool_module(name, path, exclude)
+            if tool_obj is not None:
+                unsandboxed.add(name)
+                # #112 (user: "Yes, use the relay"): the literal call_mcp names
+                # in the reviewed source, as the sandbox reads them at load.
+                try:
+                    mcp_names[name] = tool_sandbox.mcp_tool_names(path.read_text("utf-8"))
+                except Exception:
+                    mcp_names[name] = frozenset()
+            return tool_obj
         return tool_sandbox.load_sandboxed_tool(name, path, exclude)
 
     def _refuse_unsandboxed(self, target: Path) -> bool:
@@ -969,6 +992,9 @@ class Orchestrator:
                 await self._handle_user_message(event, event_id)
             finally:
                 self._turn_from_phone = False
+                from events import remote_channel as remote_mod
+
+                remote_mod.end_phone_turn()
             return
 
         if event.event_type == "daily_brief":
@@ -1042,9 +1068,13 @@ class Orchestrator:
         # #85: a turn the own Messages thread started is answered there, and
         # its cards may be mirrored to the phone. Only the remote channel
         # sets this source (the WS user_message never carries one).
-        from events.remote_channel import REMOTE_SOURCE
+        from events import remote_channel as remote_mod
 
-        self._turn_from_phone = (event.metadata or {}).get("source") == REMOTE_SOURCE
+        self._turn_from_phone = (event.metadata or {}).get("source") == remote_mod.REMOTE_SOURCE
+        if self._turn_from_phone:
+            # #110: a screenshot this turn captures goes to the phone after
+            # the reply (``RemoteChannel.send_reply``).
+            remote_mod.begin_phone_turn(event_id)
         if self.memory is not None and text:
             try:
                 await asyncio.to_thread(
@@ -1123,6 +1153,7 @@ class Orchestrator:
                 self._rerun_tool_name = None
             reply = str(result) if result is not None else reply
 
+        reply = unwrap_answer_blob(reply)  # #110: never a tool-call blob
         await self._emit_thought(event_id, "complete", reply[:500])
         remote = getattr(self, "remote_channel", None)
         if self._turn_from_phone and remote is not None:
@@ -1490,6 +1521,13 @@ class Orchestrator:
                         "\n" + extra["summary"] if extra.get("summary") else ""
                     )
                 reasoning = f"Agent wants to call {tool_name}"
+                note_fn = getattr(tool, "card_note", None)
+                if callable(note_fn):
+                    # #102: a built-in's one line for its card (app, file).
+                    try:
+                        reasoning += ". " + str(note_fn(*call_args, **call_kwargs))
+                    except Exception:
+                        logger.debug("card_note for %s failed", tool_name, exc_info=True)
                 if mcp_server:
                     reasoning += f" (a tool from the MCP server {mcp_server!r})"
                 if shield is not None:
@@ -1533,12 +1571,41 @@ class Orchestrator:
                     orchestrator, idea_summary, call_args, call_kwargs
                 )
             is_dynamic = tool_name in getattr(orchestrator, "_dynamic_tool_names", ())
-            try:
-                result = (
-                    original_forward(*call_args, **call_kwargs)
-                    if original_forward
-                    else None
+            # #109: a trusted (in-process) generated tool gets ledger rows for
+            # the hosts it connected to; the sandbox proxy records the rest.
+            import contextlib
+
+            from ai import egress_log as _egress
+
+            in_process = tool_name in (getattr(orchestrator, "_unsandboxed_tools", None) or ())
+            ledger_run = (
+                _egress.trusted_tool_run(
+                    tool_name, {"args": call_args, "kwargs": call_kwargs},
                 )
+                if in_process
+                else contextlib.nullcontext()
+            )
+            mcp_run: Any = contextlib.nullcontext()
+            if in_process:
+                # #112: call_mcp in a trusted tool goes through the same relay
+                # checks and cards as in a sandboxed one.
+                from tools import mcp as _mcp
+
+                allowed = (getattr(orchestrator, "_unsandboxed_mcp_names", None) or {}).get(
+                    tool_name, frozenset()
+                )
+                mcp_run = _mcp.in_process_relay(
+                    lambda n, a, _t=tool_name, _al=allowed: orchestrator.relay_mcp_call(
+                        _t, n, a, allowed=_al
+                    )
+                )
+            try:
+                with ledger_run, mcp_run:
+                    result = (
+                        original_forward(*call_args, **call_kwargs)
+                        if original_forward
+                        else None
+                    )
             except Exception as exc:
                 if is_dynamic:
                     # #90: a generated tool that raised counts toward repair.
@@ -1577,6 +1644,10 @@ class Orchestrator:
             if tool_name == "read_email":
                 # The result goes back into the main engine's prompt (#31).
                 result = privacy.redact_email_result(result, "main")
+            elif tool_name == "list_recent_emails":
+                # #103: the same redaction, per listed email.
+                from tools.list_recent_emails import redact_result
+                result = redact_result(result, "main")
             label = f"{tool_name} (read-only)" if bypass else tool_name
             asyncio.run_coroutine_threadsafe(
                 orchestrator._emit_thought(event_id, "tool_result", f"{label}: {result}"),
@@ -1665,6 +1736,53 @@ class Orchestrator:
             error = f"installed but failed to load; moved to quarantine/: {reason}"
         return {"status": "error", "tool_name": name, "error": error}
 
+    def relay_mcp_call(
+        self, tool_name: str, name: str, arguments: dict[str, Any],
+        *, allowed: frozenset[str],
+    ) -> str:
+        """#112: run MCP tool ``name`` for the sandboxed generated tool
+        ``tool_name`` (called from the sandbox relay's thread, mid-call).
+
+        The gate lives in :meth:`McpManager.relay_call`; this supplies its
+        card (decision 5: an MCP tool the user did not mark "runs without
+        asking" gets its own card) and marks the turn with the result (#81).
+        """
+        from tools.tool_sandbox import McpRelayRefused
+
+        mcp = getattr(self, "mcp_manager", None)
+        if mcp is None:
+            raise McpRelayRefused("no MCP servers are set up")
+        server = mcp.server_of(name)
+
+        def ask(mcp_name: str, args: dict[str, Any]) -> Optional[dict[str, Any]]:
+            coro = self._request_approval(
+                event_id=getattr(self, "_current_event_id", "evt_unknown"),
+                tool_name=mcp_name,
+                tool_args={"args": [], "kwargs": args},
+                reasoning=(
+                    f"The generated tool {tool_name!r} wants to call {mcp_name} "
+                    f"(a tool from the MCP server {server!r})"
+                ),
+            )
+            remote = getattr(self, "remote_channel", None)
+            wait_s = max(
+                float(self.approval_timeout),
+                float(getattr(remote, "timeout_s", 0.0) or 0.0),
+            ) + 15
+            approved, edited = asyncio.run_coroutine_threadsafe(
+                coro, self.event_bus.loop
+            ).result(timeout=wait_s)
+            return Orchestrator._apply_edits(edited, [], args)[1] if approved else None
+
+        text = mcp.relay_call(name, arguments, allowed=allowed, ask=ask)
+        shield = getattr(self, "_taint", None)
+        if shield is not None:
+            try:
+                shield.mark_read(name, text, is_mcp=True, server=server)
+            except Exception:
+                logger.exception("taint.mark_read failed")
+        return text
+
     @staticmethod
     def _apply_edits(
         edited: dict[str, Any] | None,
@@ -1750,6 +1868,8 @@ class Orchestrator:
                     and is_undoable(tool_name) and not actions and not origin_notes
                 ),
                 origin_notes=origin_notes or None,
+                # #104: a trusted (or AGENT_TOOL_SANDBOX=0) generated tool.
+                outside_sandbox=tool_name in getattr(self, "_unsandboxed_tools", ()),
             ),
         )
         offer_id = self._record_offer_shown(tool_name, tool_args)
@@ -2463,7 +2583,9 @@ def _text_answer(generate: Any, messages: Any, stop_sequences: Any, kwargs: dict
         content = getattr(reply, "content", "")
         text = content.strip() if isinstance(content, str) else ""
         if text:
-            return text
+            # #110: the re-ask can come back as a final_answer call written
+            # as JSON; it would be wrapped again and shown verbatim.
+            return unwrap_answer_blob(text)
         raw = getattr(reply, "raw", None)
         try:
             choice = raw.choices[0]
@@ -2474,6 +2596,53 @@ def _text_answer(generate: Any, messages: Any, stop_sequences: Any, kwargs: dict
         except Exception:
             logger.info("tool-free answer empty (stops=%s)", bool(stops))
     return ""
+
+
+_ANSWER_CALL_NAMES = frozenset({"final_answer", "answer"})
+_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*\n?(.*?)\n?\s*```$", re.DOTALL)
+
+
+def unwrap_answer_blob(text: Any) -> Any:
+    """The answer inside a reply that is a ``final_answer`` call as JSON (#110).
+
+    ``{"name": "final_answer", "arguments": {"answer": "..."}}`` (or the
+    name ``answer``, arguments as an object or a JSON string, optionally in
+    a code fence, nested any number of times) becomes ``"..."``. Anything
+    else comes back unchanged: a tool-call blob is never the answer.
+    """
+    if not isinstance(text, str):
+        return text
+    current = text
+    for _ in range(5):
+        stripped = current.strip()
+        fenced = _FENCE_RE.match(stripped)
+        if fenced:
+            stripped = fenced.group(1).strip()
+        if not (stripped.startswith("{") and stripped.endswith("}")):
+            break
+        try:
+            data = json.loads(stripped)
+        except ValueError:
+            break
+        if not isinstance(data, dict):
+            break
+        function = data.get("function") if isinstance(data.get("function"), dict) else data
+        name = function.get("name")
+        if name not in _ANSWER_CALL_NAMES:
+            break
+        args = function.get("arguments", function.get("parameters"))
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                break
+        if not isinstance(args, dict) or "answer" not in args:
+            break
+        answer = args["answer"]
+        if answer is None:
+            break
+        current = answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
+    return current if current is not text else text
 
 
 _ERROR_IN_RESULT_RE = re.compile(r"""['"]error['"]\s*:\s*['"]([^'"]{1,300})['"]""")
@@ -2610,6 +2779,10 @@ def _make_groq_model_class(base: type) -> type:
                         better = _fallback_from_tool_result(messages)
                     if not _is_bare_done(better):
                         function.arguments = {"answer": better}
+                if getattr(function, "name", None) == "final_answer":
+                    args = getattr(function, "arguments", None)
+                    if isinstance(args, dict) and isinstance(args.get("answer"), str):
+                        args["answer"] = unwrap_answer_blob(args["answer"])
             content = (message.content or "").strip() if isinstance(message.content, str) else ""
             if (
                 tools_to_call_from and not message.tool_calls and not content
@@ -2626,6 +2799,7 @@ def _make_groq_model_class(base: type) -> type:
                 logger.info("Empty reply after a tool result; re-ask gave %r", (content or "")[:120])
                 content = content or _fallback_from_tool_result(messages)
             if tools_to_call_from and not message.tool_calls and content:
+                content = unwrap_answer_blob(content)
                 from smolagents.models import (  # type: ignore
                     ChatMessageToolCall,
                     ChatMessageToolCallFunction,

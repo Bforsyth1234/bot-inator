@@ -45,6 +45,14 @@ final class MeetingNotesSettingsViewModel: ObservableObject {
 
     func refresh() async { await send(method: "GET", body: nil, status: nil) }
 
+    /// #105: one read of the daemon's settings for the recorder (which engine
+    /// is in use, whether Whisper is installed); nil when it can't be read.
+    static func fetchOnce() async -> MeetingNotesSettings? {
+        let model = MeetingNotesSettingsViewModel()
+        await model.refresh()
+        return model.settings
+    }
+
     func setEnabled(_ value: Bool) async {
         await send(method: "PUT", body: MeetingNotesUpdate(enabled: value, engine: nil),
                    status: value ? "Meetings will offer to take notes." : "No more note offers.")
@@ -113,12 +121,14 @@ struct MeetingNotesSettingsView: View {
 
             Toggle("Include the other side of the call (system audio)", isOn: $systemAudio)
             MeetingPermissionButtons()
+            MeetingDictationRow(appleEngine: (viewModel.settings?.engineInUse ?? "apple") == "apple")
             Text("System audio needs Screen Recording for bot-inator; without it only your microphone is recorded.")
                 .appFont(.secondary).foregroundStyle(.secondary)
 
             Text("Recording starts only when you click Take notes (or the menu item) and stops at the "
                  + "meeting's end + 5 minutes or when you click Stop. Audio never leaves this Mac and is "
-                 + "deleted once transcribed; a cloud engine never sees the transcript. You get one card "
+                 + "deleted once transcribed; if transcription fails it is kept for up to 24 hours so you "
+                 + "can Retry or delete it. A cloud engine never sees the transcript. You get one card "
                  + "with reminders, a follow-up, a draft to the attendees and a note; nothing runs or is "
                  + "sent until you approve it. Telling the others you are recording is your responsibility.")
                 .appFont(.secondary).foregroundStyle(.secondary)
@@ -187,6 +197,53 @@ struct MeetingPermissionButtons: View {
         case .denied: return "turned off"
         case .restricted: return "restricted"
         case nil: return ""
+        }
+    }
+}
+
+/// #105: Apple speech needs Dictation (or Siri) on, even on-device. Same
+/// check as "Take notes" (never prompts).
+struct MeetingDictationRow: View {
+    let appleEngine: Bool
+    @State private var readiness: SpeechReadiness?
+
+    var body: some View {
+        HStack {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text("Dictation")
+            Text(label).appFont(.secondary).foregroundStyle(.secondary)
+            Spacer()
+            if readiness == .dictationOff {
+                Button("Open Settings") { NSWorkspace.shared.open(MeetingDictationCheck.settingsURL) }
+            }
+        }
+        .task { readiness = await MeetingDictationCheck.check() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { readiness = await MeetingDictationCheck.check() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .meetingPermissionsChanged)) { _ in
+            Task { readiness = await MeetingDictationCheck.check() }
+        }
+        if appleEngine, let message = readiness?.blockingMessage {
+            Text(message).appFont(.secondary).foregroundStyle(.orange)
+        }
+    }
+
+    private var color: Color {
+        switch readiness {
+        case .ready: return .green
+        case .dictationOff, .unavailable: return .orange
+        case .unknown, nil: return .gray
+        }
+    }
+
+    private var label: String {
+        switch readiness {
+        case .ready: return "on (Apple speech can transcribe)"
+        case .dictationOff: return "off; Apple speech can't transcribe"
+        case .unavailable: return "no on-device speech for this language"
+        case .unknown: return "can't tell until Speech Recognition is allowed"
+        case nil: return "checking…"
         }
     }
 }

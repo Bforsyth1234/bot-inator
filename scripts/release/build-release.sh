@@ -10,7 +10,14 @@
 #   VERSION=0.2.0 \
 #   scripts/release/build-release.sh
 #
-# Without DEVELOPER_ID it stops after an unsigned build (a dry run).
+# The app carries its own daemon: bundle-daemon.sh puts a relocatable
+# CPython and the daemon's sources in Contents/Resources (BUNDLE_DAEMON=0
+# builds the menu bar app alone, as before). Every Mach-O is signed
+# inside-out with the hardened runtime, then smoke-test.sh checks that the
+# signed Python loads MLX and the daemon answers /health.
+#
+# Without DEVELOPER_ID it signs ad hoc, verifies and smoke-tests, then stops
+# before notarizing (a dry run).
 # Output: dist/bot-inator-<VERSION>.zip (stapled app inside).
 set -euo pipefail
 
@@ -18,6 +25,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC="$ROOT/MenuBarUI/MenuBarUI"
 DIST="$ROOT/dist"
 ENTITLEMENTS="$ROOT/scripts/release/MenuBarUI.entitlements"
+PY_ENTITLEMENTS="$ROOT/scripts/release/Python.entitlements"
+PY_ADHOC_ENTITLEMENTS="$ROOT/scripts/release/Python-adhoc.entitlements"
+BUNDLE_DAEMON="${BUNDLE_DAEMON:-1}"
 VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$SRC/Info.plist")}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(git -C "$ROOT" rev-list --count HEAD)}"
 BUNDLE_ID="${BUNDLE_ID:-com.botinator.MenuBarUI}"
@@ -50,18 +60,60 @@ sed -e 's/$(DEVELOPMENT_LANGUAGE)/en/' -e 's/$(EXECUTABLE_NAME)/MenuBarUI/' \
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
-if [[ -z "${DEVELOPER_ID:-}" ]]; then
-  say "DEVELOPER_ID not set: unsigned build at $APP (dry run, stopping here)"
-  exit 0
+if [[ "$BUNDLE_DAEMON" == "1" ]]; then
+  "$ROOT/scripts/release/bundle-daemon.sh" "$APP"
 fi
 
-# ---- 2. sign with Developer ID + hardened runtime ---------------------------
-security find-identity -v -p codesigning | grep -qF "$DEVELOPER_ID" \
-  || fail "no signing identity \"$DEVELOPER_ID\" in your keychain (see docs/releasing.md)"
-say "Signing with $DEVELOPER_ID (hardened runtime)"
-codesign --force --timestamp --options runtime \
-  --entitlements "$ENTITLEMENTS" --sign "$DEVELOPER_ID" "$APP"
+# ---- 2. sign inside-out with the hardened runtime ----------------------------
+# Every Mach-O in Resources (the bundled Python: ~430 executables, .so and
+# .dylib files) gets its own signature, deepest first; the Python binary
+# gets Python.entitlements; then the app is sealed with its own.
+if [[ -n "${DEVELOPER_ID:-}" ]]; then
+  security find-identity -v -p codesigning | grep -qF "$DEVELOPER_ID" \
+    || fail "no signing identity \"$DEVELOPER_ID\" in your keychain (see docs/releasing.md)"
+  identity="$DEVELOPER_ID"
+  sign_flags=(--force --timestamp --options runtime)
+  py_entitlements="$PY_ENTITLEMENTS"
+  say "Signing with $DEVELOPER_ID (hardened runtime)"
+else
+  # Ad hoc: a local check of the bundle, never released. Ad-hoc code has no
+  # Team ID, so the bundled Python needs disable-library-validation here.
+  identity="-"
+  sign_flags=(--force --options runtime)
+  py_entitlements="$PY_ADHOC_ENTITLEMENTS"
+  say "DEVELOPER_ID not set: signing ad hoc (dry run)"
+fi
+py_bin="$APP/Contents/Resources/python/bin"
+libs=()
+execs=()
+while IFS= read -r -d '' f; do
+  if [[ "$(dirname "$f")" == "$py_bin" ]]; then execs+=("$f"); else libs+=("$f"); fi
+done < <(/usr/bin/python3 -I "$ROOT/scripts/release/list-macho.py" "$APP/Contents/Resources")
+signlog="$(mktemp -t bot-inator-sign)"
+# Wheels arrive ad-hoc signed by the linker, so codesign says "replacing
+# existing signature" ~280 times; keep its output only if it fails.
+if ((${#libs[@]})) && ! printf '%s\0' "${libs[@]}" \
+    | xargs -0 -n 50 codesign "${sign_flags[@]}" --sign "$identity" 2>"$signlog"; then
+  grep -v 'replacing existing signature' "$signlog" >&2
+  fail "signing the bundled Python's libraries failed"
+fi
+if ((${#execs[@]})) && ! codesign "${sign_flags[@]}" --entitlements "$py_entitlements" \
+    --sign "$identity" "${execs[@]}" 2>"$signlog"; then
+  grep -v 'replacing existing signature' "$signlog" >&2
+  fail "signing the bundled Python failed"
+fi
+rm -f "$signlog"
+codesign "${sign_flags[@]}" --entitlements "$ENTITLEMENTS" --sign "$identity" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
+say "Signed $((${#libs[@]} + ${#execs[@]})) nested Mach-O files and the app"
+
+if [[ "$BUNDLE_DAEMON" == "1" && "${SMOKE_TEST:-1}" == "1" ]]; then
+  "$ROOT/scripts/release/smoke-test.sh" "$APP"
+fi
+if [[ -z "${DEVELOPER_ID:-}" ]]; then
+  say "Ad-hoc build at $APP ($(du -sh "$APP" | cut -f1)); stopping before notarization"
+  exit 0
+fi
 
 # ---- 3. notarize and staple ---------------------------------------------------
 [[ -n "${NOTARY_PROFILE:-}" ]] || fail "set NOTARY_PROFILE (xcrun notarytool store-credentials, see docs/releasing.md)"

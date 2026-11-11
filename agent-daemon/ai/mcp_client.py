@@ -587,6 +587,47 @@ class McpManager:
             text = f"Error: MCP tool {name} failed: {type(exc).__name__}"
         return _untrusted(server, text)
 
+    def relay_call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        allowed: Iterable[str],
+        ask: Callable[[str, dict[str, Any]], Optional[dict[str, Any]]],
+    ) -> str:
+        """#112: a sandboxed generated tool's ``call_mcp``, relayed by the daemon.
+
+        The same gate rules as an agent call, plus the source check:
+
+        - ``name`` must be in ``allowed`` (the literal names in the tool's
+          reviewed source, read from its AST at load);
+        - the tool must be loaded NOW (enabled, server running, not blocked);
+        - unless the user marked it "runs without asking", ``ask(name, args)``
+          raises its own card and returns the (possibly edited) arguments, or
+          ``None`` when declined. A marked tool runs under the generated
+          tool's own card (decision 5; the #81 taint does not take that away
+          here: the user reviewed the source naming the call).
+
+        Raises ``tools.tool_sandbox.McpRelayRefused`` to refuse. The call
+        itself is :meth:`call_tool`: one ``mcp_tool`` ledger row (#82), the
+        untrusted header, truncation and cloud redaction.
+        """
+        from tools.tool_sandbox import McpRelayRefused
+
+        if name not in set(allowed):
+            raise McpRelayRefused(f"{name} is not named literally in the tool's reviewed source")
+        if name not in self.loaded_names():
+            raise McpRelayRefused(
+                f"the MCP tool {name} is not available (switched off, or its server is down)"
+            )
+        args = {k: v for k, v in (arguments or {}).items() if v is not None}
+        if not self.is_user_marked_read_only(name):
+            approved = ask(name, args)
+            if approved is None:
+                raise McpRelayRefused(f"the user declined {name}")
+            args = approved
+        return self.call_tool(name, args)
+
     async def _call(self, server: str, tool: str, args: dict[str, Any]) -> str:
         srv = self._servers.get(server)
         session = srv.session if srv else None

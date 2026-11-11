@@ -10,10 +10,16 @@ from .create_event import create_event
 from .email_draft import draft_email
 from .find_files import find_files
 from .list_events import list_events
+# #103: Mail's newest messages from the Envelope Index (read-only).
+from .list_recent_emails import list_recent_emails
+# #107: one capture, asked of a vision model (approval-gated).
+from .look_at_screen import look_at_screen
 from .meta_tool_generator import generate_custom_tool, repair_generated_tool
 from .move_file import move_file
 from .notes import append_note, create_note
 from .open_url import open_url
+# #102: built-ins a generated tool can't do in the sandbox (approval-gated).
+from .quit_app import quit_app
 from .read_active_tab import read_active_tab, read_active_tab_text
 from .read_clipboard import read_clipboard
 from .read_email import read_email
@@ -27,6 +33,7 @@ from .send_imessage import send_imessage
 from .shortcuts import list_shortcuts, run_shortcut
 from .show_notification import show_notification
 from .summarize_file import summarize_file
+from .take_screenshot import take_screenshot
 from .windows import list_windows, open_app
 from .write_clipboard import write_clipboard
 
@@ -49,7 +56,14 @@ AVAILABLE_TOOLS = [
     append_note,
     list_windows,
     open_app,
+    # #102: daemon-side, approval-gated (the sandbox blocks both).
+    quit_app,
+    take_screenshot,
+    # #107: approval-gated; captures once, asks the vision model, deletes.
+    look_at_screen,
     read_email,
+    # #103: read-only; Mail refuses message data to sandboxed tools.
+    list_recent_emails,
     draft_email,
     brief_me,
     list_events,
@@ -79,6 +93,8 @@ READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset({
     "list_shortcuts",
     "list_windows",
     "read_email",
+    # #103: reads Mail's index only (subjects redacted for a cloud engine).
+    "list_recent_emails",
     "list_events",
     "list_reminders",
     "brief_me",
@@ -101,7 +117,11 @@ __all__ = [
     "append_note",
     "list_windows",
     "open_app",
+    "quit_app",
+    "take_screenshot",
+    "look_at_screen",
     "read_email",
+    "list_recent_emails",
     "draft_email",
     "brief_me",
     "list_events",

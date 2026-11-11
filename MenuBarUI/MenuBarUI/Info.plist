@@ -27,7 +27,7 @@
     <key>NSCalendarsUsageDescription</key>
     <string>bot-inator reads your calendar events to answer questions like "what's on my calendar today?" and to remind you before meetings, and adds events only after you approve them.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>bot-inator records a meeting only after you click Take notes, to write notes and the follow-ups you owe. The audio stays on this Mac and is deleted once it is transcribed.</string>
+    <string>bot-inator records a meeting only after you click Take notes, to write notes and the follow-ups you owe. The audio stays on this Mac and is deleted once it is transcribed (if transcription fails, it is kept for up to 24 hours so you can retry or delete it).</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>bot-inator turns a meeting you chose to record into text on this Mac (on-device recognition only; nothing is sent to Apple).</string>
     <key>NSHumanReadableCopyright</key>

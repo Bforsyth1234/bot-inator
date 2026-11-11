@@ -169,13 +169,14 @@ final class ApprovalPresenter {
     private func presentCode(_ payload: CodeApprovalRequestPayload) {
         codeWindow?.close()
 
-        let content = CodeReviewAlert(payload: payload) { [weak self] approved, editedCode, note in
+        let content = CodeReviewAlert(payload: payload) { [weak self] approved, editedCode, note, outsideSandbox in
             guard let self, self.presentedCodeId == payload.requestId else { return }
             self.ws?.sendCodeApprovalResponse(
                 requestId: payload.requestId,
                 approved: approved,
                 editedCode: editedCode,
-                userNote: note
+                userNote: note,
+                outsideSandbox: outsideSandbox
             )
             self.closeCodeWindow()
         }

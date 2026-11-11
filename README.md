@@ -12,6 +12,27 @@ iMessages, upcoming meetings, app switches), asks an LLM *"how could I help
 here?"*, and offers an action, or a small tool it writes itself, as a card
 in the menu bar.
 
+### It writes its own tools, and you review them
+
+bot-inator is not limited to the tools it ships with. When it spots
+something you keep doing by hand, or something you asked for in chat that
+it couldn't do, it offers to build a tool for it:
+
+1. **It offers the idea first.** A card says what the tool would do;
+   nothing is written until you approve.
+2. **It drafts and checks the code.** Static checks, a second model pass
+   that compares the code with the idea, and a dry run in a throwaway
+   sandbox with a fake home folder. Problems go back to the model to fix
+   before you see anything.
+3. **You read the full source** and approve it, edit it or throw it away.
+4. **It runs sandboxed.** Each call starts a short-lived child under
+   macOS `sandbox-exec`, and still asks before it runs.
+5. **It stays fixable.** Every installed tool is versioned in its own git
+   repo, and a tool that keeps failing gets a repair offer with a diff.
+
+Ways in besides the automatic offers: ask in Chat, or use **Watch me** to
+do a task once while it records the steps.
+
 What you can check for yourself, in this repo:
 
 - **Every action is a card.** Tools that change something (move a file,
@@ -195,7 +216,14 @@ You still approve every call. Built-in tools a generated tool calls
 (e.g. `show_notification`) run inside the same sandbox without a second
 approval. If `sandbox-exec` is missing or fails its self-test, generated
 tools are not loaded. `AGENT_TOOL_SANDBOX=0` turns the sandbox off and
-runs them in the daemon process as before.
+runs them in the daemon process as before. A tool run in the daemon (trusted, or sandbox off) gets privacy-ledger
+rows for the hosts its Python code connected to, best effort, not a boundary.
+
+A sandboxed tool can call the MCP tools you switched on with
+`from tools.mcp import call_mcp`. The daemon runs the call for it, only for
+a tool name written literally in the reviewed code and enabled at the
+moment of the call; an MCP tool you did not mark "runs without asking" shows
+its own approval card. The tool never sees the server config or the token.
 
 ## Configuration
 

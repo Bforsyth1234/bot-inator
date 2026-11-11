@@ -29,6 +29,10 @@ struct EgressRow: Codable, Identifiable, Equatable {
             return [model, role.map { "\($0) engine" }].compactMap { $0 }.joined(separator: " · ")
         case "mcp_tool": return "MCP tool \(tool ?? "")"
         case "sandboxed_tool": return "Tool \(tool ?? "")"
+        // #109: a generated tool the user trusted, run inside bot-inator.
+        case "trusted_tool": return "Trusted tool \(tool ?? "")"
+        // #110: a screenshot sent to the user's own phone.
+        case "imessage_image": return "Screenshot sent to your phone (iMessage)"
         case "open_url": return "Opened in browser"
         case "model_download": return "Model download \(model ?? "")"
         case "imessage": return "iMessage to you"
@@ -36,7 +40,10 @@ struct EgressRow: Codable, Identifiable, Equatable {
         }
     }
 
-    var destination: String { host ?? "its own network access" }
+    var destination: String {
+        // #109: no host on a trusted-tool row = a program it launched.
+        host ?? (kind == "trusted_tool" ? "a program it launched" : "its own network access")
+    }
 
     var shortTime: String {
         guard let date = ISO8601DateFormatter.egress.date(from: time) else { return time }

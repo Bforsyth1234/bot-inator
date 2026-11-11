@@ -14,9 +14,11 @@ Sandbox profile (:func:`build_profile`):
 * writes: allowed under ``$HOME`` and the per-call work dir, denied under
   ``~/Library``, ``~/.ssh``, ``~/.bot-inator``, shell start-up files and the
   bot-inator repo (``tools/generated`` plus the daemon's own source, venv
-  and ``.env``: a write there would run unsandboxed on the next start);
+  and ``.env``: a write there would run unsandboxed on the next start), and
+  for the app-bundled daemon (#96) its ``AGENT_DATA_DIR`` and moved
+  generated-tools dir;
 * reads: allowed, except ``~/.ssh``, ``~/.bot-inator`` (API token, memory)
-  and the daemon's ``.env`` (cloud API keys);
+  and the daemon's ``.env`` (cloud API keys; ``<AGENT_DATA_DIR>/.env`` too);
 * network: denied unless the module imports a network module
   (:data:`NETWORK_MODULES`, decided from the AST at load time and exposed
   as ``network_allowed`` / ``sandbox_note`` on the proxy). A dynamic import
@@ -38,6 +40,15 @@ Sandbox profile (:func:`build_profile`):
   The ``osascript`` shim asks the daemon to launch the apps a script
   ``tell``s (the child cannot launch them itself) and then runs
   ``/usr/bin/osascript``.
+* MCP relay (todo #112): ``from tools.mcp import call_mcp`` sends
+  ``{"cmd": "mcp"}`` on the same socket. The daemon runs the MCP tool only
+  if its name is a string literal in a ``call_mcp(...)`` call in the
+  reviewed source (:func:`mcp_tool_names`, read at load) and it is enabled
+  now; the gate (card or "runs without asking") is the orchestrator's
+  (``Orchestrator.relay_mcp_call`` -> ``McpManager.relay_call``). The child
+  never sees the server config, the token or a server process. Time spent
+  in a relayed call (an approval card can wait minutes) does not count
+  toward the call timeout.
 
 The child gets a minimal environment (no API keys) and ``dotenv`` is
 disabled inside it, so importing ``config`` cannot pull the daemon's
@@ -73,6 +84,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
@@ -130,6 +142,9 @@ DENIED_URL_SCHEMES: frozenset[str] = frozenset({
 # ``open`` flags the proxy passes on (no --args, --env, --stdin, -f, ...).
 _OPEN_PLAIN_FLAGS = frozenset("gjnFRWet")
 OPEN_TIMEOUT_SECONDS = 30.0
+# #112: at most this much relayed-MCP time (cards waiting for the user, the
+# MCP calls themselves) is added to one call's timeout.
+MAX_RELAY_PAUSE_SECONDS = 1800.0
 # Under $HOME: writable except these (relative to $HOME).
 _WRITE_DENIED_IN_HOME: tuple[str, ...] = ("Library", ".ssh", ".bot-inator")
 _SHELL_STARTUP_FILES: tuple[str, ...] = (
@@ -202,6 +217,60 @@ def network_reason(source: str) -> Optional[str]:
     return None
 
 
+# ---- MCP relay names (#112) -------------------------------------------------
+
+MCP_CALL_FUNCTION = "call_mcp"
+
+
+def mcp_tool_names(source: str) -> frozenset[str]:
+    """MCP tool names the module passes LITERALLY to ``call_mcp(...)``.
+
+    Only a string constant as the first argument (or ``name=``) counts: a
+    name built at run time (concatenation, f-string, a variable) is never
+    in this set, so the relay refuses it. ``from tools.mcp import call_mcp
+    as x`` aliases and ``<module>.call_mcp(...)`` are recognised.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return frozenset()
+    callers = {MCP_CALL_FUNCTION}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "tools.mcp":
+            callers |= {a.asname for a in node.names if a.name == MCP_CALL_FUNCTION and a.asname}
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (
+            (isinstance(func, ast.Name) and func.id in callers)
+            or (isinstance(func, ast.Attribute) and func.attr == MCP_CALL_FUNCTION)
+        ):
+            continue
+        arg = node.args[0] if node.args else next(
+            (k.value for k in node.keywords if k.arg == "name"), None
+        )
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and arg.value:
+            names.add(arg.value)
+    return frozenset(names)
+
+
+class McpRelayRefused(RuntimeError):
+    """The relay did not run the MCP tool (the reason is the message)."""
+
+
+def _default_mcp_relay(tool_name: str, allowed: frozenset[str], name: str, arguments: dict) -> str:
+    """Hand a relayed call to the running orchestrator (raises when refused)."""
+    from tools import meta_tool_generator
+
+    orch = getattr(meta_tool_generator, "_ORCHESTRATOR", None)
+    relay = getattr(orch, "relay_mcp_call", None)
+    if relay is None:
+        raise McpRelayRefused("no MCP tools are available (the daemon has no MCP client)")
+    return relay(tool_name, name, arguments, allowed=allowed)
+
+
 # ---- profile --------------------------------------------------------------
 
 
@@ -228,10 +297,11 @@ def build_profile(
     write_denied = [home / d for d in _WRITE_DENIED_IN_HOME]
     write_denied.append(_protected_repo_dir(home))
     write_denied.append(daemon / "tools" / "generated")
+    write_denied.extend(_moved_write_denied())
     write_denied.append(shims)
     write_literals = [home / f for f in _SHELL_STARTUP_FILES]
     read_denied = [home / d for d in _READ_DENIED_IN_HOME]
-    read_literals = [daemon / ".env", *extra_read_denied]
+    read_literals = [daemon / ".env", *_moved_read_denied(), *extra_read_denied]
     lines = [
         "(version 1)",
         "(allow default)",
@@ -274,6 +344,27 @@ def build_profile(
         + ")"
     )
     return "\n".join(lines) + "\n"
+
+
+def _moved_write_denied() -> list[Path]:
+    """#96: the app-bundled daemon's writable home (``AGENT_DATA_DIR``) and a
+    moved generated-tools dir. Same reason as ``tools/generated`` in the
+    tree: a write there would run unsandboxed on the next start."""
+    import config
+
+    paths = [config.default_generated_tools_dir()]
+    if config.data_dir() is not None:
+        paths.append(config.data_dir())
+    return [Path(os.path.realpath(p)) for p in paths]
+
+
+def _moved_read_denied() -> list[Path]:
+    """#96: the data dir's ``.env`` (cloud API keys), like the tree's."""
+    import config
+
+    if config.data_dir() is None:
+        return []
+    return [Path(os.path.realpath(config.dotenv_path()))]
 
 
 def _extra_read_denied() -> tuple[Path, ...]:
@@ -563,8 +654,15 @@ def _launch_apps(names: list[str], ids: list[str], cwd: str, writable: tuple[Pat
 class _OpenProxy:
     """Per-call unix socket the child's ``open``/``osascript`` shims talk to."""
 
-    def __init__(self, home: Path, work: Path) -> None:
+    def __init__(self, home: Path, work: Path, mcp_relay: Any = None) -> None:
         self.writable = (home, work)
+        # #112: ``mcp_relay(name, arguments) -> text`` (raises to refuse);
+        # None = no MCP calls in this run (describe, self-test).
+        self.mcp_relay = mcp_relay
+        self._relay_lock = threading.Lock()
+        self._relay_active = 0
+        self._relay_started = 0.0
+        self._relay_seconds = 0.0
         # AF_UNIX paths are capped at 104 bytes: keep it short, under /tmp.
         self.dir = Path(os.path.realpath(tempfile.mkdtemp(prefix="tsb-", dir="/tmp")))
         self.path = self.dir / "p.sock"
@@ -610,7 +708,45 @@ class _OpenProxy:
             names = [str(a) for a in req.get("apps") or []]
             ids = [str(a) for a in req.get("ids") or []]
             return {"rc": 0, "launched": _launch_apps(names, ids, cwd, self.writable)}
+        if req.get("cmd") == "mcp":
+            return self._answer_mcp(req)
         return {"rc": 1, "stderr": "unknown request\n"}
+
+    def _answer_mcp(self, req: dict) -> dict:
+        name, arguments = req.get("name"), req.get("arguments")
+        if self.mcp_relay is None:
+            return {"ok": False, "error": "MCP calls are not available here"}
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            return {"ok": False, "error": "bad MCP request"}
+        self._relay_enter()
+        try:
+            return {"ok": True, "text": str(self.mcp_relay(name, arguments))}
+        except McpRelayRefused as exc:
+            logger.info("sandboxed MCP call %s refused: %s", name, exc)
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - report, never crash the proxy
+            logger.exception("sandboxed MCP call %s failed", name)
+            return {"ok": False, "error": f"MCP relay failed: {type(exc).__name__}"}
+        finally:
+            self._relay_exit()
+
+    def _relay_enter(self) -> None:
+        with self._relay_lock:
+            if self._relay_active == 0:
+                self._relay_started = time.monotonic()
+            self._relay_active += 1
+
+    def _relay_exit(self) -> None:
+        with self._relay_lock:
+            self._relay_active -= 1
+            if self._relay_active == 0:
+                self._relay_seconds += time.monotonic() - self._relay_started
+
+    def relay_time(self) -> float:
+        """Seconds spent in relayed MCP calls so far (the running one too)."""
+        with self._relay_lock:
+            ongoing = time.monotonic() - self._relay_started if self._relay_active else 0.0
+            return self._relay_seconds + ongoing
 
     def close(self) -> None:
         try:
@@ -644,6 +780,9 @@ try:
         _m = types.ModuleType(_pkg)
         _m.__path__ = [os.path.join(root, _sub)]
         sys.modules[_pkg] = _m
+    # #96: the module's own dir too (the app-bundled daemon keeps generated
+    # tools outside the tree), so one generated tool can import another.
+    sys.modules["tools.generated"].__path__.insert(0, os.path.dirname(path))
     import importlib.util
     from smolagents import Tool
     _mod_name = "tools.generated." + os.path.splitext(os.path.basename(path))[0]
@@ -683,7 +822,7 @@ os._exit(0)
 '''
 
 
-def _child_env(home: Path, work: Path) -> dict[str, str]:
+def _child_env(home: Path, work: Path, relay_socket: Optional[Path] = None) -> dict[str, str]:
     env = {
         "HOME": str(home),
         "TMPDIR": str(work / "tmp") + "/",
@@ -693,6 +832,9 @@ def _child_env(home: Path, work: Path) -> dict[str, str]:
         "HF_HUB_OFFLINE": "1",
         "AGENT_DISABLE_LISTENERS": "1",
     }
+    if relay_socket is not None:
+        # #112: where ``tools.mcp.call_mcp`` asks (a path, not a secret).
+        env["AGENT_TOOL_RELAY_SOCKET"] = str(relay_socket)
     for key in ("USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"):
         if os.environ.get(key):
             env[key] = os.environ[key]
@@ -712,14 +854,14 @@ def _kill(proc: subprocess.Popen) -> None:
 def _spawn(
     mode: str, path: Path, tool_name: str, payload: dict, *,
     network: bool, timeout: float, linger: float = 0.0,
-    home: Optional[Path] = None,
+    home: Optional[Path] = None, mcp_relay: Any = None,
 ) -> dict:
     """Run the child once; return its result object or raise ToolSandboxError."""
     home = Path(os.path.realpath(home or sandbox_home()))
     work = Path(os.path.realpath(tempfile.mkdtemp(prefix="tool-sandbox-")))
     (work / "tmp").mkdir()
     python = sys.executable
-    proxy = _OpenProxy(home, work)
+    proxy = _OpenProxy(home, work, mcp_relay)
     _write_shims(work / "bin", proxy.path, python)
     profile = work / "profile.sb"
     profile.write_text(build_profile(
@@ -733,7 +875,7 @@ def _spawn(
             [_SANDBOX_EXEC, "-f", str(profile), python, "-c", _CHILD,
              str(_DAEMON_ROOT), str(Path(path).resolve()), tool_name, mode, str(linger)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_file,
-            cwd=str(home), env=_child_env(home, work), start_new_session=True,
+            cwd=str(home), env=_child_env(home, work, proxy.path), start_new_session=True,
         )
     except BaseException:
         stderr_file.close()
@@ -758,7 +900,7 @@ def _spawn(
     except (BrokenPipeError, OSError):
         pass
     try:
-        line = lines.get(timeout=timeout)
+        line = _wait_line(lines, timeout, proxy)
     except queue.Empty:
         _kill(proc)
         _cleanup(proc, stderr_file, work, 5.0, proxy)
@@ -784,6 +926,23 @@ def _spawn(
     if not out.get("ok"):
         raise ToolSandboxError(str(out.get("error") or "error"), out.get("traceback") or "")
     return out
+
+
+def _wait_line(lines: "queue.Queue[Optional[str]]", timeout: float, proxy: "_OpenProxy") -> Optional[str]:
+    """The child's result line; raises ``queue.Empty`` after ``timeout`` s
+    of the child's own time. Time in relayed MCP calls (#112: a card may
+    wait for the user) is not counted, up to :data:`MAX_RELAY_PAUSE_SECONDS`
+    per call, so a loop of relayed calls cannot keep a child alive."""
+    start = time.monotonic()
+    while True:
+        paused = min(proxy.relay_time(), MAX_RELAY_PAUSE_SECONDS)
+        left = start + timeout + paused - time.monotonic()
+        if left <= 0:
+            raise queue.Empty
+        try:
+            return lines.get(timeout=min(max(left, 0.05), 0.5))
+        except queue.Empty:
+            continue
 
 
 def _cleanup(
@@ -885,7 +1044,10 @@ class SandboxedTool(_Tool):  # type: ignore[misc,valid-type]
     skip_forward_signature_validation = True
     sandboxed = True
 
-    def __init__(self, meta: dict, source_path: Path, network: Optional[str]) -> None:
+    def __init__(
+        self, meta: dict, source_path: Path, network: Optional[str],
+        mcp_names: frozenset[str] = frozenset(),
+    ) -> None:
         self.name = meta["name"]
         self.description = meta["description"]
         self.inputs = meta["inputs"]
@@ -898,7 +1060,18 @@ class SandboxedTool(_Tool):  # type: ignore[misc,valid-type]
             f"runs under sandbox-exec; network allowed ({network})"
             if network else "runs under sandbox-exec; no network"
         )
+        # #112: the MCP tools the reviewed source names literally (fixed at
+        # load, like ``network_allowed``).
+        self.mcp_names = frozenset(mcp_names)
         super().__init__()
+
+    def _mcp_relay(self, name: str, arguments: dict) -> str:
+        if name not in self.mcp_names:
+            raise McpRelayRefused(
+                f"{name} is not named as a literal call_mcp(...) argument in "
+                f"{self.name}'s reviewed source"
+            )
+        return _default_mcp_relay(self.name, self.mcp_names, name, arguments)
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         if self.network_allowed:
@@ -914,6 +1087,7 @@ class SandboxedTool(_Tool):  # type: ignore[misc,valid-type]
             {"args": list(args), "kwargs": kwargs},
             network=self.network_allowed, timeout=call_timeout(),
             linger=linger_seconds(),
+            mcp_relay=self._mcp_relay,
         )
         return out.get("result")
 
@@ -934,11 +1108,12 @@ def load_sandboxed_tool(
     )
     if not out.get("found"):
         return None
-    return SandboxedTool(out["meta"], Path(path), network)
+    return SandboxedTool(out["meta"], Path(path), network, mcp_tool_names(source))
 
 
 __all__ = [
-    "DENIED_APPLE_EVENT_TARGETS", "NETWORK_MODULES", "OpenRefused", "SandboxedTool",
+    "DENIED_APPLE_EVENT_TARGETS", "McpRelayRefused", "NETWORK_MODULES", "OpenRefused",
+    "SandboxedTool", "mcp_tool_names",
     "check_open_args", "ToolSandboxError", "ToolSandboxTimeout",
     "build_profile", "load_sandboxed_tool", "network_reason", "reset_sandbox_cache",
     "sandbox_available", "sandbox_enabled", "sandbox_problem",

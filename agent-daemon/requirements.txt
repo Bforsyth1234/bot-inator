@@ -9,6 +9,12 @@ smolagents>=1.0.0,<2.0
 mlx-lm>=0.32.0,<1.0
 sqlite-vec>=0.1.6,<1.0
 sentence-transformers>=5.0
+# Vision (#107): look_at_screen's local model (Qwen3-VL via MLX). Imported
+# only on the first question, never at start. 0.6.13 resolved with the
+# pins above on 2026-11-11 (mlx 0.32.4, mlx-lm 0.32.2, transformers 5.22.2)
+# and added only llguidance, miniaudio, mlx-audio, opencv-python and
+# sounddevice; nothing above changed.
+mlx-vlm>=0.6.13,<0.7
 
 # macOS Events
 pyobjc-core>=11.0

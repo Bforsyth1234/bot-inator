@@ -352,6 +352,8 @@ struct SettingsView: View {
             Section("Appearance") {
                 TextSizePicker()
             }
+            // #96: bundled daemon, start at login, new-version check.
+            AppLifecycleSettingsView()
 
             Section("Inference provider") {
                 Picker("Provider", selection: $viewModel.provider) {
@@ -400,6 +402,8 @@ struct SettingsView: View {
             RecordShortcutSettingsView()
             RemoteSettingsView()
             ActivityHistorySettingsView()
+            // #107: which model look_at_screen asks.
+            VisionSettingsView()
             PermissionsView()
 
             // #78: "always do this" rules the user turned on.

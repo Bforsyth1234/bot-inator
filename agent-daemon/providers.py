@@ -55,6 +55,12 @@ class Preset:
     def model_env(self, role: str) -> str:
         return f"{self.prefix}_{role.upper()}_MODEL"
 
+    def vision_model_env(self) -> str:
+        """The cloud vision model for ``look_at_screen`` (#107). Not an
+        engine role: blank means "no vision model chosen", and then no
+        screenshot goes to this provider."""
+        return f"{self.prefix}_VISION_MODEL"
+
     def env_keys(self) -> tuple[str, ...]:
         return (
             self.key_env(), self.base_env(),
@@ -108,6 +114,11 @@ PROVIDERS: tuple[str, ...] = ("local", *PRESETS)
 
 def preset_env_keys() -> frozenset[str]:
     return frozenset(k for p in PRESETS.values() for k in p.env_keys())
+
+
+def vision_env_keys() -> frozenset[str]:
+    """``<PREFIX>_VISION_MODEL`` for every preset (#107)."""
+    return frozenset(p.vision_model_env() for p in PRESETS.values())
 
 
 def is_loopback_url(url: str) -> bool:

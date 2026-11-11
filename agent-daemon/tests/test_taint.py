@@ -249,3 +249,9 @@ def test_concurrent_marks_are_safe():
     for th in threads:
         th.join()
     assert t.is_tainted() and len(t._reads) == taint.MAX_READS
+
+
+def test_look_at_screen_marks_the_turn() -> None:
+    # #107: what the vision model read off the screen is outside text.
+    from ai import taint
+    assert taint.OUTSIDE_TEXT_TOOLS.get("look_at_screen") == "window"

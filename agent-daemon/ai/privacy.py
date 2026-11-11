@@ -73,6 +73,25 @@ def personal_text_allowed() -> bool:
     return os.environ.get(OPT_IN_ENV, "") == "1"
 
 
+SCREENSHOT_KEPT = (
+    "The screenshot was not sent: the vision model is a cloud one, and "
+    "screenshots (which show mail, messages and more) leave this Mac only "
+    "when the user allows personal text for cloud engines in Settings (or "
+    f"{OPT_IN_ENV}=1). Switch vision to the local model in Settings, or "
+    "turn that on."
+)
+
+
+def screenshot_may_leave() -> bool:
+    """True when a screenshot may go to a cloud vision model (#107 decision 3).
+
+    A screenshot is personal text and more, so it takes the same opt-in as
+    personal text (#31/#52), read live. The caller also needs a cloud
+    vision model chosen in Settings; this checks only the opt-in.
+    """
+    return personal_text_allowed()
+
+
 def role_is_cloud(role: str) -> bool:
     from config import settings
 

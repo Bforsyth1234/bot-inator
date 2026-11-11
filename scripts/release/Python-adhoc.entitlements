@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Python.entitlements plus disable-library-validation, for the ad-hoc build
+  only (no DEVELOPER_ID: a local check of the bundle, never released).
+  Ad-hoc code has no Team ID, so with library validation on, dlopen of the
+  bundle's own extensions fails ("mapping process and mapped file
+  (non-platform) have different Team IDs", seen 2026-11-11 importing
+  mlx.core under the hardened runtime).
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

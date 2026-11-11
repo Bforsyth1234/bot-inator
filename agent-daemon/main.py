@@ -629,6 +629,13 @@ async def lifespan(app: FastAPI):
         set_default_memory(None)
         screen_text.set_turn_kind_provider(None)
         try:
+            # #107: the vision model is never built here or eager-loaded (it
+            # loads on the first look_at_screen); free it if one was used.
+            from ai import vision_engine as _vision  # noqa: WPS433
+            _vision.reset_local_engine()
+        except Exception:
+            logger.exception("Error unloading the vision model")
+        try:
             import tools.meta_tool_generator as _mg  # noqa: WPS433
             _mg._ORCHESTRATOR = None  # type: ignore[attr-defined]
             _mg._ENGINE = None  # type: ignore[attr-defined]
@@ -1582,13 +1589,14 @@ _MEETING_JOBS: set[asyncio.Task[Any]] = set()
 
 async def _process_meeting_audio(meeting_notes: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """#86: transcript / audio -> one card. Anything but a card is told to
-    the user as a notification (the audio is deleted either way)."""
+    the user as a notification, except a failure whose audio was kept
+    (#108): the app's panel already shows it with Retry / Delete."""
     try:
         result = await meeting_notes.process(payload)
     except Exception as exc:
         logger.exception("meeting notes: processing failed")
         result = {"status": "error", "reason": str(exc)[:300]}
-    if result.get("status") != "offered":
+    if result.get("status") != "offered" and not result.get("kept"):
         try:
             from tools.show_notification import show_notification  # noqa: WPS433
 
