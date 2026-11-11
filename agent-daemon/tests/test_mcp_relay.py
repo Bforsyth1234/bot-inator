@@ -335,11 +335,58 @@ def test_child_env_gains_only_the_socket_path(tmp_path) -> None:
     assert not any("TOKEN" in k or "MCP" in k for k in env)
 
 
-def test_call_mcp_without_a_relay_raises(monkeypatch) -> None:
-    """In the daemon process (trusted tool, #104) there is no relay."""
+def test_call_mcp_without_any_relay_raises(monkeypatch) -> None:
+    """Outside a generated tool's call (no socket, no in-process hook)."""
     monkeypatch.delenv(mcp_shim.RELAY_SOCKET_ENV, raising=False)
-    with pytest.raises(mcp_shim.McpCallRefused, match="only in a sandboxed"):
+    with pytest.raises(mcp_shim.McpCallRefused, match="no relay here"):
         mcp_shim.call_mcp("fake__add", {"a": 1})
+
+
+def _in_process_tool(tmp_path: Path) -> Any:
+    """``_RELAY_TOOL`` imported in this process, as a trusted tool is."""
+    import importlib.util
+
+    path = tmp_path / "relay_tool_inproc.py"
+    path.write_text(_RELAY_TOOL)
+    spec = importlib.util.spec_from_file_location("relay_tool_inproc", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module.relay_tool
+
+
+def test_trusted_tool_call_mcp_uses_the_relay(
+    tmp_path, home, bus_loop, manager, ledger, monkeypatch,
+) -> None:
+    """User 2026-11-11 ("Yes, use the relay"): a trusted tool's call_mcp gets
+    the same checks and cards as a sandboxed one."""
+    monkeypatch.delenv(mcp_shim.RELAY_SOCKET_ENV, raising=False)
+    orch = _orchestrator(bus_loop, manager, monkeypatch)
+    tool_obj = _in_process_tool(tmp_path)
+    allowed = tool_sandbox.mcp_tool_names(_RELAY_TOOL)
+    with mcp_shim.in_process_relay(
+        lambda n, a: orch.relay_mcp_call("relay_tool", n, a, allowed=allowed)
+    ):
+        out = tool_obj.forward(arg="add")
+        built = tool_obj.forward(arg="built")
+    assert out["status"] == "ok" and out["text"].endswith("\n42")
+    assert [c["tool_name"] for c in orch.cards] == ["fake__add"]
+    assert _mcp_rows(ledger) == ["fake__add"]
+    assert built["status"] == "error" and "not named literally" in built["error"]
+    # The hook ends with the call.
+    assert tool_obj.forward(arg="add")["status"] == "error"
+
+
+def test_trusted_load_records_the_literal_mcp_names(tmp_path, monkeypatch) -> None:
+    orch = Orchestrator.__new__(Orchestrator)
+    monkeypatch.setattr(tool_sandbox, "sandbox_enabled", lambda: False)
+    monkeypatch.setattr(Orchestrator, "_import_tool_module",
+                        staticmethod(lambda name, path, exclude=frozenset(): object()))
+    path = tmp_path / "relay_tool.py"
+    path.write_text(_RELAY_TOOL)
+    orch._load_tool("relay_tool", path)
+    assert "relay_tool" in orch._unsandboxed_tools
+    assert orch._unsandboxed_mcp_names["relay_tool"] == {"fake__add", "fake__echo", "fake__crash"}
 
 
 def test_relay_call_keeps_the_gate_rules_without_a_sandbox(manager, ledger) -> None:
@@ -406,3 +453,51 @@ def test_drafting_prompt_lists_enabled_mcp_tools(monkeypatch) -> None:
     orch.tools = [builtin]  # switched off: not in orchestrator.tools
     section = meta_tool_generator._format_available_tools_context()
     assert "fake__add" not in section and "call_mcp" not in section
+
+
+def test_gate_sets_the_relay_only_for_trusted_tools(monkeypatch) -> None:
+    """The approval wrapper turns the in-process relay on around a trusted
+    tool's call (with its literal names) and leaves it off otherwise."""
+    from ai.mlx_engine import MLXEngine
+    from events.event_bus import EventBus
+    from tests.test_trusted_tool_egress import _LoopThread, _drain
+
+    monkeypatch.delenv(mcp_shim.RELAY_SOCKET_ENV, raising=False)
+
+    class _Tool:
+        name = "relay_tool"
+        inputs = {"arg": {"type": "string"}}
+
+        def forward(self, arg: str) -> str:
+            try:
+                return mcp_shim.call_mcp("fake__add", {"a": 2})
+            except mcp_shim.McpCallRefused as exc:
+                return f"refused: {exc}"
+
+    def run(trusted: bool) -> tuple[str, list]:
+        seen: list = []
+        with _LoopThread() as loop:
+            bus = EventBus()
+            bus.bind_loop(loop)
+            orch = Orchestrator(engine=MLXEngine(), event_bus=bus, tools=[])
+            if trusted:
+                orch.__dict__.setdefault("_unsandboxed_tools", set()).add("relay_tool")
+                orch.__dict__.setdefault("_unsandboxed_mcp_names", {})["relay_tool"] = frozenset({"fake__add"})
+
+            async def request_approval(**kwargs: Any) -> tuple[bool, None]:
+                return True, None
+
+            orch._request_approval = request_approval  # type: ignore[method-assign]
+            orch.relay_mcp_call = (  # type: ignore[method-assign]
+                lambda tool, name, args, *, allowed: seen.append((tool, name, set(allowed))) or "42"
+            )
+            wrapped = orch._wrap_tool_for_approval(_Tool())
+            out = asyncio.run_coroutine_threadsafe(
+                asyncio.to_thread(wrapped.forward, "x"), loop).result(10)
+            _drain(loop)
+        return out, seen
+
+    out, seen = run(trusted=True)
+    assert out == "42" and seen == [("relay_tool", "fake__add", {"fake__add"})]
+    out, seen = run(trusted=False)
+    assert out.startswith("refused:") and seen == []

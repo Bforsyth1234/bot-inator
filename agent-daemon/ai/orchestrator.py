@@ -724,10 +724,18 @@ class Orchestrator:
 
         unsandboxed = self.__dict__.setdefault("_unsandboxed_tools", set())
         unsandboxed.discard(name)
+        mcp_names = self.__dict__.setdefault("_unsandboxed_mcp_names", {})
+        mcp_names.pop(name, None)
         if not tool_sandbox.sandbox_enabled() or tool_trust.store_for(self).check(name, path):
             tool_obj = self._import_tool_module(name, path, exclude)
             if tool_obj is not None:
                 unsandboxed.add(name)
+                # #112 (user: "Yes, use the relay"): the literal call_mcp names
+                # in the reviewed source, as the sandbox reads them at load.
+                try:
+                    mcp_names[name] = tool_sandbox.mcp_tool_names(path.read_text("utf-8"))
+                except Exception:
+                    mcp_names[name] = frozenset()
             return tool_obj
         return tool_sandbox.load_sandboxed_tool(name, path, exclude)
 
@@ -1569,15 +1577,30 @@ class Orchestrator:
 
             from ai import egress_log as _egress
 
+            in_process = tool_name in (getattr(orchestrator, "_unsandboxed_tools", None) or ())
             ledger_run = (
                 _egress.trusted_tool_run(
                     tool_name, {"args": call_args, "kwargs": call_kwargs},
                 )
-                if tool_name in (getattr(orchestrator, "_unsandboxed_tools", None) or ())
+                if in_process
                 else contextlib.nullcontext()
             )
+            mcp_run: Any = contextlib.nullcontext()
+            if in_process:
+                # #112: call_mcp in a trusted tool goes through the same relay
+                # checks and cards as in a sandboxed one.
+                from tools import mcp as _mcp
+
+                allowed = (getattr(orchestrator, "_unsandboxed_mcp_names", None) or {}).get(
+                    tool_name, frozenset()
+                )
+                mcp_run = _mcp.in_process_relay(
+                    lambda n, a, _t=tool_name, _al=allowed: orchestrator.relay_mcp_call(
+                        _t, n, a, allowed=_al
+                    )
+                )
             try:
-                with ledger_run:
+                with ledger_run, mcp_run:
                     result = (
                         original_forward(*call_args, **call_kwargs)
                         if original_forward
