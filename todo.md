@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #106
+Next ID: #107
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -1562,6 +1562,39 @@ Verify:
 ⚬ Live: with the Mac idle, mail yourself a deadline → the reminder card
   arrives on the phone → reply "yes <code>" → reminder created. Text
   "what's on my calendar tomorrow?" → the answer in the thread.
+Deviations:
+
+---
+
+#106 — BUG: iPhone remote never replies (AppleScript breaks on ’, → and other non-ASCII) [ ]
+Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user ("send the responses back via imessage when the user messages the app")
+Ask: The user wants the app's answers sent back by iMessage when they text
+it. That is #85, built and turned on (`/api/remote`: enabled, handle
+2032467111, idle 1 min), but no reply arrives.
+Cause (assistant, 2026-11-11, CONFIRMED): `events/remote_channel.py`
+`applescript_send` fills `tools/send_imessage._SCRIPT_TEMPLATE` with
+`json.dumps(handle)` / `json.dumps(body)`. `json.dumps` writes non-ASCII as
+`\uXXXX`, which AppleScript string literals don't understand: `return
+"it\u2019s 3 \u2192 4"` → "syntax error: Expected “"” but found unknown
+token. (-2741)", while an ASCII-only string works. The daemon log has
+three such failures today (11:36, 11:45, 11:50). The model's replies
+nearly always contain ’ — → or emoji, so the remote almost never replies.
+`tools/send_imessage.py` (unregistered built-in) and the generated
+`send_imessage` share the same bug.
+Approach: stop building AppleScript source from data. Pass handle and body
+as arguments: `osascript -e 'on run argv' -e 'tell application "Messages"
+… send (item 2 of argv) to buddy (item 1 of argv) …' -e 'end run' --
+<handle> <body>`, one shared helper used by the remote channel and
+`tools/send_imessage.py`. This also removes AppleScript injection through
+a reply's text.
+Files: events/remote_channel.py, tools/send_imessage.py, tests.
+Verify:
+⚬ Test: the helper's argv carries the body unchanged (’ → " \ newline
+  emoji) and the script text never contains the body; non-vacuity: the
+  old json.dumps path fails the test.
+⚬ Live: Mac idle 1 min → text the app "what's on my calendar tomorrow?"
+  from the phone → the answer arrives in the same thread, with any ’ or →
+  intact.
 Deviations:
 
 ---
