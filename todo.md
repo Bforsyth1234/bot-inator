@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #112
+Next ID: #113
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -727,6 +727,73 @@ Verify:
   the cooldown holds. Non-vacuity per rule 5.
 ⚬ Live: edit an installed tool to call a wrong AppleScript command → run
   it twice → a repair card with the diff → Approve → it runs.
+Deviations:
+
+#112 — Generated tools can call enabled MCP tools (through a daemon relay) [ ]
+Wave: _ (not scheduled) · Agent: _ · Added: 2026-11-11 · Source: user ("can a generated tool access mcp servers?" → "Yes, add it")
+Ask: Let a generated tool use the MCP tools the user switched on (e.g.
+Playwright MCP for the browser), so a browser task done once in chat can
+become a reusable tool.
+Today (2026-11-11, read from the source, not run):
+1. The drafting prompt lists only built-in and generated tools; MCP tools
+   are in `orchestrator.tools` but skipped (`tools/meta_tool_generator.py`,
+   the `builtin_names` / `dynamic_names` loop).
+2. MCP sessions live in the daemon (`ai/mcp_client.McpManager`, own
+   asyncio loop). A sandboxed tool is a separate process that may exec
+   only Python, osascript, shortcuts, mdfind, cannot read `~/.bot-inator`
+   (server config, app token), and no route runs an MCP tool
+   (`routes/mcp.py`: list / add / delete / restart / tool flags).
+3. A trusted tool (#104) runs in the daemon and could call
+   `meta_tool_generator._ORCHESTRATOR.mcp_manager.call_tool(...)`, which
+   has no gate of its own ("Called after the approval gate"), or start its
+   own server. Unsupported, visible only in code review.
+DECISIONS (assistant, 2026-11-11; the user can overturn any):
+1. RELAY, NOT DIRECT ACCESS. The sandboxed child asks the daemon over the
+   per-call unix socket (as the `open` / `osascript` shims do, #53); the
+   daemon runs the MCP tool. The child never gets the config, the token
+   or a server process.
+2. ONLY ENABLED TOOLS, NAMED IN THE SOURCE. The relay runs a tool only if
+   it is enabled now and its name appears as a literal in the reviewed
+   source (checked from the AST at load, like `network_allowed`).
+3. RESULTS ARE OUTSIDE TEXT. Same `_untrusted` header, truncation and
+   cloud redaction as an agent call; the turn is marked (#81).
+4. Ledger: one `mcp_tool` row per relayed call, as today (#82).
+5. CARDS (user, 2026-11-11: "no extra card for MCP tools you've set to
+   run without asking, and a card for the rest"). A relayed call to an
+   MCP tool the user marked "runs without asking" is covered by the
+   generated tool's own card: no extra card. Every other relayed MCP call
+   raises its own card. Unlike an agent turn, the #81 taint does not take
+   that bypass away inside the tool, because the user reviewed the source
+   naming the call (assistant's reading of the user's choice; overturn if
+   wrong).
+OPEN (the user decides when scheduled): should the trusted path (finding
+3) be closed, e.g. by giving trusted tools the same relay and making
+`call_tool` refuse calls that did not pass the gate?
+Files:
+⚬ OWNED: `tools/tool_sandbox.py` (relay + child shim module),
+  `tools/meta_tool_generator.py` (prompt lists enabled MCP tools with
+  call signatures and the import line), `tools/draft_dry_run.py` (fake
+  MCP calls in the dry run), new tests.
+⚬ EDITED (additive): `ai/mcp_client.py` (a relay entry point that keeps
+  the gate rules), `ai/orchestrator.py` (card for relayed calls per
+  decision 5), LIVING_SPEC, README "How generated tools run".
+Approach (to decide when scheduled):
+1. Child side: `from tools.mcp import call_mcp` →
+   `call_mcp("playwright__browser_navigate", {"url": ...})` sends JSON on
+   the per-call socket and returns the text.
+2. Daemon side: check decision 2, raise a card per decision 5, call
+   `McpManager.call_tool`, return the text.
+3. Dry run: `call_mcp` records the call and returns a canned result.
+Verify:
+⚬ Tests: a sandboxed tool calls an enabled MCP tool named in its source →
+  result returned; a disabled tool, a name not in the source, a name
+  built at runtime → refused; result carries the untrusted header and is
+  redacted under a cloud engine without the opt-in; a ledger row per
+  call; a marked MCP tool runs with no extra card, an unmarked one raises a card (decision 5); dry run never reaches a real
+  server. Non-vacuity per rule 5.
+⚬ pytest gate (rule 8).
+⚬ Live: with Playwright MCP enabled, ask for a tool that opens a page and
+  returns its title → review → run → the title comes back.
 Deviations:
 
 ### New built-in tools
@@ -1556,7 +1623,7 @@ by `take_screenshot` (#102/#110) and `look_at_screen` (#107)) refuses on
 any such window.
 Also seen: the phone card showed `path: null` for an argument the model
 left empty.
-DECISIONS (assistant, 2026-11-11; the user can overturn any):
+DECISIONS (assistant, 2026-11-11; ALL THREE CONFIRMED by the user the same day: "1) refuse only when some part of a never-watch window is actually visible. 2) yes 3) yes"):
 1. REFUSE ONLY WHEN SOME OF IT IS VISIBLE. Walk the on-screen list front to
    back (Quartz returns it in z-order), subtract every opaque window above
    (layer ≥ the never-watch window's, alpha 1, not the desktop) from the
