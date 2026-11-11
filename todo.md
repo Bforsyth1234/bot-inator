@@ -1329,8 +1329,8 @@ Verify:
   the main engine to Groq, send one chat → rows with sizes.
 Deviations:
 
-#109 — Privacy ledger: show where a trusted tool connected [ ]
-Wave: _ (not scheduled) · Agent: _ · Added: 2026-11-11 · Source: user ("can we add a todo to add the network use to the privacy ledger? or would that not work?")
+#109 — Privacy ledger: show where a trusted tool connected [~]
+Wave: 20 (slot C) · Agent: _ · Added: 2026-11-11 · Source: user ("can we add a todo to add the network use to the privacy ledger? or would that not work?")
 Ask: A generated tool the user trusted (#104) runs in the daemon process
 and leaves no row in the privacy ledger (#82). #104 decision 6 accepted
 that, and the confirm sheet says so (`ai.tool_trust.NETWORK_NOTE`). The
@@ -1391,6 +1391,9 @@ With (a) as the ledger counts today (finding 5), a tool such as
 `close_app` that runs `osascript` on every call would end "Nothing left
 this Mac today". Assistant's suggestion: (a), with those rows kept out
 of the day's "left this Mac" total.
+USER DECISION (2026-11-11): (a): one row naming the executable (never
+its arguments), note "what it sent, if anything, is not visible", and
+kept out of the day's "left this Mac" total.
 Files:
 ⚬ OWNED: `ai/egress_log.py` (new kind + hook), new test file.
 ⚬ EDITED (additive, earlier wave): `Orchestrator._wrap_tool_for_approval`
