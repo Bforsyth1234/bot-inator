@@ -32,6 +32,20 @@ class ThoughtPayload(BaseModel):
     content: str
 
 
+class ApprovalAction(BaseModel):
+    """One action of a bundled approval card (#76).
+
+    ``args`` are the tool's kwargs. The card shows a tick box per action;
+    the response sends the list back in ``edited_args["actions"]`` with each
+    ``enabled`` as the user left it, and only ticked actions run.
+    """
+
+    tool: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    label: str = ""
+
+
 class ApprovalRequestPayload(BaseModel):
     request_id: str
     event_id: str
@@ -42,6 +56,9 @@ class ApprovalRequestPayload(BaseModel):
     # Plain-language summary of a suggested tool (#64): set on
     # ``generate_custom_tool`` idea cards, ``None`` otherwise.
     summary: str | None = None
+    # A prepared offer (#76): the actions one approval runs, each with a
+    # tick box. ``None`` (the default, and older daemons) is a one-call card.
+    actions: list[ApprovalAction] | None = None
 
 
 class ApprovalResponsePayload(BaseModel):

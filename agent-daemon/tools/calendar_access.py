@@ -27,7 +27,13 @@ are explicit pins; ``python tools/calendar_access.py --check`` from
 
 Dates are ISO 8601 in local time. A naive datetime is local; output always
 carries the local UTC offset. Events come back as ``{id, title, start, end,
-calendar, location, notes (first 500 chars), url, all_day}``.
+calendar, location, notes (first 500 chars), url, all_day}``, plus
+``attendees`` (#80) when the backend knows them: a list of ``{name, email,
+is_self}`` (``email`` from the participant's ``mailto:`` URL, "" when it has
+none; rooms and resources left out; at most ``ATTENDEES_LIMIT``). An event
+with no other people has ``attendees: []``; the key is ABSENT when the
+backend can't tell (the AppleScript backend, or a menu bar app older than
+#80), so a reader can tell "nobody else" from "unknown".
 
 Reminders (#45) live beside events: both backends also implement
 ``list_reminders`` / ``create_reminder`` / ``reminder_lists`` (EventKit with
@@ -55,6 +61,7 @@ from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
 ENV_BACKEND = "AGENT_CALENDAR_BACKEND"
 ENV_REMINDERS_BACKEND = "AGENT_REMINDERS_BACKEND"
 NOTES_LIMIT = 500
+ATTENDEES_LIMIT = 50
 # osascript blocks on the first-use Automation prompt until it is answered.
 _OSASCRIPT_TIMEOUT_S = 60
 _ACCESS_TIMEOUT_S = 120
@@ -101,12 +108,49 @@ def iso(dt: datetime) -> str:
     return _local(dt).isoformat(timespec="seconds")
 
 
+def email_from_url(url: Any) -> str:
+    """The address in a participant URL (``mailto:a@b.c`` -> ``a@b.c``); "" otherwise."""
+    from urllib.parse import unquote
+
+    text = str(url or "").strip()
+    if text.lower().startswith("mailto:"):
+        text = unquote(text[len("mailto:"):]).split("?", 1)[0].strip()
+    return text.lower() if "@" in text and " " not in text and ":" not in text else ""
+
+
+def clean_attendees(raw: Any) -> Optional[builtins.list[dict[str, Any]]]:
+    """Normalize attendees to ``[{name, email, is_self}]``; None stays None (unknown).
+
+    Accepts dicts with ``email`` or a ``url`` (``mailto:``). Entries with
+    neither a name nor an address are dropped; duplicates (same address) too.
+    """
+    if raw is None or not isinstance(raw, (builtins.list, tuple)):
+        return None
+    out: builtins.list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        email = email_from_url(item.get("email") or item.get("url") or "")
+        name = str(item.get("name") or "").strip()
+        if not (email or name):
+            continue
+        key = email or "name:" + name
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"name": name, "email": email, "is_self": bool(item.get("is_self"))})
+        if len(out) >= ATTENDEES_LIMIT:
+            break
+    return out
+
+
 def make_event(
     *, id: str = "", title: str = "", start: datetime, end: datetime,
     calendar: str = "", location: str = "", notes: str = "", url: str = "",
-    all_day: bool = False,
+    all_day: bool = False, attendees: Any = None,
 ) -> dict[str, Any]:
-    return {
+    event = {
         "id": id or "",
         "title": title or "",
         "start": iso(start),
@@ -117,6 +161,10 @@ def make_event(
         "url": url or "",
         "all_day": bool(all_day),
     }
+    people = clean_attendees(attendees)
+    if people is not None:  # absent = the backend can't tell (#80)
+        event["attendees"] = people
+    return event
 
 
 def make_reminder(
@@ -308,6 +356,32 @@ class EventKitBackend:
                 return cal
         return None
 
+    # EKParticipantType: rooms and resources are not people to prep for.
+    _NOT_PEOPLE = (2, 3)  # EKParticipantTypeResource, EKParticipantTypeRoom
+
+    @classmethod
+    def _participant(cls, p: Any) -> Optional[dict[str, Any]]:
+        try:
+            if int(p.participantType()) in cls._NOT_PEOPLE:
+                return None
+        except Exception:
+            pass
+        url = p.URL()
+        return {
+            "name": str(p.name() or ""),
+            "email": str(url.absoluteString()) if url is not None else "",
+            "is_self": bool(p.isCurrentUser()),
+        }
+
+    @classmethod
+    def _attendees(cls, ev: Any) -> builtins.list[dict[str, Any]]:
+        """``EKEvent.attendees`` (+ the organizer when not listed); [] for a solo event."""
+        people = [cls._participant(p) for p in (ev.attendees() or [])]
+        organizer = ev.organizer() if hasattr(ev, "organizer") else None
+        if organizer is not None and people:
+            people.append(cls._participant(organizer))  # dropped by clean_attendees if a duplicate
+        return [p for p in people if p is not None]
+
     def _to_dict(self, ev: Any) -> dict[str, Any]:
         url = ev.URL()
         cal = ev.calendar()
@@ -321,6 +395,7 @@ class EventKitBackend:
             notes=str(ev.notes() or ""),
             url=str(url.absoluteString()) if url is not None else "",
             all_day=bool(ev.isAllDay()),
+            attendees=self._attendees(ev),
         )
 
     # interface --------------------------------------------------------------
@@ -680,6 +755,15 @@ def _osascript_error(exc: Exception) -> str:
 
 
 class AppleScriptBackend:
+    """Calendar.app over ``osascript``.
+
+    Events carry no ``attendees`` key (#80: unknown, not "nobody"). Calendar's
+    scripting dictionary lists attendees but not which one is the user, so
+    the user's own address would come back as a guest and a mail lookup on
+    it would match every message; reading them would also cost one more
+    Apple Event per event on an already slow backend.
+    """
+
     name = "applescript"
     max_range_days = 14
 
@@ -992,6 +1076,8 @@ class AppCalendarBackend:
                 calendar=str(ev.get("calendar") or ""), location=str(ev.get("location") or ""),
                 notes=str(ev.get("notes") or ""), url=str(ev.get("url") or ""),
                 all_day=bool(ev.get("all_day")),
+                # Absent from apps older than #80: stays absent (unknown).
+                attendees=ev.get("attendees"),
             ))
         return sorted(events, key=lambda e: e["start"])
 

@@ -176,8 +176,39 @@ final class CalendarBridge: @unchecked Sendable {
             location: event.location ?? "",
             notes: String((event.notes ?? "").prefix(notesLimit)),
             url: event.url?.absoluteString ?? "",
-            allDay: event.isAllDay
+            allDay: event.isAllDay,
+            attendees: attendees(event)
         )
+    }
+
+    static let attendeesLimit = 50
+
+    /// `EKEvent.attendees` plus the organizer when not listed (#80); `[]`
+    /// when the event has no other people. Rooms and resources are skipped.
+    private static func attendees(_ event: EKEvent) -> [CalendarAttendeeDTO] {
+        var people = (event.attendees ?? []).compactMap(attendee)
+        if !people.isEmpty, let organizer = event.organizer.flatMap(attendee),
+           !people.contains(where: { !$0.email.isEmpty && $0.email == organizer.email }) {
+            people.append(organizer)
+        }
+        return Array(people.prefix(attendeesLimit))
+    }
+
+    private static func attendee(_ participant: EKParticipant) -> CalendarAttendeeDTO? {
+        switch participant.participantType {
+        case .room, .resource: return nil
+        default: break
+        }
+        var email = ""
+        let url = participant.url
+        if url.scheme?.lowercased() == "mailto" {
+            let raw = url.absoluteString.dropFirst("mailto:".count)
+            let address = raw.split(separator: "?", maxSplits: 1).first.map(String.init) ?? ""
+            email = (address.removingPercentEncoding ?? address).lowercased()
+        }
+        let name = participant.name ?? ""
+        if name.isEmpty && email.isEmpty { return nil }
+        return CalendarAttendeeDTO(name: name, email: email, isSelf: participant.isCurrentUser)
     }
 
     // MARK: - Args

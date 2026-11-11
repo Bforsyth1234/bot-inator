@@ -34,6 +34,9 @@ struct ApprovalRequestPayload: Codable, Hashable {
     /// Plain-language summary of a suggested tool (#64). Only set on
     /// `generate_custom_tool` idea cards; nil from older daemons.
     let summary: String?
+    /// A prepared offer's actions (#76): one approval runs every ticked one.
+    /// nil (older daemons, ordinary cards) keeps the one-call card.
+    let actions: [ApprovalAction]?
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -43,6 +46,27 @@ struct ApprovalRequestPayload: Codable, Hashable {
         case reasoning
         case timeoutSeconds = "timeout_seconds"
         case summary
+        case actions
+    }
+}
+
+/// One action of a bundled approval card (#76). `args` are the tool's
+/// kwargs. The card sends the list back in `edited_args["actions"]` with
+/// `enabled` as the user ticked it; the daemon runs only ticked actions.
+struct ApprovalAction: Codable, Hashable {
+    let tool: String
+    let args: JSONValue
+    let enabled: Bool?
+    let label: String?
+
+    /// `{"tool", "args", "enabled", "label"}` for `edited_args["actions"]`.
+    func encoded(enabled: Bool, args newArgs: JSONValue? = nil) -> JSONValue {
+        .object([
+            "tool": .string(tool),
+            "args": newArgs ?? args,
+            "enabled": .bool(enabled),
+            "label": .string(label ?? ""),
+        ])
     }
 }
 
@@ -322,10 +346,27 @@ struct CalendarEventDTO: Codable, Hashable {
     let notes: String
     let url: String
     let allDay: Bool
+    /// #80: people on the event (rooms and resources left out); `[]` for a
+    /// solo event. Optional so the frame stays the same shape for daemons
+    /// older than #80, which ignore it.
+    var attendees: [CalendarAttendeeDTO]? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, title, start, end, calendar, location, notes, url
+        case id, title, start, end, calendar, location, notes, url, attendees
         case allDay = "all_day"
+    }
+}
+
+/// One `EKParticipant` (#80). `email` is the address from its `mailto:`
+/// URL ("" when it has none).
+struct CalendarAttendeeDTO: Codable, Hashable {
+    let name: String
+    let email: String
+    let isSelf: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case name, email
+        case isSelf = "is_self"
     }
 }
 

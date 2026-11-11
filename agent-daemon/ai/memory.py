@@ -21,6 +21,7 @@ import os
 import sqlite3
 import struct
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -283,6 +284,16 @@ class Memory:
             "CREATE INDEX IF NOT EXISTS idx_chat_log_event_id "
             "ON chat_log(event_id)"
         )
+        # #72: keys of learned preferences the user deleted, and when, so
+        # derivation does not save them again from the same old decisions.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS preference_tombstones (
+                key TEXT PRIMARY KEY,
+                deleted_at REAL NOT NULL
+            )
+            """
+        )
         if self.vec_enabled:
             try:
                 conn.execute(
@@ -404,10 +415,23 @@ class Memory:
             return int(self.connect().execute("SELECT COUNT(*) FROM memories").fetchone()[0])
 
     def clear_memory(self) -> int:
-        """Delete every stored memory (not the chat log). Returns rows removed."""
+        """Delete every stored memory (not the chat log). Returns rows removed.
+
+        Learned preferences (#72) leave tombstones, so clearing memory does
+        not let the next card re-learn them from old decisions.
+        """
         with self._lock:
             conn = self.connect()
             n = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            keys = conn.execute(
+                "SELECT DISTINCT json_extract(metadata, '$.key') FROM memories "
+                "WHERE json_valid(metadata) AND json_extract(metadata, '$.key') IS NOT NULL"
+            ).fetchall()
+            now = time.time()
+            conn.executemany(
+                "INSERT OR REPLACE INTO preference_tombstones (key, deleted_at) VALUES (?, ?)",
+                [(str(k[0]), now) for k in keys],
+            )
             conn.execute("DELETE FROM memories")
             if self.vec_enabled:
                 conn.execute("DELETE FROM memory_vec")
@@ -451,6 +475,81 @@ class Memory:
         ]
 
 
+    # ---- listing / deleting (#72) -----------------------------------------
+
+    def list_memories(
+        self, kind: Optional[str] = None, source: Optional[str] = None, limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Stored memories, newest first, optionally filtered by metadata
+        ``kind`` and ``source``. Rows: ``id, text, metadata, created_at``."""
+        limit = max(1, min(int(limit), 5000))
+        where, params = [], []
+        for key, value in (("kind", kind), ("source", source)):
+            if value is not None:
+                where.append(f"json_valid(metadata) AND json_extract(metadata, '$.{key}') = ?")
+                params.append(value)
+        sql = "SELECT id, text, metadata, created_at FROM memories"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC LIMIT ?"
+        with self._lock:
+            rows = self.connect().execute(sql, (*params, limit)).fetchall()
+        return [
+            {"id": r[0], "text": r[1], "metadata": _loads(r[2]), "created_at": r[3]}
+            for r in rows
+        ]
+
+    def list_preferences(self, source: Optional[str] = None) -> list[dict[str, Any]]:
+        """``kind="preference"`` memories, newest first (``source`` filters)."""
+        return self.list_memories(kind=PREFERENCE_KIND, source=source)
+
+    def delete_memory(self, memory_id: int) -> Optional[dict[str, Any]]:
+        """Delete one memory (and its vector); returns the row, or None."""
+        with self._lock:
+            conn = self.connect()
+            row = conn.execute(
+                "SELECT id, text, metadata, created_at FROM memories WHERE id = ?",
+                (int(memory_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            self._delete_ids(conn, [int(memory_id)])
+            conn.commit()
+        return {"id": row[0], "text": row[1], "metadata": _loads(row[2]), "created_at": row[3]}
+
+    def delete_preference(
+        self, memory_id: int, source: Optional[str] = None, *, at: Optional[float] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Delete one preference (only a preference, and only from
+        ``source`` when given). A learned preference with a ``key`` leaves a
+        tombstone (``at``, default now) so the decisions that produced it
+        don't produce it again. Returns the deleted row, or None."""
+        with self._lock:
+            match = [
+                r for r in self.list_memories(kind=PREFERENCE_KIND, source=source, limit=5000)
+                if r["id"] == int(memory_id)
+            ]
+            if not match:
+                return None
+            row = self.delete_memory(int(memory_id))
+            key = (row or {}).get("metadata", {}).get("key")
+            if row is not None and key:
+                conn = self.connect()
+                conn.execute(
+                    "INSERT OR REPLACE INTO preference_tombstones (key, deleted_at) VALUES (?, ?)",
+                    (str(key), float(time.time() if at is None else at)),
+                )
+                conn.commit()
+        return row
+
+    def preference_tombstones(self) -> dict[str, float]:
+        """``{key: deleted_at}`` for deleted learned preferences."""
+        with self._lock:
+            rows = self.connect().execute(
+                "SELECT key, deleted_at FROM preference_tombstones"
+            ).fetchall()
+        return {str(k): float(v) for k, v in rows}
+
     # ---- high-level API ---------------------------------------------------
 
     def save_memory(
@@ -472,6 +571,14 @@ class Memory:
     def _serialize(vec: Iterable[float]) -> bytes:
         data = list(vec)
         return struct.pack(f"{len(data)}f", *data)
+
+
+def _loads(raw: Any) -> dict[str, Any]:
+    try:
+        data = json.loads(raw or "{}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 # ---------------------------------------------------------------------------

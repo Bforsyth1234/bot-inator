@@ -63,6 +63,13 @@ def _with_when(event: dict[str, Any]) -> dict[str, Any]:
             out["when"] = span
     except Exception:
         pass
+    if isinstance(event.get("attendees"), list):
+        # #80: names only. Addresses are personal data the model doesn't
+        # need to answer "who is in it" (and the main engine may be a cloud one).
+        out["attendees"] = [
+            str(p.get("name") or "").strip() for p in event["attendees"]
+            if isinstance(p, dict) and not p.get("is_self") and str(p.get("name") or "").strip()
+        ]
     return out
 
 
@@ -80,7 +87,8 @@ def list_events(start: str = "", end: str = "") -> dict[str, Any]:
     Returns:
         A dict with ``status`` ("ok" or "error"), ``start``, ``end``,
         ``count``, ``truncated`` and ``events`` (each with title, start, end,
-        calendar, location, notes, url, all_day), or an ``error`` string.
+        calendar, location, notes, url, all_day, and ``attendees`` (other
+        people's names) when the calendar reports them), or an ``error`` string.
     """
     try:
         begin, finish = resolve_range(start, end)

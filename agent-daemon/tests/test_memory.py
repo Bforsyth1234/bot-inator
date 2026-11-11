@@ -209,3 +209,53 @@ def test_close_while_searching_from_threads(tmp_path):
             timeout=60,
         )
         assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr[-500:])
+
+
+# ---- #72: list / delete preferences, tombstones ---------------------------
+
+
+def test_list_preferences_filters_kind_and_source(mem):
+    mem.save_memory("obs", {"kind": "observation"})
+    mem.save_memory("user pref", {"kind": "preference"})
+    mem.save_memory("learned", {"kind": "preference", "source": "approval", "key": "k1"})
+    assert [r["text"] for r in mem.list_preferences()] == ["learned", "user pref"]
+    rows = mem.list_preferences(source="approval")
+    assert [r["text"] for r in rows] == ["learned"]
+    assert rows[0]["metadata"]["key"] == "k1"
+
+
+def test_delete_preference_only_deletes_matching_preferences(mem):
+    obs = mem.save_memory("obs", {"kind": "observation"})
+    user = mem.save_memory("user pref", {"kind": "preference"})
+    learned = mem.save_memory("learned", {"kind": "preference", "source": "approval", "key": "k1"})
+    assert mem.delete_preference(obs) is None
+    assert mem.delete_preference(user, "approval") is None
+    assert mem.delete_preference(learned, "approval", at=5.0)["text"] == "learned"
+    assert _texts(mem) == ["obs", "user pref"]
+    assert mem.preference_tombstones() == {"k1": 5.0}
+    assert mem.delete_preference(learned, "approval") is None
+
+
+def test_delete_memory_removes_vector(mem):
+    rowid = mem.save_memory("gone", {"kind": "preference"})
+    assert mem.delete_memory(rowid)["id"] == rowid
+    assert mem.delete_memory(rowid) is None
+    if mem.vec_enabled:
+        n = mem.connect().execute("SELECT COUNT(*) FROM memory_vec WHERE rowid = ?", (rowid,)).fetchone()[0]
+        assert n == 0
+    assert "gone" not in mem.recall_memory("gone", 5)
+
+
+def test_clear_memory_tombstones_learned_keys(mem):
+    mem.save_memory("learned", {"kind": "preference", "source": "approval", "key": "k1"})
+    mem.save_memory("obs")
+    mem.clear_memory()
+    assert set(mem.preference_tombstones()) == {"k1"}
+
+
+def test_learned_preferences_are_evicted_last(mem):
+    mem.save_memory("learned", {"kind": "preference", "source": "approval", "key": "k1"})
+    for i in range(8):
+        mem.save_memory(f"obs-{i}", {"kind": "observation"})
+    assert _texts(mem)[0] == "learned"
+    assert mem.count() == 5
