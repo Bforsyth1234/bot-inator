@@ -252,3 +252,49 @@ def test_reask_retries_without_stop_sequences() -> None:
                      stop_sequences=["Observation:"], tools_to_call_from=[object()])
     assert out.tool_calls[0].function.arguments == {"answer": "Numbers isn't installed."}
     assert m.stops_seen == [["Observation:"], None]
+
+
+# --- junk arguments (found by evals/tool_calls on 2026-11-10) ---------------
+
+class _Tool:
+    def __init__(self, name: str, inputs: dict) -> None:
+        self.name, self.inputs = name, inputs
+
+
+_LIST_WINDOWS = _Tool("list_windows", {})
+_LIST_EVENTS = _Tool("list_events", {"start": {"type": "string"}, "end": {"type": "string"}})
+_GENERATE = _Tool("generate_custom_tool", {"tool_name": {}, "description": {}, "expected_logic": {}})
+
+
+def _cleaned(name: str, arguments: Any) -> Any:
+    call = ChatMessageToolCall(
+        id="c1", type="function",
+        function=ChatMessageToolCallFunction(name=name, arguments=arguments),
+    )
+    m = _model(ChatMessage(role="assistant", content="", tool_calls=[call]))
+    out = m.generate([], tools_to_call_from=[_LIST_WINDOWS, _LIST_EVENTS, _GENERATE])
+    return out.tool_calls[0].function.arguments
+
+
+def test_junk_arguments_to_a_no_argument_tool_are_dropped() -> None:
+    # Each of these made smolagents reject list_windows until steps ran out.
+    assert _cleaned("list_windows", '{"": ""}') == {}
+    assert _cleaned("list_windows", {"end": None}) == {}
+    assert _cleaned("list_windows", '{"arguments": {}}') == {}
+    assert _cleaned("list_windows", "") == {}
+
+
+def test_wrapped_and_empty_arguments_are_cleaned() -> None:
+    real = {"tool_name": "start_timer", "description": "d", "expected_logic": "l"}
+    assert _cleaned("generate_custom_tool", {"arguments": real}) == real
+    assert _cleaned("generate_custom_tool", {"arguments": '{"tool_name": "t"}'}) == {"tool_name": "t"}
+    assert _cleaned("list_events", '{"start": "2026-12-01", "": "", "calendar": null}') == {"start": "2026-12-01"}
+    # A known parameter keeps even an empty value.
+    assert _cleaned("list_events", {"start": "", "end": None}) == {"start": "", "end": None}
+
+
+def test_unknown_argument_with_a_value_is_kept_for_the_model_to_see() -> None:
+    assert _cleaned("list_events", {"day": "today"}) == {"day": "today"}
+    # Unparseable arguments and unknown tools are left as they were.
+    assert _cleaned("list_events", "{not json") == "{not json"
+    assert _cleaned("no_such_tool", {"": 1}) == {"": 1}

@@ -172,6 +172,8 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - live ch
     parser.add_argument("--model", help="override the model id for this run")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--cases", type=Path, help="another cases file")
+    parser.add_argument("--only", help="run only cases whose id contains this text "
+                        "(a partial run is not saved or compared)")
     parser.add_argument("--baseline", type=Path,
                         help="result file to compare with (default: the previous run)")
     parser.add_argument("--no-save", action="store_true")
@@ -196,8 +198,13 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - live ch
         ok, n = _ok_count(entry)
         print(f"  {entry['id']}: {ok}/{n}", flush=True)
 
+    cases = suite.load_cases(args.cases)
+    if args.only:
+        cases = [c for c in cases if args.only in c["id"]]
+        if not cases:
+            parser.error(f"no case id contains {args.only!r}")
     case_runs = asyncio.run(run_suite(
-        suite, suite.load_cases(args.cases), engine, settings,
+        suite, cases, engine, settings,
         repeats=args.repeats, progress=progress,
     ))
     result = {
@@ -212,6 +219,8 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - live ch
         "cases": case_runs,
     }
     print(report(result))
+    if args.only:
+        return 1 if result["summary"]["errors"] else 0
     baseline = json.loads(args.baseline.read_text()) if args.baseline else previous_result(args.suite)
     if baseline:
         print("\n".join(compare(baseline, result)))

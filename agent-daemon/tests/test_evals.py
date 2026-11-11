@@ -217,3 +217,18 @@ def test_tool_call_mail_case_uses_canned_email_and_reports_bad_calls() -> None:
     # A call that fails the tool's schema is reported, and never recorded.
     bad = _run_tool_case(case, ("read_email", {"id": 4201}))
     assert bad["ok"] is False and bad["step_errors"] and bad["calls"] == []
+
+
+def test_event_case_prompt_carries_memories_and_defaults_to_no_action() -> None:
+    from ai.mlx_engine import MLXEngine
+    from ai.orchestrator import Orchestrator
+    from events.event_bus import EventBus
+
+    orch = Orchestrator(engine=MLXEngine(), event_bus=EventBus(), tools=[])
+    prompt, steps = tool_calls._prompt_and_steps(_case("event_file_memory_move"), orch)
+    assert steps == 2
+    assert "move every new PDF in Downloads" in prompt
+    assert prompt.index("Relevant memories") < prompt.index("Most events need no action")
+    plain, _ = tool_calls._prompt_and_steps(_case("event_file_no_action"), orch)
+    assert "Relevant memories" not in plain
+    assert "Never call a tool just to tell the user the event happened" in plain

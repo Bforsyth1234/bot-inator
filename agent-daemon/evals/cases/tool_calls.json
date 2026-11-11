@@ -114,5 +114,24 @@
  {"id": "event_file_no_action", "kind": "event",
   "event": {"event_type": "file",
             "metadata": {"path": "/Users/me/Downloads/photo.jpg", "action": "created"}},
-  "expect": []}
+  "expect": []},
+
+ {"id": "event_file_pdf_no_action", "kind": "event",
+  "event": {"event_type": "file",
+            "metadata": {"path": "/Users/me/Downloads/invoice_1001.pdf", "action": "created"}},
+  "expect": []},
+
+ {"id": "event_file_unrelated_memory_no_action", "kind": "event",
+  "event": {"event_type": "file",
+            "metadata": {"path": "/Users/me/Desktop/notes.txt", "action": "modified"}},
+  "memories": ["User preference: I prefer dark mode in every app"],
+  "expect": []},
+
+ {"id": "event_file_memory_move", "kind": "event",
+  "event": {"event_type": "file",
+            "metadata": {"path": "/Users/me/Downloads/invoice_1001.pdf", "action": "created"}},
+  "memories": ["User preference: move every new PDF in Downloads into /Users/me/Documents/Invoices"],
+  "expect": [{"tool": "move_file",
+              "args": {"src": {"equals": "/Users/me/Downloads/invoice_1001.pdf"},
+                       "dst_dir": {"contains": "/Users/me/Documents/Invoices"}}}]}
 ]

@@ -1454,9 +1454,17 @@ class Orchestrator:
         memory_block = self._format_memories(memories)
         if memory_block:
             parts.append(memory_block)
+        # Found by ``evals`` (tool_calls, 2026-11-10): with "if an action
+        # would help, call exactly one tool", GPT-OSS answered a plain
+        # "photo.jpg created in Downloads" with a notification about it or
+        # by moving the file to Pictures, in 5 runs of 6.
         parts.append(
-            "If an action would help, call exactly one tool. Otherwise reply "
-            "'no action'."
+            "Most events need no action: reply 'no action'. Call a tool "
+            "(exactly one) only when a memory listed above says the user "
+            "wants something done for this kind of event; then do what that "
+            "memory asks. Never call a tool just to tell the user the event "
+            "happened, and never move, rename or change a file the user "
+            "has not asked you to."
         )
         return "\n".join(parts)
 
@@ -1713,6 +1721,44 @@ def _allow_null_optionals(spec: dict[str, Any]) -> None:
             prop["type"] = kind + ["null"]
 
 
+def _clean_tool_arguments(arguments: Any, inputs: dict[str, Any]) -> Any:
+    """Tool-call ``arguments`` with the junk GPT-OSS adds removed.
+
+    Found by ``evals`` (tool_calls, 2026-11-10): "which windows do I have
+    open?" failed 2 runs in 3 because smolagents rejected every
+    ``list_windows`` call with "Argument  is not in the tool's input
+    schema" until the steps ran out. The model sent an empty-named
+    argument, another tool's optional parameter, or wrapped the real
+    arguments as ``{"arguments": {...}}``. Removed here: the wrapper, an
+    empty name, an unknown name with an empty value, and every argument
+    of a tool that takes none. An unknown argument that carries a value
+    is kept, so smolagents still reports it to the model.
+    """
+    parsed = arguments
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed) if parsed.strip() else {}
+        except ValueError:
+            return arguments
+    if not isinstance(parsed, dict):
+        return arguments
+    inner = parsed.get("arguments")
+    if len(parsed) == 1 and "arguments" not in inputs:
+        if isinstance(inner, str) and inner.strip().startswith("{"):
+            try:
+                inner = json.loads(inner)
+            except ValueError:
+                pass
+        if isinstance(inner, dict):
+            parsed = inner
+    if not inputs:
+        return {}
+    return {
+        key: value for key, value in parsed.items()
+        if key in inputs or (str(key).strip() and value not in (None, "", {}, []))
+    }
+
+
 def _has_tool_result(messages: Any) -> bool:
     """True when the conversation already contains a tool's observation."""
     for msg in messages or []:
@@ -1877,10 +1923,19 @@ def _make_groq_model_class(base: type) -> type:
                         logger.info("Groq rejected a tool call (%s); retrying once", exc)
                         continue
                     raise
+            schemas = {
+                getattr(t, "name", None): getattr(t, "inputs", None)
+                for t in tools_to_call_from or []
+            }
             for call in message.tool_calls or []:
                 function = getattr(call, "function", None)
                 if getattr(function, "name", None) == ANSWER_ALIAS:
                     function.name = "final_answer"
+                inputs = schemas.get(getattr(function, "name", None))
+                if isinstance(inputs, dict):
+                    function.arguments = _clean_tool_arguments(
+                        getattr(function, "arguments", None), inputs,
+                    )
                 if (
                     getattr(function, "name", None) == "final_answer"
                     and _is_bare_done(getattr(function, "arguments", None))

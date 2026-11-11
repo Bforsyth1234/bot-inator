@@ -12,6 +12,7 @@ Case shape (``evals/cases/tool_calls.json``)::
     {"id": "...", "kind": "chat", "text": "Open github.com",
      "expect": [{"tool": "open_url", "args": {"url": {"contains": "github.com"}}}],
      "allow": ["list_windows"],            # may appear anywhere, ignored
+     "memories": ["..."],                  # recalled memories (event cases)
      "tool_results": {"read_email": {...}}}  # canned stub results
 
 ``kind`` is ``chat`` or ``event`` (then ``event`` holds the event).
@@ -20,7 +21,7 @@ without a tool". ``tool`` may be a list of acceptable names. An ``args``
 matcher is ``{"contains": text}`` (case-insensitive) or ``{"equals": v}``.
 
 Limits: only the built-in tools are offered (not the user's generated
-ones), there are no recalled memories, and stub ``read_email`` results
+ones), memories are only those a case lists, and stub ``read_email`` results
 are not redacted for cloud engines (the cases are synthetic).
 """
 from __future__ import annotations
@@ -113,7 +114,8 @@ def _prompt_and_steps(case: dict[str, Any], orchestrator: Any) -> tuple[str, int
         window_title=raw.get("window_title"), metadata=dict(raw.get("metadata") or {}),
     )
     # Step budgets as Orchestrator._handle_event.
-    return orchestrator._build_prompt(event), 3 if event.event_type == "mail_received" else 2
+    prompt = orchestrator._build_prompt(event, memories=case.get("memories"))
+    return prompt, 3 if event.event_type == "mail_received" else 2
 
 
 def _step_errors(agent: Any) -> list[str]:
