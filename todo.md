@@ -1329,8 +1329,8 @@ Verify:
   the main engine to Groq, send one chat → rows with sizes.
 Deviations:
 
-#109 — Privacy ledger: show where a trusted tool connected [~]
-Wave: 20 (slot C) · Agent: _ · Added: 2026-11-11 · Source: user ("can we add a todo to add the network use to the privacy ledger? or would that not work?")
+#109 — Privacy ledger: show where a trusted tool connected [~] live
+Wave: 20 (slot C) · Agent: subagent · Added: 2026-11-11 · Source: user ("can we add a todo to add the network use to the privacy ledger? or would that not work?")
 Ask: A generated tool the user trusted (#104) runs in the daemon process
 and leaves no row in the privacy ledger (#82). #104 decision 6 accepted
 that, and the confirm sheet says so (`ai.tool_trust.NETWORK_NOTE`). The
@@ -1427,7 +1427,82 @@ Verify:
 ⚬ pytest gate (rule 8); swiftc typecheck for the Swift change.
 ⚬ Live: trust a generated tool that fetches a URL, run it, open Settings
   → Privacy ledger → a row with that tool's name and that host.
+Results (wave 20 slot C, 2026-11-11):
+1. `ai/egress_log.py`: kind `trusted_tool` (added to `KINDS` in its own
+   block, `KINDS = KINDS | {...}`, so slot A's kind edit doesn't collide);
+   context manager `trusted_tool_run(tool, arguments, log=None)`; audit
+   hook `_audit_hook`, installed once on first use. Tracked events:
+   `socket.getaddrinfo` (the name), `socket.connect` / `socket.sendto`
+   (non-loopback, non-AF_UNIX address → host row; the last name resolved
+   in the call names it, else the IP), `http.client.send` (bytes out, by
+   the connection's host), and `subprocess.Popen`, `os.system`,
+   `os.posix_spawn`, `os.spawn`, `os.exec` (program file name only;
+   `sh -c "FOO=1 curl …"` → `curl`). Rows are written after the call,
+   raised or not: one per host (note `TRUSTED_NOTE`, plus "size not
+   visible" when http.client gave no count, plus "also ran X" when a
+   program ran), or, with no host but a program, one row host `None`, note
+   "ran X; what it sent, if anything, is not visible" (decision (a)).
+   Kept text = the call's arguments under keep-text; URLs/bodies never.
+2. `stats`: rows `kind = trusted_tool AND host IS NULL` are out of
+   `count`, the byte totals, `by_kind` and `by_host`; new `not_visible`
+   count; summary "Nothing left this Mac today that bot-inator could see;
+   1 program a trusted tool ran (what they sent, if anything, is not
+   visible)" (or "N requests left …; …" when there are others). Exactly
+   "Nothing left this Mac today" still when there are no rows.
+3. `Orchestrator._wrap_tool_for_approval`: `original_forward(...)` runs
+   inside `trusted_tool_run` when the tool's name is in
+   `_unsandboxed_tools` (read per call), else `contextlib.nullcontext()`.
+4. `LIMIT_NOTE` and `tool_trust.NETWORK_NOTE` each say best effort / a
+   record, not a boundary / launched programs not visible. Swift: label
+   "Trusted tool <name>", destination "a program it launched" for a
+   host-less trusted row. README "How generated tools run": one sentence.
+5. Threads (finding 2): fallback taken. Only calling-thread (and
+   context-copying, e.g. `asyncio.to_thread`) events are attributed; a
+   thread the tool starts is not, and nothing is attributed by timing.
+   `TRUSTED_NOTE` says "not threads or programs it started".
+Verify (done here):
+⚬ New `tests/test_trusted_tool_egress.py`, 19 tests: non-loopback connect
+  → one row with tool + host; one row per host, IP when unnamed; text only
+  under keep-text, never the URL; real loopback socket/`::1`/0.0.0.0/AF_UNIX
+  → no row; real `urllib` against a loopback HTTP server with the loopback
+  test patched off → row "localhost" with http.client bytes, query string
+  not stored; no connection/no program → no row; launched program → one
+  row naming `true`, arguments absent; those rows out of the day's total;
+  outside a run (incl. a Groq `record_completion`) → no row; hook cost;
+  a started thread not attributed; hook raising, ledger raising, default
+  log raising, hook install raising → tool unaffected; tool exception
+  propagates with its row kept; nested runs; through the real approval
+  wrapper trusted → row, sandboxed (not in `_unsandboxed_tools`) → none.
+  Non-remote connects are simulated with `sys.audit("socket.connect",
+  …)` (the event the interpreter raises before connecting); no packet
+  leaves the Mac.
+⚬ Non-vacuity (rule 5), each reverted after: wrapper condition → `False`:
+  `test_trusted_tool_through_the_gate_gets_a_row` fails; stats exclusion
+  disabled: `test_launched_program_rows_are_out_of_the_days_total` fails;
+  hook catch-all narrowed: `test_hook_error_does_not_fail_the_tool` fails.
+⚬ Hook cost on this Mac (Python 3.14.8): ~37 ns per untracked audit
+  event, ~48 ns for a tracked one with no trusted call running.
+⚬ pytest gate: 1853 passed (1834 before + 19 new), 0 failed.
+⚬ `xcrun swiftc -O -parse-as-library -target arm64-apple-macos14` full
+  build to a scratch path: 0 errors.
 Deviations:
+⚬ LIVING_SPEC not edited (listed under Files, but outside this slot's
+  boundaries): runner, please add the `trusted_tool` kind and the
+  `not_visible` stats field to the ledger rows in LIVING_SPEC.
+⚬ Also counts tools loaded in-process because `AGENT_TOOL_SANDBOX=0`
+  (they are in `_unsandboxed_tools` too); same exposure, same row.
+⚬ When a call both connected and launched a program, the host rows carry
+  "also ran X" instead of a separate not-visible row.
+Unverified: a real remote host (not contacted by rule); `requests` /
+`httpx` / asyncio streams through this hook (finding 1 saw their
+connect events; not re-tested here); connection-pool reuse (a reused
+keep-alive connection raises no new connect, so no row); the Swift label
+on screen.
+Live check: trust a generated tool that fetches a URL (e.g. `urllib` GET
+of a public page), run it, open Settings → Privacy ledger → a row
+"Trusted tool <name>" with that host. Trust a tool that runs `osascript`
+(e.g. close_app) and run it → a row "a program it launched", note "ran
+osascript; …", and the day's summary does not count it as a request.
 
 ### Test hygiene
 

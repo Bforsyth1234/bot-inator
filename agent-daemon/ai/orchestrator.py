@@ -1555,12 +1555,26 @@ class Orchestrator:
                     orchestrator, idea_summary, call_args, call_kwargs
                 )
             is_dynamic = tool_name in getattr(orchestrator, "_dynamic_tool_names", ())
-            try:
-                result = (
-                    original_forward(*call_args, **call_kwargs)
-                    if original_forward
-                    else None
+            # #109: a trusted (in-process) generated tool gets ledger rows for
+            # the hosts it connected to; the sandbox proxy records the rest.
+            import contextlib
+
+            from ai import egress_log as _egress
+
+            ledger_run = (
+                _egress.trusted_tool_run(
+                    tool_name, {"args": call_args, "kwargs": call_kwargs},
                 )
+                if tool_name in (getattr(orchestrator, "_unsandboxed_tools", None) or ())
+                else contextlib.nullcontext()
+            )
+            try:
+                with ledger_run:
+                    result = (
+                        original_forward(*call_args, **call_kwargs)
+                        if original_forward
+                        else None
+                    )
             except Exception as exc:
                 if is_dynamic:
                     # #90: a generated tool that raised counts toward repair.
