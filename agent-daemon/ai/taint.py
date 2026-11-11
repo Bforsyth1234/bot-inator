@@ -54,6 +54,8 @@ OUTSIDE_TEXT_TOOLS: Mapping[str, str] = {
     "read_clipboard": "clipboard",
     "list_events": "calendar",
     "read_front_window": "window",
+    # #107: a screenshot's answer can carry text an attacker put on screen.
+    "look_at_screen": "window",
 }
 
 # Read-only tools that WRITE state: in a marked turn they get a card
