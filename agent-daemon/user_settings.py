@@ -1,8 +1,8 @@
 """Settings the user edits from the MenuBar app's Settings window.
 
 Stored as JSON at ``~/.bot-inator/settings.json`` (override with
-``AGENT_SETTINGS_PATH``), file mode 0600 because it can hold the Groq API
-key. Keys use the same names as the environment variables they stand in
+``AGENT_SETTINGS_PATH``), file mode 0600 because it can hold provider API
+keys. Keys use the same names as the environment variables they stand in
 for, so :mod:`config` can merge them into ``os.environ`` at startup.
 
 Precedence, highest first: real shell exports, this file, ``.env``.
@@ -13,6 +13,8 @@ import json
 import os
 import tempfile
 from pathlib import Path
+
+import providers
 
 # Only these keys may be written from the UI.
 ALLOWED_KEYS = frozenset({
@@ -57,8 +59,12 @@ ALLOWED_KEYS = frozenset({
     # "whisper". Read live by events.meeting_notes.
     "AGENT_MEETING_NOTES",
     "AGENT_MEETING_NOTES_ENGINE",
-})
-PROVIDERS = ("local", "groq")
+    # First run (#93): "local" | "cloud" | "mixed", what the user picked on
+    # the first-run screen. Informational; its presence is not the gate
+    # (the settings file existing is).
+    "AGENT_FIRST_RUN_CHOICE",
+}) | providers.preset_env_keys()  # <PRESET>_API_KEY / _API_BASE / _<ROLE>_MODEL (#97)
+PROVIDERS = providers.PROVIDERS
 
 
 def settings_path() -> Path:

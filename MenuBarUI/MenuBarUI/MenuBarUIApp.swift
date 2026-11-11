@@ -174,6 +174,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         RecordHotKeyController.shared.start { [demonstration] in demonstration.toggleRecording() }
         // #86: the recorder exists from launch (it purges leftover audio).
         _ = MeetingRecorder.shared
+        // #93: the engine choice on a fresh install (no settings.json yet).
+        FirstRunWindowController.shared.showIfPending()
     }
 
     // MARK: Cmd-Tab / Dock while a window is open

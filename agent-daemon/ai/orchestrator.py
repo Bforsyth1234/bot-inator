@@ -1227,10 +1227,14 @@ class Orchestrator:
                     "Groq engine cannot drive the agent loop"
                 )
                 return None
+            # One adapter for every OpenAI-compatible preset (#97). Its
+            # Groq workarounds (plain-text reply under tool_choice=required,
+            # one retry on a rejected tool call, the "answer" tool name)
+            # only act on those specific failures, so they stay on for all.
             return _make_groq_model_class(OpenAIServerModel)(
                 model_id=self.engine.model_name,
                 api_base=self.engine.api_base,
-                api_key=self.engine.api_key,
+                api_key=self.engine.api_key or "not-needed",
                 flatten_messages_as_text=False,
             )
         return None
