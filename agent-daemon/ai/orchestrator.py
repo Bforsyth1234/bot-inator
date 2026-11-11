@@ -479,9 +479,17 @@ class Orchestrator:
         )
         await self._send(msg)
         try:
-            return await asyncio.wait_for(
+            resp = await asyncio.wait_for(
                 fut, timeout=self.code_approval_timeout
             )
+            if resp.approved and resp.outside_sandbox:
+                # #104: the review card's checkbox; trusted at the next load
+                # only if the installed file is exactly this source.
+                from ai import tool_trust
+
+                tool_trust.store_for(self).offer_from_review(
+                    tool_name, resp.edited_code or code)
+            return resp
         except asyncio.TimeoutError:
             # Atomically pop to avoid race with submit_code_approval_response
             self._pending_code.pop(request_id, None)
@@ -709,11 +717,18 @@ class Orchestrator:
     def _load_tool(
         self, name: str, path: Path, exclude: frozenset[str] = frozenset()
     ) -> Any:
-        """Load ``path`` as a sandboxed proxy, or in-process when opted out (#22)."""
+        """Load ``path`` as a sandboxed proxy, or in-process when opted out (#22)
+        or when the user trusted this exact source (#104, ``ai.tool_trust``)."""
+        from ai import tool_trust
         from tools import tool_sandbox
 
-        if not tool_sandbox.sandbox_enabled():
-            return self._import_tool_module(name, path, exclude)
+        unsandboxed = self.__dict__.setdefault("_unsandboxed_tools", set())
+        unsandboxed.discard(name)
+        if not tool_sandbox.sandbox_enabled() or tool_trust.store_for(self).check(name, path):
+            tool_obj = self._import_tool_module(name, path, exclude)
+            if tool_obj is not None:
+                unsandboxed.add(name)
+            return tool_obj
         return tool_sandbox.load_sandboxed_tool(name, path, exclude)
 
     def _refuse_unsandboxed(self, target: Path) -> bool:
@@ -1761,6 +1776,8 @@ class Orchestrator:
                     and is_undoable(tool_name) and not actions and not origin_notes
                 ),
                 origin_notes=origin_notes or None,
+                # #104: a trusted (or AGENT_TOOL_SANDBOX=0) generated tool.
+                outside_sandbox=tool_name in getattr(self, "_unsandboxed_tools", ()),
             ),
         )
         offer_id = self._record_offer_shown(tool_name, tool_args)

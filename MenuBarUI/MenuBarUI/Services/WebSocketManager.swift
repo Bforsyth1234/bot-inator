@@ -196,13 +196,15 @@ final class WebSocketManager: ObservableObject {
         requestId: String,
         approved: Bool,
         editedCode: String? = nil,
-        userNote: String? = nil
+        userNote: String? = nil,
+        outsideSandbox: Bool = false
     ) {
         let payload = CodeApprovalResponsePayload(
             requestId: requestId,
             approved: approved,
             editedCode: editedCode,
-            userNote: (userNote?.isEmpty == true) ? nil : userNote
+            userNote: (userNote?.isEmpty == true) ? nil : userNote,
+            outsideSandbox: approved && outsideSandbox
         )
         let msg = WSMessage.codeApprovalResponse(
             seq: nextSeq(),

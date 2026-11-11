@@ -68,6 +68,9 @@ class ApprovalRequestPayload(BaseModel):
     # ("Read this turn: email from ...", "to: from the email, not from
     # you"). ``None`` (the default, and every unmarked turn) shows nothing.
     origin_notes: list[str] | None = None
+    # #104: the tool is a generated tool the user trusted to run outside
+    # the sandbox (or AGENT_TOOL_SANDBOX=0); the card says so.
+    outside_sandbox: bool = False
 
 
 class ApprovalResponsePayload(BaseModel):
@@ -127,6 +130,9 @@ class CodeApprovalResponsePayload(BaseModel):
     # originally-proposed code.
     edited_code: str | None = None
     user_note: str | None = None
+    # #104: the card's off-by-default "Run outside the sandbox" checkbox.
+    # Trust is recorded only if the installed file is exactly this source.
+    outside_sandbox: bool = False
 
 
 StatusState = Literal[
