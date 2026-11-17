@@ -42,6 +42,15 @@ final class MainWindowController {
         window.orderFrontRegardless()
     }
 
+    private static let frameName = "BotInatorMainWindow"
+
+    /// About 80% of the screen, between 980×700 and 1440×960.
+    private static func defaultSize() -> NSSize {
+        let visible = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
+        return NSSize(width: min(max(visible.width * 0.8, 980), 1440),
+                      height: min(max(visible.height * 0.85, 700), 960))
+    }
+
     private func makeWindow() -> NSWindow {
         let hosting = NSHostingController(rootView: makeContent())
         // Let the SwiftUI toolbar and navigation title reach the NSWindow.
@@ -54,12 +63,13 @@ final class MainWindowController {
         window.title = "bot-inator"
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
-        window.setContentSize(NSSize(width: 980, height: 700))
         window.contentMinSize = NSSize(width: 760, height: 520)
-        if !window.setFrameUsingName("MainWindow") {
+        // Remembered size and place; the first time, most of the screen.
+        if !window.setFrameUsingName(Self.frameName) {
+            window.setContentSize(Self.defaultSize())
             window.center()
         }
-        window.setFrameAutosaveName("MainWindow")
+        window.setFrameAutosaveName(Self.frameName)
         return window
     }
 }

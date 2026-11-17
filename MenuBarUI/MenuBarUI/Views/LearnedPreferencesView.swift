@@ -117,7 +117,7 @@ struct LearnedPreferencesView: View {
                     }
                 }
                 .listStyle(.inset)
-                .frame(minHeight: 120, maxHeight: 220)
+                .frame(minHeight: 120, maxHeight: .infinity)
             }
         }
         .padding(.horizontal, 14)
