@@ -354,6 +354,7 @@ struct SettingsView: View {
             }
             // #96: bundled daemon, start at login, new-version check.
             AppLifecycleSettingsView()
+            MainWindowSettingsView()
 
             Section("Inference provider") {
                 Picker("Provider", selection: $viewModel.provider) {

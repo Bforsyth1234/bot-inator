@@ -13,7 +13,8 @@ struct MenuBarUIApp: App {
                 .environmentObject(delegate.delivery)
                 .appTextSize()
         } label: {
-            MenuBarIconLabel(ws: delegate.ws, demo: delegate.demonstration.model)
+            MenuBarIconLabel(ws: delegate.ws, demo: delegate.demonstration.model,
+                             registerMainWindowOpener: { delegate.setMainWindowOpener($0) })
         }
         .menuBarExtraStyle(.window)
 
@@ -40,16 +41,17 @@ struct MenuBarUIApp: App {
         .defaultSize(width: 540, height: 560)
         .keyboardShortcut(",", modifiers: [.command])
 
-        // The menu bar panel closes whenever it loses focus (macOS behaviour
-        // for MenuBarExtra panels); this is the same content in a normal
-        // window that stays open beside other apps.
-        Window("bot-inator", id: "activity") {
-            ActivityWindowView(watchMe: { delegate.demonstration.toggleRecording() })
+        // The full app window: a sidebar with everything the menu bar panel
+        // and the separate windows offer. Opens at launch (Settings > Main
+        // window) and from the Dock icon; the menu bar icon stays.
+        Window("bot-inator", id: "main") {
+            MainWindowView(watchMe: { delegate.demonstration.toggleRecording() })
                 .environmentObject(delegate.ws)
                 .environmentObject(delegate.delivery)
                 .appTextSize()
         }
-        .defaultSize(width: 500, height: 680)
+        .defaultSize(width: 980, height: 700)
+        .keyboardShortcut("b", modifiers: [.command, .shift])
         .keyboardShortcut("b", modifiers: [.command, .shift])
     }
 }
@@ -60,6 +62,10 @@ struct MenuBarUIApp: App {
 struct MenuBarIconLabel: View {
     @ObservedObject var ws: WebSocketManager
     @ObservedObject var demo: DemonstrationModel
+    /// The label exists from launch, so it is where the app gets a SwiftUI
+    /// ``openWindow`` for the main window (launch and Dock reopen).
+    var registerMainWindowOpener: (@escaping () -> Void) -> Void = { _ in }
+    @Environment(\.openWindow) private var openWindow
 
     private var glyph: String {
         if ws.lastStatus?.paused == true { return "pause.circle" }
@@ -76,6 +82,14 @@ struct MenuBarIconLabel: View {
                 Text("\(inbox)")
             }
         }
+        .task {
+            let open = openWindow
+            registerMainWindowOpener {
+                NSApp.setActivationPolicy(.regular)
+                NSApp.activate(ignoringOtherApps: true)
+                open(id: "main")
+            }
+        }
     }
 }
 
@@ -89,37 +103,6 @@ struct InboxTab: View {
                 .padding(12)
         }
         .task { await delivery.refresh() }
-    }
-}
-
-/// Thoughts + Debug in a regular, resizable window ("Open in window").
-struct ActivityWindowView: View {
-    @EnvironmentObject private var delivery: DeliveryViewModel
-    /// #84 "Watch me", the same toggle the menu bar panel uses (#100).
-    var watchMe: () -> Void = {}
-
-    var body: some View {
-        VStack(spacing: 0) {
-            NoticeBanner()
-            TabView {
-                ThoughtStreamView()
-                    .tabItem { Label("Thoughts", systemImage: "brain") }
-                InboxTab()
-                    .tabItem { Label("Inbox", systemImage: "tray") }
-                    .badge(delivery.inboxCount)
-                DebugView()
-                    .tabItem { Label("Debug", systemImage: "ladybug") }
-            }
-            .frame(maxHeight: .infinity)
-            .layoutPriority(-1)
-            Divider()
-            // #100: the same bottom bars as the menu bar panel, minus
-            // "Open in window" (this is the window).
-            PanelFooter(watchMe: watchMe, showOpenInWindow: false)
-                .fixedSize(horizontal: false, vertical: true)
-                .layoutPriority(1)
-        }
-        .frame(minWidth: 460, minHeight: 420)
     }
 }
 
@@ -148,6 +131,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         ))
     }()
 
+    /// Opens (or brings forward) the main window; set by the menu bar label.
+    private var openMainWindow: (() -> Void)?
+    private var openedMainAtLaunch = false
+
+    func setMainWindowOpener(_ opener: @escaping () -> Void) {
+        openMainWindow = opener
+        // First time the opener arrives: honour "open at launch".
+        guard !openedMainAtLaunch else { return }
+        openedMainAtLaunch = true
+        if MainWindowPrefs.openAtLaunch {
+            opener()
+        }
+    }
+
+    /// Bring the main window forward (menu bar panel, Dock icon).
+    func showMainWindow() {
+        openMainWindow?()
+    }
+
+    /// Clicking the Dock icon with no visible window reopens the main window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showMainWindow() }
+        return true
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // #96: the release app starts its bundled daemon unless one already
         // answers on 8000 (./run.sh); a dev build has none and skips this.
@@ -164,6 +172,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             .removeDuplicates()
             .sink { _ in Task { await delivery.refresh() } }
         observeWindowsForActivationPolicy()
+        if MainWindowPrefs.alwaysInDock {
+            NSApp.setActivationPolicy(.regular)
+        }
         let ws = self.ws
         let quickAsk = QuickAskPanelController(ws: ws) { text, context in
             ws.sendUserMessage(text, context: context)
@@ -204,6 +215,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 MainActor.assumeIsolated { self?.updateActivationPolicy(closing: nil) }
             }
         }
+        center.addObserver(forName: .activationPolicyPrefChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateActivationPolicy(closing: nil) }
+        }
         center.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { [weak self] note in
             let closing = note.object as? NSWindow
             MainActor.assumeIsolated { self?.updateActivationPolicy(closing: closing) }
@@ -214,7 +228,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let hasAppWindow = NSApp.windows.contains { window in
             window !== closing && window.isVisible && Self.isAppWindow(window)
         }
-        let wanted: NSApplication.ActivationPolicy = hasAppWindow ? .regular : .accessory
+        let wanted: NSApplication.ActivationPolicy =
+            (hasAppWindow || MainWindowPrefs.alwaysInDock) ? .regular : .accessory
         guard NSApp.activationPolicy() != wanted else { return }
         NSApp.setActivationPolicy(wanted)
         if wanted == .regular {
@@ -265,8 +280,7 @@ struct RootPopoverView: View {
     }
 }
 
-/// The bars under the tabs, shared by the menu bar panel and the
-/// "Open in window" window (#100): the privacy ledger line (#82), Watch me
+/// The bars under the tabs in the menu bar panel (#100): the privacy ledger line (#82), Watch me
 /// (#84) and meeting notes (#86), then Pause (#87), Chat, Settings and
 /// Manage Tools.
 struct PanelFooter: View {
@@ -312,13 +326,13 @@ struct PanelFooter: View {
                 Spacer()
                 if showOpenInWindow {
                     Button {
-                        presentWindow(id: "activity")
+                        presentWindow(id: "main")
                     } label: {
                         Label("Open in window", systemImage: "macwindow")
                             .labelStyle(.iconOnly)
                     }
                     .buttonStyle(.borderless)
-                    .help("Open Thoughts and Debug in a window that stays open (⇧⌘B)")
+                    .help("Open the bot-inator window (⇧⌘B)")
                     Spacer()
                 }
                 Button {
