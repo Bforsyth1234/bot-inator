@@ -62,21 +62,21 @@ enum MainSection: String, CaseIterable, Identifiable, Hashable {
     ]
 }
 
-/// The full app window: everything the menu bar panel and the separate
-/// Chat / Settings / Manage Tools windows offer, in one sidebar window that
-/// stays open, shows in the Dock and Cmd-Tab, and reopens from the Dock icon.
+/// The full app window: thoughts, inbox, chat, tools, settings and the rest
+/// in one sidebar window. Opens from the menu bar icon, the Dock and launch;
+/// shows in the Dock and Cmd-Tab while open (``MainWindowController``).
 struct MainWindowView: View {
     @EnvironmentObject private var delivery: DeliveryViewModel
     /// #84 "Watch me", the same toggle the menu bar panel uses.
     var watchMe: () -> Void = {}
 
-    @SceneStorage("mainWindow.section") private var selectionRaw: String = MainSection.thoughts.rawValue
+    @EnvironmentObject private var router: MainWindowRouter
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     private var selection: Binding<MainSection?> {
         Binding(
-            get: { MainSection(rawValue: selectionRaw) ?? .thoughts },
-            set: { selectionRaw = ($0 ?? .thoughts).rawValue }
+            get: { router.section },
+            set: { router.section = $0 ?? .thoughts }
         )
     }
 
@@ -95,11 +95,6 @@ struct MainWindowView: View {
         }
         .frame(minWidth: 760, minHeight: 520)
         .task { await delivery.refresh() }
-        .onReceive(NotificationCenter.default.publisher(for: .showMainSection)) { note in
-            if let section = note.object as? MainSection {
-                selectionRaw = section.rawValue
-            }
-        }
     }
 
     // MARK: Sidebar
@@ -229,12 +224,6 @@ private struct SidebarStatusFooter: View {
     }
 }
 
-extension Notification.Name {
-    /// Post with a ``MainSection`` as the object to switch the main window's
-    /// sidebar to that page.
-    static let showMainSection = Notification.Name("botinator.showMainSection")
-}
-
 /// Toggles for the main window, shown in Settings > App.
 struct MainWindowSettingsView: View {
     @AppStorage(MainWindowPrefs.openAtLaunchKey) private var openAtLaunch = true
@@ -247,7 +236,7 @@ struct MainWindowSettingsView: View {
                 .onChange(of: alwaysInDock) { _, _ in
                     NotificationCenter.default.post(name: .activationPolicyPrefChanged, object: nil)
                 }
-            Text("The menu bar icon stays either way.")
+            Text("Click the menu bar icon to open this window; right-click it for Pause, Watch me and Quit.")
                 .appFont(.secondary)
                 .foregroundStyle(.secondary)
         }

@@ -7,89 +7,25 @@ struct MenuBarUIApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
-        MenuBarExtra {
-            RootPopoverView(watchMe: { delegate.demonstration.toggleRecording() })
-                .environmentObject(delegate.ws)
-                .environmentObject(delegate.delivery)
-                .appTextSize()
-        } label: {
-            MenuBarIconLabel(ws: delegate.ws, demo: delegate.demonstration.model,
-                             registerMainWindowOpener: { delegate.setMainWindowOpener($0) })
-        }
-        .menuBarExtraStyle(.window)
-
-        Window("Manage Tools", id: "tool-manager") {
-            ToolManagerView()
-                .appTextSize()
-        }
-        .defaultSize(width: 540, height: 540)
-        .keyboardShortcut("t", modifiers: [.command, .shift])
-
-        Window("Chat", id: "chat") {
-            ChatView()
-                .environmentObject(delegate.ws)
-                .appTextSize()
-        }
-        .defaultSize(width: 560, height: 660)
-        .keyboardShortcut("c", modifiers: [.command, .shift])
-
-        Window("Settings", id: "settings") {
-            SettingsView()
-                .environmentObject(delegate.delivery)
-                .appTextSize()
-        }
-        .defaultSize(width: 540, height: 560)
-        .keyboardShortcut(",", modifiers: [.command])
-
-        // The full app window: a sidebar with everything the menu bar panel
-        // and the separate windows offer. Opens at launch (Settings > Main
-        // window) and from the Dock icon; the menu bar icon stays.
-        Window("bot-inator", id: "main") {
-            MainWindowView(watchMe: { delegate.demonstration.toggleRecording() })
-                .environmentObject(delegate.ws)
-                .environmentObject(delegate.delivery)
-                .appTextSize()
-        }
-        .defaultSize(width: 980, height: 700)
-        .keyboardShortcut("b", modifiers: [.command, .shift])
-        .keyboardShortcut("b", modifiers: [.command, .shift])
-    }
-}
-
-/// The menu bar icon: a pause glyph while paused, a record glyph while a
-/// "Watch me" recording runs (#84), and the Inbox count (#87) as a badge.
-/// Reads the status frames the daemon sends on change.
-struct MenuBarIconLabel: View {
-    @ObservedObject var ws: WebSocketManager
-    @ObservedObject var demo: DemonstrationModel
-    /// The label exists from launch, so it is where the app gets a SwiftUI
-    /// ``openWindow`` for the main window (launch and Dock reopen).
-    var registerMainWindowOpener: (@escaping () -> Void) -> Void = { _ in }
-    @Environment(\.openWindow) private var openWindow
-
-    private var glyph: String {
-        if ws.lastStatus?.paused == true { return "pause.circle" }
-        if demo.isRecording { return "record.circle.fill" }
-        // Brain/robot SF Symbol for the menu bar icon.
-        return "brain.head.profile"
-    }
-
-    var body: some View {
-        let inbox = ws.lastStatus?.inboxCount ?? 0
-        HStack(spacing: 2) {
-            Image(systemName: glyph)
-            if inbox > 0 {
-                Text("\(inbox)")
+        // Every window is AppKit-owned (the main window, approval cards, the
+        // panels), so the app needs no SwiftUI window scene. This Settings
+        // scene is never shown: ⌘, opens the main window's Settings page.
+        Settings { EmptyView() }
+            .commands {
+                CommandGroup(replacing: .appSettings) {
+                    Button("Settings…") { delegate.showMainWindow(section: .settings) }
+                        .keyboardShortcut(",", modifiers: [.command])
+                }
+                CommandGroup(before: .windowList) {
+                    Button("bot-inator") { delegate.showMainWindow() }
+                        .keyboardShortcut("b", modifiers: [.command, .shift])
+                    Button("Chat") { delegate.showMainWindow(section: .chat) }
+                        .keyboardShortcut("c", modifiers: [.command, .shift])
+                    Button("Manage Tools") { delegate.showMainWindow(section: .tools) }
+                        .keyboardShortcut("t", modifiers: [.command, .shift])
+                    Divider()
+                }
             }
-        }
-        .task {
-            let open = openWindow
-            registerMainWindowOpener {
-                NSApp.setActivationPolicy(.regular)
-                NSApp.activate(ignoringOtherApps: true)
-                open(id: "main")
-            }
-        }
     }
 }
 
@@ -131,23 +67,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         ))
     }()
 
-    /// Opens (or brings forward) the main window; set by the menu bar label.
-    private var openMainWindow: (() -> Void)?
-    private var openedMainAtLaunch = false
-
-    func setMainWindowOpener(_ opener: @escaping () -> Void) {
-        openMainWindow = opener
-        // First time the opener arrives: honour "open at launch".
-        guard !openedMainAtLaunch else { return }
-        openedMainAtLaunch = true
-        if MainWindowPrefs.openAtLaunch {
-            opener()
-        }
+    /// The main window (sidebar app window) and the menu bar icon.
+    private lazy var mainWindow = MainWindowController { [unowned self] in
+        AnyView(
+            MainWindowView(watchMe: { [unowned self] in self.demonstration.toggleRecording() })
+                .environmentObject(self.ws)
+                .environmentObject(self.delivery)
+                .environmentObject(self.mainWindowRouter)
+                .appTextSize()
+        )
     }
+    let mainWindowRouter = MainWindowRouter()
+    private var statusItem: StatusItemController?
 
-    /// Bring the main window forward (menu bar panel, Dock icon).
-    func showMainWindow() {
-        openMainWindow?()
+    /// Bring the main window forward, optionally on one sidebar page.
+    func showMainWindow(section: MainSection? = nil) {
+        if let section { mainWindowRouter.section = section }
+        mainWindow.show()
     }
 
     /// Clicking the Dock icon with no visible window reopens the main window.
@@ -190,6 +126,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         RecordHotKeyController.shared.start { [demonstration] in demonstration.toggleRecording() }
         // #86: the recorder exists from launch (it purges leftover audio).
         _ = MeetingRecorder.shared
+        // Left-click the menu bar icon: the main window. Right-click: a menu.
+        statusItem = StatusItemController(
+            ws: ws, demo: demonstration.model, delivery: delivery,
+            openMain: { [unowned self] section in self.showMainWindow(section: section) },
+            watchMe: { [demonstration] in demonstration.toggleRecording() }
+        )
+        if MainWindowPrefs.openAtLaunch {
+            showMainWindow()
+        }
         // #93: the engine choice on a fresh install (no settings.json yet).
         FirstRunWindowController.shared.showIfPending()
     }
@@ -202,8 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     // MARK: Cmd-Tab / Dock while a window is open
 
     /// ``LSUIElement`` keeps the app out of Cmd-Tab and the Dock. While one
-    /// of its regular windows (Chat, Settings, Manage Tools, "Open in
-    /// window", approval cards) is open, switch to ``.regular`` so the user
+    /// of its regular windows (the main window, approval cards) is open, switch to ``.regular`` so the user
     /// can Cmd-Tab back to it; go back to ``.accessory`` when the last one
     /// closes.
     private func observeWindowsForActivationPolicy() {
@@ -240,141 +184,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// A normal titled window, not the menu bar panel or status item.
     private static func isAppWindow(_ window: NSWindow) -> Bool {
         let name = NSStringFromClass(type(of: window))
-        if name.contains("StatusBar") || name.contains("MenuBarExtra") { return false }
+        if name.contains("StatusBar") { return false }
         if window is NSPanel { return false }
         return window.styleMask.contains(.titled)
-    }
-}
-
-/// Top-level popover content with tabs for the thought stream and in-app
-/// diagnostics. New diagnostic panes can be added as additional tabs.
-struct RootPopoverView: View {
-    @EnvironmentObject private var ws: WebSocketManager
-    @EnvironmentObject private var delivery: DeliveryViewModel
-    @Environment(\.openWindow) private var openWindow
-    /// #84: start / stop a "Watch me" recording (shows its panel).
-    var watchMe: () -> Void = {}
-
-    var body: some View {
-        VStack(spacing: 0) {
-            NoticeBanner()
-            TabView {
-                ThoughtStreamView()
-                    .tabItem { Label("Thoughts", systemImage: "brain") }
-                InboxTab()
-                    .tabItem { Label("Inbox", systemImage: "tray") }
-                    .badge(delivery.inboxCount)
-                DebugView()
-                    .tabItem { Label("Debug", systemImage: "ladybug") }
-            }
-            // The tab view takes what's left; banners and the button bar
-            // must never push each other out of the fixed-height popover.
-            .frame(maxHeight: .infinity)
-            .layoutPriority(-1)
-            Divider()
-            PanelFooter(watchMe: watchMe, showOpenInWindow: true)
-                .fixedSize(horizontal: false, vertical: true)
-                .layoutPriority(1)
-        }
-        .frame(width: 460, height: 640)
-    }
-}
-
-/// The bars under the tabs in the menu bar panel (#100): the privacy ledger line (#82), Watch me
-/// (#84) and meeting notes (#86), then Pause (#87), Chat, Settings and
-/// Manage Tools.
-struct PanelFooter: View {
-    @EnvironmentObject private var delivery: DeliveryViewModel
-    @Environment(\.openWindow) private var openWindow
-    var watchMe: () -> Void
-    /// The menu bar panel shows "Open in window"; the window itself doesn't.
-    var showOpenInWindow: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // #82: what left this Mac today, one line.
-            HStack {
-                PrivacyLedgerTodayLabel()
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 4)
-            .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                // #84: record one demonstration, get a reviewed tool.
-                Button {
-                    watchMe()
-                } label: {
-                    Label("Watch me…", systemImage: "record.circle")
-                        .labelStyle(.titleAndIcon)
-                }
-                .buttonStyle(.borderless)
-                .help("Record yourself doing a task once (⌃⌥⌘R), then make a tool from it")
-                Spacer()
-                // #86: meeting notes start only on this click (or an offer's).
-                MeetingRecorderMenuItems()
-                    .buttonStyle(.borderless)
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 4)
-            .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                // #87: Pause / Resume for real (listeners keep running).
-                PauseMenu(viewModel: delivery)
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                Spacer()
-                if showOpenInWindow {
-                    Button {
-                        presentWindow(id: "main")
-                    } label: {
-                        Label("Open in window", systemImage: "macwindow")
-                            .labelStyle(.iconOnly)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Open the bot-inator window (⇧⌘B)")
-                    Spacer()
-                }
-                Button {
-                    presentWindow(id: "chat")
-                } label: {
-                    Label("Chat…", systemImage: "bubble.left.and.bubble.right")
-                        .labelStyle(.titleAndIcon)
-                }
-                .buttonStyle(.borderless)
-                .keyboardShortcut("c", modifiers: [.command, .shift])
-                Spacer()
-                Button {
-                    presentWindow(id: "settings")
-                } label: {
-                    Label("Settings…", systemImage: "slider.horizontal.3")
-                        .labelStyle(.titleAndIcon)
-                }
-                .buttonStyle(.borderless)
-                .keyboardShortcut(",", modifiers: [.command])
-                Spacer()
-                Button {
-                    presentWindow(id: "tool-manager")
-                } label: {
-                    Label("Manage Tools…", systemImage: "gear")
-                        .labelStyle(.titleAndIcon)
-                }
-                .buttonStyle(.borderless)
-                .keyboardShortcut("t", modifiers: [.command, .shift])
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .fixedSize(horizontal: false, vertical: true)
-            .layoutPriority(1)
-        }
-    }
-
-    // On ``LSUIElement`` apps SwiftUI's ``openWindow`` silently no-ops when
-    // called from the ``MenuBarExtra`` popover because the process is still
-    // in ``.accessory`` activation. Foregrounding the app first forces the
-    // scene to materialize and come to front.
-    private func presentWindow(id: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: id)
     }
 }
