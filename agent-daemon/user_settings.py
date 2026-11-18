@@ -52,6 +52,9 @@ ALLOWED_KEYS = frozenset({
     # iPhone remote (#85): "1"/"0" (default off, 7c), the own handle (E.164
     # phone or Apple ID email) and idle minutes 1..120 (default 10). Read
     # live by events.remote_channel.
+    # #118: opt-in training corpus ("1"/"0", default off, read live).
+    "AGENT_TRAINING_CORPUS",
+    "AGENT_TRAINING_KEEP_MAIL_TEXT",
     "AGENT_REMOTE",
     "AGENT_REMOTE_HANDLE",
     "AGENT_REMOTE_IDLE_MINUTES",

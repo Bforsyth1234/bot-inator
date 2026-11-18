@@ -415,6 +415,10 @@ struct SettingsView: View {
             Section("Always allow") {
                 AlwaysAllowView()
             }
+            // #118: opt-in training corpus for a personal model.
+            Section("Training data") {
+                TrainingDataView()
+            }
 
             // Wave 15: watches (#88), right-moment delivery (#87), what the
             // assistant did with Undo (#83), what left this Mac (#82).

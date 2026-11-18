@@ -51,6 +51,10 @@ class MLXEngine:
     Keeps at most one model warm in unified memory; swap replaces the loaded
     model (unload → load) under an internal lock so generation calls are
     serialized against swaps.
+
+    An optional LoRA ``adapter_path`` (a folder written by ``mlx_lm.lora``,
+    #119/#121) is applied on top of the base model at load time; it is
+    passed to ``mlx_lm.load(..., adapter_path=...)`` only when set.
     """
 
     # Class-level Metal serialization lock. Shared across every MLXEngine
@@ -62,8 +66,11 @@ class MLXEngine:
     # own model weights, because they share the same physical device.
     _metal_lock: threading.Lock = threading.Lock()
 
-    def __init__(self, model_name: str = DEFAULT_MODEL) -> None:
+    def __init__(
+        self, model_name: str = DEFAULT_MODEL, adapter_path: Optional[str] = None
+    ) -> None:
         self.model_name: str = model_name
+        self.adapter_path: Optional[str] = str(adapter_path) if adapter_path else None
         self._model: Any = None
         self._tokenizer: Any = None
         self._lock: asyncio.Lock = asyncio.Lock()
@@ -82,6 +89,12 @@ class MLXEngine:
     @property
     def current_model(self) -> Optional[str]:
         return self.model_name if self._loaded else None
+
+    @property
+    def current_adapter(self) -> Optional[str]:
+        """The adapter folder applied to the loaded model, or ``None`` (base
+        model only, or nothing loaded)."""
+        return self.adapter_path if self._loaded else None
 
     @property
     def model(self) -> Any:
@@ -103,13 +116,20 @@ class MLXEngine:
         async with self._lock:
             await self._unload_locked()
 
-    async def swap(self, new_model_name: str) -> None:
-        """Unload the current model and load ``new_model_name``."""
+    async def swap(
+        self, new_model_name: str, adapter_path: Optional[str] = None
+    ) -> None:
+        """Unload the current model and load ``new_model_name``, with
+        ``adapter_path`` on top (``None``: the base model alone; an adapter
+        is trained for one base model, so it is never carried over)."""
+        adapter = str(adapter_path) if adapter_path else None
         async with self._lock:
-            if self._loaded and new_model_name == self.model_name:
+            if (self._loaded and new_model_name == self.model_name
+                    and adapter == self.adapter_path):
                 return
             await self._unload_locked()
             self.model_name = new_model_name
+            self.adapter_path = adapter
             await self._load_locked(new_model_name)
 
     async def generate(self, prompt: str, max_tokens: int = 512) -> str:
@@ -206,7 +226,9 @@ class MLXEngine:
     async def _load_locked(self, model_name: str) -> None:
         if self._loaded:
             return
-        logger.info("Loading MLX model: %s", model_name)
+        adapter = self.adapter_path
+        logger.info("Loading MLX model: %s%s", model_name,
+                    f" + adapter {adapter}" if adapter else "")
         try:
             from mlx_lm import load  # type: ignore
         except ImportError as exc:  # pragma: no cover - dep not installed
@@ -219,6 +241,8 @@ class MLXEngine:
         def _do_load() -> tuple[Any, Any]:
             # #82: a first load downloads the weights from Hugging Face.
             with egress_log.model_download(model_name):
+                if adapter:
+                    return load(model_name, adapter_path=adapter)
                 return load(model_name)
 
         self._model, self._tokenizer = await asyncio.to_thread(_do_load)

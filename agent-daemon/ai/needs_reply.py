@@ -156,6 +156,18 @@ def needs_reply(
     return ReplyCheck(True, "ok")
 
 
+def reply_instruction(message_id: object) -> str:
+    """#113: the one sentence the mail prompt and the #70 reply follow-up
+    give the agent, so a reply drafts in the thread instead of a new email."""
+    return (
+        "To reply, call `draft_email` with "
+        f"`reply_to_message_id={message_id}`, `to` the sender's address and "
+        "an empty subject: Mail adds \"Re:\" and quotes the email itself, "
+        "so don't type Re: yourself. With reply_to_message_id=0 it would be "
+        "a new email, not a reply."
+    )
+
+
 __all__ = [
     "FIRST_LINES",
     "ReplyCheck",
@@ -164,5 +176,6 @@ __all__ = [
     "first_lines",
     "is_automated_sender",
     "needs_reply",
+    "reply_instruction",
     "strip_subject_prefix",
 ]

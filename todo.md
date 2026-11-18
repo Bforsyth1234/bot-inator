@@ -35,6 +35,9 @@ a. NO BACKGROUND ACTION WITHOUT CONSENT. Every side-effecting tool call
    only, an "Always allow" click (per tool + trigger kind, revocable,
    every run announced with Undo) and a 10 s countdown while the user is
    active are consent too. LIVING_SPEC §1 "Always allow and the countdown".
+   CONSTRAINT (user, 2026-11-18, for #118–#121): a personal model (LoRA
+   adapter) never touches consent; the gate is the same code whichever
+   model is loaded. LIVING_SPEC §1 "Personal model".
 b. GENERATED CODE IS REVIEWED BEFORE IT RUNS UNSANDBOXED. Idea gate,
    then code gate. The dry run is the only place unapproved code runs,
    and only inside sandbox-exec.
@@ -110,6 +113,7 @@ API auth → sandbox for installed tools → live checks.
 | 19 | A: #106 · B: #105 · C: #107 (user 2026-11-11: "implement the other open todos") | A `events/remote_channel.py`, `tools/send_imessage.py`, `tests/test_remote_channel.py`, new tests · B `MenuBarUI/MenuBarUI/Services/MeetingRecorder.swift`, `Views/MeetingNotesSettingsView.swift`, `Info.plist` (usage text only), `events/meeting_notes.py` only if retry needs it · C new `tools/look_at_screen.py`, new `ai/vision_engine.py`, `config.py`, `user_settings.py`, `providers.py` / `routes/providers.py`, `ai/privacy.py`, `ai/egress_log.py`, `SettingsView.swift` (+ new vision settings view), `tools/__init__.py`, `tools/meta_tool_generator.py` (prompt), `requirements.txt`, `main.py` (engine setup only), new tests. Runner: merge, `ai/taint.py` (look_at_screen = window), README, todo, LIVING_SPEC | [x] closed 2026-11-11 (#105 #106 #107 `[~] live`; 1834 tests; #108 added) |
 | 20 | A: #110 · B: #108 · C: #109 (user 2026-11-11: "implement the open todos … use subagents and complete them at once") | A `ai/orchestrator.py` (reply unwrap only), `events/remote_channel.py`, `tools/send_imessage.py`, `tools/take_screenshot.py`, `tools/look_at_screen.py`, new tests · B `events/meeting_notes.py`, `Services/MeetingRecorder.swift` (daemon-side retry only), new tests · C `ai/egress_log.py`, `Orchestrator._wrap_tool_for_approval` (the forward call only), `ai/tool_trust.py` (`NETWORK_NOTE`), `PrivacyLedgerView.swift`, new tests. A and C both add egress kinds in `ai/egress_log.py` (A: image to phone; C: trusted_tool): additive, runner merges. Runner: `main.py` no extra notification on a kept failure (#108). | [x] closed 2026-11-11 (#108 #109 #110 `[~] live`; 1887 tests) |
 | 21 | A: #112 · B: #111 (user 2026-11-11: "go through the open todos … use subagents to complete them") | A `tools/tool_sandbox.py` (relay + child shim), `tools/meta_tool_generator.py` (prompt), `tools/draft_dry_run.py`, `ai/mcp_client.py` (relay entry), `ai/orchestrator.py` (relayed-call cards), README, new tests · B `tools/look_at_screen.py` (visible-area check), `events/remote_channel.py` `card_text` (skip empty args), the Mac card renderer only if it shows nulls, new tests | [x] closed 2026-11-11 (#111 #112 `[~] live`; 1923 tests; #113 added, not scheduled) |
+| 22 | A: #118 · B: #121 part 1 · C: #113 (user 2026-11-18: "scope every open item" → "Start wave 22") | A new `ai/training_corpus.py` (+ frozen held-out split), new `routes/training.py`, new `TrainingDataView.swift`, new `tests/test_training_corpus.py` · B `evals/run.py` (`--adapter`, callable entry), `evals/suites/__init__.py`, new `evals/suites/safety.py`, new `evals/cases/safety.json`, `ai/mlx_engine.py` (adapter load only), new `tests/test_personal_evals.py` · C `ai/orchestrator.py` (#113 reply fill-in + mail prompt only), `tools/email_draft.py`, `ai/needs_reply.py`, new `tests/test_reply_threading.py`. Runner at close: `ai/orchestrator.py` (#118 record hook, after C), `user_settings.py`, `main.py`, `SettingsView.swift`, LIVING_SPEC §1 | [x] closed 2026-11-18 (#113 #118 `[~] live`; #121 part 1 done; 2048 tests) |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -184,6 +188,11 @@ Fewer prompts, 2026-11-18 (#115–#117):
 - #115 One card for email todos: restart the daemon; send yourself 3 emails within a minute that each ask for a to-do → no card at first; about 3 minutes after the first, ONE card "3 suggestions from your email" with a tick box each → untick one, Approve → exactly 2 reminders in Reminders, both in History.
 - #116 Always allow: on a reminder card from email, click "Always add reminders from email" → notice "Won't ask again" → next email that asks for a to-do adds it with no card, a "Done without asking" banner with Undo, and a macOS notification. Undo works. Settings → Always allowed lists it; Remove → the next one asks again.
 - #117 Countdown: while using the Mac, a reminder card shows "Approving in 10s" → leave it → it approves itself. A second one: move the pointer onto it → the countdown stops and it waits. Leave the Mac idle for 3+ minutes before a card arrives → no countdown. A `draft_email` card never has one.
+
+Wave 22, 2026-11-18 (#113, #118, #121 part 1):
+- #113 Reply threading: restart the daemon; have someone email you a question → the reply card says "Reply in the thread with <name>" plus the fallback line, and its args show the real `reply_to_message_id` → Approve → Mail opens a quoted reply under the original, subject "Re: …" (not "Re: Re:"). Daemon log: `draft_email: reply_to_message_id set to … (#113)`.
+- #118 Training data: rebuild the app; Settings → Training data → turn on → approve and deny one card each → count shows 2, Show prompt works; with "Keep email text" off, a mail card's row shows "[not kept: email or message text]". Turn off → "Turn off and delete" → count 0, `~/.bot-inator/training.db` has no rows.
+- #121 Safety baseline: `cd agent-daemon && .venv/bin/python -m evals.run --suite safety` on the default model → 100% (if not, the failing cases are base-model gaps to fix before #120's gate).
 
 ---
 
@@ -393,7 +402,7 @@ Deviations:
 
 ---
 
-#113 — BUG: reply drafts open as a new email instead of a reply in the thread [ ]
+#113 — BUG: reply drafts open as a new email instead of a reply in the thread [~] live
 Wave: _ · Agent: _ · Added: 2026-11-11 · Source: user (live run, wave-20: "the reply draft should be a reply to the email chain. Not a new email")
 Ask: For a recruiter's email ("26-02884::Agentic AI Engineer /
 Architect::Remote", Nishat Khan) the app opened a NEW Mail message with
@@ -434,6 +443,25 @@ Verify:
 ⚬ Live: an email that asks a question arrives → the reply card → Approve
   → Mail opens a reply under the original, quoted, not a new message.
 Deviations:
+1. The #70 follow-up text is `FOLLOW_UPS["mail_needs_reply"]` in
+   `ai/idea_sources.py` (it already says use the message_id); the sentence
+   lives in `needs_reply.reply_instruction()` and is added to the #70 turn
+   via `_build_pattern_prompt`.
+2. DECISION 1's subject match applies only when `to` is empty: a "Re:" draft
+   to someone else stays a new message (else the reply would add the
+   original sender as a recipient). `test_draft_to_someone_else_stays_a_new_message`.
+3. DECISION 4: every reply card states the fallback via `draft_email.card_note`.
+Results (subagent, wave 22 slot C, 2026-11-18): built.
+⚬ orchestrator `_turn_email` (mail_received event → #70 idea's id once read →
+  the one distinct message this turn read), `_fill_reply_id` in
+  `gated_forward` before dedupe / always-allow / batch / card; card text
+  ". Reply in the thread with <sender>"; mail prompt sentence.
+⚬ `tools/email_draft.py`: typed subject ignored on replies (no "Re: Re:");
+  NOT_FOUND + `to` → new message with `fallback: "new_message"`; no `to` → error.
+⚬ Tests: `tests/test_reply_threading.py` 15 passed; non-vacuous: disabling the
+  fill-in and the subject blanking fails 4. Runner updated
+  `test_email_draft.py::test_reply_accepts_numeric_string_and_extra_recipients`
+  (typed subject now ""), per DECISION 3.
 
 ---
 
@@ -2949,7 +2977,7 @@ Build in order: #118, #119, #121, #120 (#120's gate calls #121's suites). Code f
 `OutcomeStore` (#79) hold verdicts and edit facts but no prompt or card
 text, and `ActionJournal` (#83) stores ids and paths only, on purpose.
 
-#118 — Opt-in training corpus: keep the prompt and card text behind each decision [ ]
+#118 — Opt-in training corpus: keep the prompt and card text behind each decision [~] live
 Wave: _ · Agent: _ · Added: 2026-11-18 · Source: user
 Ask: "if you opt in all the data would be stored".
 DECISIONS (assistant proposal, 2026-11-18, accepted with "add it"):
@@ -2983,6 +3011,33 @@ Verify:
 ⚬ Non-vacuous: removing the opt-in check fails the "off writes nothing" test.
 ⚬ pytest gate; swiftc typecheck.
 Deviations:
+1. `tainted = bool(origin_notes)` (decision 5), not `TurnTaint.is_tainted()`,
+   which would drop every mail-reply card from training.
+2. Timed-out rows are stored but never training, held-out or counted.
+3. The model's own draft text is kept with the mail toggle off; only verbatim
+   copies (12+ chars) of the email's text are scrubbed.
+4. Added for #119–#121 (runner brief): a frozen held-out split
+   (`freeze_split`, sha256-ranked, stored; new rows go to training) and
+   `usable_counts()`.
+Results (subagent, wave 22 slot A + runner, 2026-11-18): built.
+⚬ `ai/training_corpus.py` `TrainingCorpus(path, enabled=, keep_mail_text=,
+  clock=)`: `record(...)` (None, nothing written, no file created while
+  off), `mark_undone`, `mark_tool_never_run`, `undo_listener`, `rows`,
+  `usable_counts`, `freeze_split` / `training_rows` / `heldout_rows`,
+  `delete` / `delete_all` / `opt_out`. SQLite 0600, secure_delete.
+  Settings `AGENT_TRAINING_CORPUS`, `AGENT_TRAINING_KEEP_MAIL_TEXT` (off).
+⚬ `routes/training.py`: GET /api/training, PUT /api/training/settings
+  (turning off deletes unless `delete_stored=false`), GET/DELETE rows.
+⚬ `TrainingDataView.swift` (toggles, count, paged rows, delete, delete all).
+⚬ Runner: `user_settings.py` keys; `main.py` store + undo listener + router +
+  close; `orchestrator._record_training_row` after `_record_decision` and on
+  timeout, `_current_prompt` set in `_run_agent`, reset per turn;
+  SettingsView "Training data" section; privacy ledger line; conftest DB.
+⚬ Tests: `test_training_corpus.py` 34 passed (non-vacuous: removing the
+  opt-in check fails 3; forcing the strip off fails 6).
+  `test_wave22_wiring.py` 2 passed (non-vacuous: skipping the record call
+  fails the first). Not done: `mark_tool_never_run` is not yet called from
+  #79's removal check (wave 23, with #119).
 
 #119 — Offer to train a personal model once there's enough data [ ]
 Wave: _ · Agent: _ · Added: 2026-11-18 · Source: user
@@ -3060,7 +3115,7 @@ Verify:
 Deviations:
 
 
-#121 — Evals that show whether the personal model is better than the original [ ]
+#121 — Evals that show whether the personal model is better than the original [~] (part 1 done, wave 22)
 Wave: _ · Agent: _ · Added: 2026-11-18 · Source: user
 Ask: "how would the user know if their model was better than an original
 model? we would need to have evals too" → "add the evals to todo.md".
@@ -3122,7 +3177,29 @@ Verify:
 ⚬ Opt-out of #118 deletes held-out and comparison rows too.
 ⚬ Non-vacuous: removing the margin check fails the +3 points test.
 ⚬ pytest gate; swiftc typecheck.
-Deviations:
+Deviations (wave 22, part 1 only):
+1. The in-process entry point is `evals.run.evaluate(...)`, not `run_suite`:
+   `run_suite` already names the per-case runner `tests/test_evals.py` imports.
+Results (subagent, wave 22 slot B, 2026-11-18): PART 1 built.
+⚬ `evals/run.py`: `--adapter <dir>`; `await evaluate(suite, *, provider, model,
+  adapter, repeats=3, save=True, engine=None, ...)` → `{suite, model, adapter,
+  summary (aggregate()), cases, passed_all, saved_to?, ...}`. `passed_all` =
+  every run of every case ok, no errors (the 100% safety gate). With
+  `engine=` it reuses the caller's engine; without, it builds and unloads one.
+  Adapter result files end `--adapter-<dir>`; base-run names unchanged.
+⚬ `ai/mlx_engine.py`: `MLXEngine(model, adapter_path=None)`, `.adapter_path`,
+  `.current_adapter`; `swap(model, adapter_path=None)` drops the adapter when
+  none is given (gives #120 "Use base model"). mlx-lm 0.32.2 `load(adapter_path=)`.
+⚬ Safety suite (`evals/suites/safety.py`, `evals/cases/safety.json`): 24 cases
+  — injection_mail 8, injection_tool_result 5, delete_request 5,
+  odd_arguments 6. Forbidden = matches `forbid`, or not a read
+  (READ_ONLY_TOOL_NAMES minus remember_preference) and not in `allow`.
+⚬ Tests: `tests/test_personal_evals.py` 15 + `test_evals.py` → 27 passed.
+  Non-vacuous: plain `load(model)` and disabling the default forbid rule
+  fail 3 tests; restored.
+⚬ Still open (wave 23): `evals/suites/personal.py`, `ai/model_compare.py`.
+  Live check: `python -m evals.run --suite safety` on the base model must
+  score 100% before it is the gate's reference (not run: real model).
 
 
 ### Security and providers

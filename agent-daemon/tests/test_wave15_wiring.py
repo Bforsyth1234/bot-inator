@@ -595,7 +595,9 @@ def test_swift_embeds_wave15_views() -> None:
     settings = _swift("SettingsView.swift")
     for view in ("ActionHistoryView(", "PrivacyLedgerView(", "DeliverySettingsView(", "WatchesView("):
         assert view in settings, view
-    app = _swift("MenuBarUIApp.swift")
+    # The main-window commits (#31) split the menu bar UI across these files.
+    app = "\n".join(_swift(n) for n in (
+        "MenuBarUIApp.swift", "MainWindowView.swift", "StatusItemController.swift"))
     for part in ("DeliveryViewModel", "PauseMenu(", "OfferInboxView(", "PrivacyLedgerTodayLabel("):
         assert part in app, part
     assert "PrivacyLedgerTodayLabel(" in _swift("DebugView.swift")

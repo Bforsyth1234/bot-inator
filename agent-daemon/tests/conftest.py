@@ -61,6 +61,7 @@ os.environ.setdefault(
 _wave15_tmp = _tempfile.mkdtemp(prefix="bot-inator-w15-")
 os.environ.setdefault("AGENT_ACTIONS_DB", os.path.join(_wave15_tmp, "actions.db"))
 os.environ.setdefault("AGENT_EGRESS_DB", os.path.join(_wave15_tmp, "egress.db"))
+os.environ.setdefault("AGENT_TRAINING_DB", os.path.join(_wave15_tmp, "training.db"))  # #118
 os.environ.setdefault("AGENT_TOOL_HEALTH_PATH", os.path.join(_wave15_tmp, "tool_health.json"))
 os.environ.setdefault(
     "AGENT_DELIVERY_SETTINGS_PATH", os.path.join(_wave15_tmp, "delivery_settings.json")

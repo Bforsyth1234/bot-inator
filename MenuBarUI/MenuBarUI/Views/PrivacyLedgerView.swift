@@ -197,6 +197,10 @@ struct PrivacyLedgerView: View {
                  + "which engine or tool, how much, and whether personal text was in it.")
                 .appFont(.secondary)
                 .foregroundStyle(.secondary)
+            // #118 decision 4: the training corpus is local, so it never shows up as a request.
+            Text("Training data (Settings → Training data), when turned on, stays on this Mac and is never sent.")
+                .appFont(.secondary)
+                .foregroundStyle(.secondary)
             if !viewModel.limitNote.isEmpty {
                 Text(viewModel.limitNote)
                     .appFont(.secondary)
