@@ -276,7 +276,7 @@ class ActionJournal:
         row = (
             entry_id, float(self.clock()), _clip(tool, 80), label, _clip(why, MAX_WHY),
             _clip(event_id, 80), _clip(offer_id, 80) or None,
-            "rule" if source == "rule" else "approval", _clip(rule_id, 80) or None,
+            source if source in ("rule", "always_allow") else "approval", _clip(rule_id, 80) or None,
             json.dumps(spec) if spec is not None else None, reason if spec is None else "",
         )
         with self._lock:

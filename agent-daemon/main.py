@@ -482,6 +482,16 @@ async def lifespan(app: FastAPI):
     orchestrator.watch_lookup = watch_store.get
     app.state.action_journal.add_undo_listener(standing_rules.on_undo)
     app.state.standing_rules = standing_rules
+    # #116 Always allow (the card's button) and #115 one card per burst of
+    # email suggestions.
+    from ai import always_allow as always_allow_mod  # noqa: WPS433
+    from ai.card_batch import CardBatcher  # noqa: WPS433
+
+    always_allow_store = always_allow_mod.default_store()
+    orchestrator.always_allow = always_allow_store
+    app.state.always_allow = always_allow_store
+    app.state.action_journal.add_undo_listener(always_allow_store.on_undo)
+    orchestrator.card_batcher = CardBatcher(orchestrator.event_bus.push_threadsafe)
 
     # #84 "Watch me": a recording takes events first (Orchestrator._handle_event).
     from ai.demonstration import DemonstrationController  # noqa: WPS433
@@ -700,6 +710,10 @@ app.include_router(providers_routes.router)
 from routes import first_run as first_run_routes  # noqa: E402
 
 app.include_router(first_run_routes.router)
+# #116: Settings → Always allowed.
+from routes import always_allow as always_allow_routes  # noqa: E402
+
+app.include_router(always_allow_routes.router)
 
 
 def _next_seq() -> int:

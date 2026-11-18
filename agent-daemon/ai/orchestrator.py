@@ -51,6 +51,25 @@ from . import (
     tool_health, tool_summary,
 )
 from . import standing_rules
+from . import always_allow as always_allow_mod
+from . import card_batch
+
+# #117: an undoable card approves itself after this many seconds, only
+# while the user touched the keyboard / mouse in the last
+# COUNTDOWN_ACTIVE_SECONDS.
+COUNTDOWN_SECONDS = 10
+COUNTDOWN_ACTIVE_SECONDS = 120.0
+
+
+def _input_idle_seconds() -> Optional[float]:
+    """Seconds since the last keyboard/mouse input; None when unreadable."""
+    try:
+        import Quartz  # type: ignore[import-not-found]
+
+        return float(Quartz.CGEventSourceSecondsSinceLastEventType(
+            Quartz.kCGEventSourceStateCombinedSessionState, Quartz.kCGAnyInputEventType))
+    except Exception:
+        return None
 from . import watches as watches_mod
 from .action_journal import is_undoable
 from .idea_outcomes import edit_facts, trigger_kind_of
@@ -862,6 +881,10 @@ class Orchestrator:
             except Exception:
                 logger.exception("Invalid notice dropped: %r", event.metadata)
             return
+        if event.event_type == card_batch.BATCH_EVENT_TYPE:
+            # #115: the mail events behind it already passed delivery (#87).
+            await self._handle_card_batch(event)
+            return
         # #84: while the user demonstrates a task, the recording takes step
         # events and defers the rest (released when it stops), before #87
         # delivery, the activity history, a standing rule or any turn.
@@ -1503,7 +1526,49 @@ class Orchestrator:
                 )
                 return refusal
             orchestrator._turn_tool_calls.add(tool_name)
-            if not bypass:
+            # #116: the user clicked "Always allow" for this tool on this
+            # kind of trigger. Undoable tools only; journaled + announced.
+            trigger = trigger_kind_of(
+                getattr(orchestrator, "_current_event_type", "") or "",
+                getattr(orchestrator, "_current_idea", None) or {},
+            )
+            allow_store = getattr(orchestrator, "always_allow", None)
+            auto_allowed = bool(
+                not bypass and allow_store is not None
+                and allow_store.allows(tool_name, trigger)
+            )
+            batcher = getattr(orchestrator, "card_batcher", None)
+            if (
+                not bypass and not auto_allowed and batcher is not None
+                and batcher.eligible(
+                    tool_name, getattr(orchestrator, "_current_event_type", "") or "",
+                    getattr(orchestrator, "_turn_kind", ""),
+                )
+            ):
+                # #115: one card for a burst of email suggestions.
+                queued_kwargs = dict(zip(param_names, call_args))
+                queued_kwargs.update(call_kwargs)
+                notes = (
+                    shield.notes_for(tool_name, call_args, call_kwargs, param_names=param_names)
+                    if shield is not None else []
+                )
+                place = batcher.add(
+                    tool_name, queued_kwargs, event_id=event_id, trigger=trigger,
+                    notes=list(notes or []),
+                )
+                result = {"queued": True, "place": place, "message": card_batch.QUEUED_MESSAGE}
+                done_store = getattr(orchestrator, "_turn_done", None)
+                if done_key and done_store is not None:
+                    done_store[done_key] = result
+                asyncio.run_coroutine_threadsafe(
+                    orchestrator._emit_thought(
+                        event_id, "tool_result",
+                        f"{tool_name}: queued for one card with other email suggestions ({place})",
+                    ),
+                    loop,
+                )
+                return result
+            if not bypass and not auto_allowed:
                 extra: dict[str, Any] = {}
                 idea_summary = None
                 if tool_name == "generate_custom_tool":
@@ -1632,7 +1697,13 @@ class Orchestrator:
                 tool_health.record_call(
                     orchestrator, tool_name, result=result, args=call_args, kwargs=call_kwargs,
                 )
-            if not bypass:
+            if auto_allowed:
+                # #116: journaled as source="always_allow", with Undo.
+                Orchestrator._after_always_allow_run(
+                    orchestrator, tool_name, trigger,
+                    {"args": call_args, "kwargs": call_kwargs}, result, event_id, loop,
+                )
+            elif not bypass:
                 # #83: every side-effecting call that ran goes in History.
                 Orchestrator._journal_action(
                     orchestrator, tool_name, {"args": call_args, "kwargs": call_kwargs},
@@ -1703,6 +1774,93 @@ class Orchestrator:
             )
         except Exception:
             logger.exception("action_journal.record failed for %s", tool_name)
+
+    def _after_always_allow_run(
+        self, tool_name: str, trigger: str, call: dict[str, Any], result: Any,
+        event_id: str, loop: Any,
+    ) -> None:
+        """#116: a call that ran without a card because the user clicked
+        Always allow (worker thread). Journal it, then a notice with Undo and
+        a macOS notification. Never raises."""
+        entry = None
+        journal = getattr(self, "action_journal", None)
+        if journal is not None:
+            try:
+                entry = journal.record(
+                    tool_name, call, result, event_id=event_id or "",
+                    why=trigger, source=always_allow_mod.JOURNAL_SOURCE,
+                )
+            except Exception:
+                logger.exception("action_journal.record failed for %s", tool_name)
+        if entry is None:
+            return  # the tool failed or was not journaled: nothing to announce
+        store = getattr(self, "always_allow", None)
+        if store is not None:
+            try:
+                store.note_run(tool_name, trigger)
+            except Exception:
+                logger.exception("always_allow.note_run failed")
+        notice = always_allow_mod.run_notice(tool_name, trigger, entry)
+        try:
+            # publish_notice must run on the event loop.
+            loop.call_soon_threadsafe(self.publish_notice, notice)
+        except Exception:
+            logger.exception("always_allow notice failed")
+        try:
+            from tools.show_notification import show_notification
+
+            # The user turned it on: its announcement needs no card.
+            show_notification(
+                "Done without asking",
+                f"{entry.get('label') or tool_name}. Undo in History."[:240],
+            )
+        except Exception:
+            logger.exception("always_allow notification failed")
+
+    async def _handle_card_batch(self, event: ContextEvent) -> None:
+        """#115: one bundle card for the email suggestions the batcher
+        queued. Runs in the one-at-a-time event loop like any turn; only the
+        ticked actions run, after the user approves."""
+        meta = dict(event.metadata or {})
+        event_id = f"evt_{uuid.uuid4().hex[:12]}"
+        try:
+            offer = prepared_offers.PreparedOffer.from_dict(meta[prepared_offers.PREPARED_KEY])
+        except Exception:
+            logger.exception("card batch unreadable")
+            return
+        if not offer.actions:
+            return
+        self._turn_tool_calls = set()
+        self._turn_done = {}
+        self._turn_from_phone = False
+        self._turn_kind = "event"
+        self._current_event_type = str(meta.get("event_type") or "mail_received")
+        self._current_event_meta = {}
+        self._current_idea = None
+        self._current_builtin_idea = None
+        self._current_event_id = event_id
+        await self._emit_thought(
+            event_id, "event_received",
+            f"{len(offer.actions)} suggestion(s) from recent email, on one card",
+        )
+        card = offer.to_card()
+        if meta.get("origin_notes"):
+            card["origin_notes"] = list(meta["origin_notes"])
+        self._last_offer_id = None
+        approved, edited = await self._request_approval(event_id=event_id, **card)
+        if not approved:
+            await self._emit_thought(event_id, "complete", "Not approved; nothing ran.")
+            return
+        table = {getattr(t, "name", getattr(t, "__name__", "")): t for t in (self.tools or [])} or None
+        results = await asyncio.to_thread(prepared_offers.run_approved_actions, offer, edited, table)
+        for item in results:
+            await asyncio.to_thread(
+                self._journal_action, item["tool"], {"args": [], "kwargs": item["args"]},
+                item["result"], event_id,
+            )
+            await self._emit_thought(event_id, "tool_result", f"{item['tool']}: {item['result']}")
+        ran = ", ".join(r["tool"] for r in results) or "nothing (every one was unticked)"
+        await self._emit_thought(event_id, "complete", f"Approved; ran {ran}.")
 
     def _record_dynamic_run(self, tool_name: str) -> None:
         """#79: a generated tool ran. The post-install auto-rerun is not a
@@ -1849,6 +2007,22 @@ class Orchestrator:
             if code:
                 timeout = max(timeout, float(remote.timeout_s))
 
+        # #116 / #117: what the card's tools are, for "Always allow" and the
+        # countdown. A bundle counts by its (undoable-only) actions.
+        card_tools = (
+            [str(a.get("tool") or "") for a in actions] if actions else [tool_name]
+        )
+        all_undoable = bool(card_tools) and all(is_undoable(t) for t in card_tools)
+        trigger = trigger_kind_of(
+            getattr(self, "_current_event_type", "") or "",
+            getattr(self, "_current_idea", None) or {},
+        )
+        allow_label: Optional[str] = None
+        if getattr(self, "always_allow", None) is not None and len(set(card_tools)) == 1 \
+                and always_allow_mod.eligible(card_tools[0], trigger):
+            allow_label = always_allow_mod.describe(card_tools[0], trigger)
+        auto_seconds = self._countdown_seconds(all_undoable)
+
         msg = ApprovalRequest(
             seq=self._next_seq(),
             timestamp=_now_iso(),
@@ -1870,6 +2044,8 @@ class Orchestrator:
                 origin_notes=origin_notes or None,
                 # #104: a trusted (or AGENT_TOOL_SANDBOX=0) generated tool.
                 outside_sandbox=tool_name in getattr(self, "_unsandboxed_tools", ()),
+                always_allow_label=allow_label,
+                auto_approve_seconds=auto_seconds,
             ),
         )
         offer_id = self._record_offer_shown(tool_name, tool_args)
@@ -1904,6 +2080,21 @@ class Orchestrator:
             offer_id, "approved" if resp.approved else "declined"
         )
         self._record_decision(tool_name, tool_args, bool(resp.approved), resp.edited_args)
+        if resp.approved and resp.always_allow and allow_label:
+            # #116: only the user's click on a card that offered it. The
+            # label check means a client can't grant what wasn't offered.
+            try:
+                if self.always_allow.grant(card_tools[0], trigger):
+                    self.publish_notice({
+                        "id": f"always_allow_on:{always_allow_mod.key_of(card_tools[0], trigger)}",
+                        "level": "info",
+                        "title": "Won't ask again",
+                        "body": f"{allow_label}. Turn it off in Settings → Always allowed.",
+                    })
+            except Exception:
+                logger.exception("always_allow.grant failed")
+        if resp.auto_approved:
+            logger.info("Approval %s approved by countdown", request_id)
         self._schedule_preference_learning()
         if tool_name == "generate_custom_tool":
             self._record_idea_feedback(tool_args, bool(resp.approved))
@@ -1919,6 +2110,30 @@ class Orchestrator:
                 bool(resp.approved),
             )
         return bool(resp.approved), resp.edited_args
+
+    def _countdown_seconds(self, all_undoable: bool) -> Optional[int]:
+        """#117: seconds before an undoable card approves itself, or None.
+
+        Only while the user used the Mac in the last
+        :data:`COUNTDOWN_ACTIVE_SECONDS` (nobody watching = wait for a
+        click), never for a card mirrored because the turn came from the
+        phone. ``AGENT_COUNTDOWN_SECONDS=0`` turns it off."""
+        if not all_undoable or getattr(self, "_turn_from_phone", False):
+            return None
+        try:
+            seconds = int(os.environ.get("AGENT_COUNTDOWN_SECONDS", COUNTDOWN_SECONDS))
+        except ValueError:
+            seconds = COUNTDOWN_SECONDS
+        if seconds <= 0:
+            return None
+        idle_fn = getattr(self, "idle_seconds", None) or _input_idle_seconds
+        try:
+            idle = idle_fn()
+        except Exception:
+            idle = None
+        if idle is None:  # can't tell whether anyone is there: no countdown
+            return None
+        return seconds if float(idle) < COUNTDOWN_ACTIVE_SECONDS else None
 
     async def _send_approval_resolved(
         self, request_id: str, outcome: str, note: Optional[str] = None,

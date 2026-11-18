@@ -7,6 +7,11 @@ struct ApprovalAlert: View {
     /// changed a field in the tool's editable card; the backend substitutes
     /// these values in place of the agent's original proposal.
     let onDecision: (_ approved: Bool, _ note: String, _ editedArgs: JSONValue?) -> Void
+    /// #116: "Always allow" (approve + remember). Shown only when the daemon
+    /// sent `always_allow_label`.
+    var onAlwaysAllow: ((_ note: String, _ editedArgs: JSONValue?) -> Void)? = nil
+    /// #117: the card's auto-approve countdown, owned by the presenter.
+    var countdown: AutoApproveCountdown? = nil
 
     @State private var userNote: String = ""
     @State private var values: [String: String] = [:]
@@ -38,7 +43,8 @@ struct ApprovalAlert: View {
     private var windowHeight: CGFloat {
         let base: CGFloat = toolIdeaSummary != nil ? 580
             : bundleActions.map(BundleCard.windowHeight) ?? (spec?.windowHeight ?? 480)
-        return min(ApprovalEditSpec.maxWindowHeight, (base * textSize.layoutScale).rounded())
+        let extra: CGFloat = countdown != nil ? 40 : 0
+        return min(ApprovalEditSpec.maxWindowHeight, ((base + extra) * textSize.layoutScale).rounded())
     }
 
     /// The editable card for this tool, or nil for the read-only JSON view.
@@ -76,10 +82,14 @@ struct ApprovalAlert: View {
             }
             .padding(-3)
             .frame(maxHeight: .infinity)
+            if let countdown {
+                AutoApproveBar(countdown: countdown)
+            }
             buttonRow
         }
         .padding(18)
         .frame(width: 520, height: windowHeight)
+        .stopsCountdown(countdown)
         .onAppear(perform: populate)
     }
 
@@ -177,7 +187,9 @@ struct ApprovalAlert: View {
                 .appFont(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            DisclosureGroup(isExpanded: $showTechnical) {
+            DisclosureGroup(isExpanded: Binding(
+                get: { showTechnical },
+                set: { countdown?.stop(); showTechnical = $0 })) {
                 argsSection.padding(.top, 4)
             } label: {
                 caption("Technical details")
@@ -236,18 +248,20 @@ struct ApprovalAlert: View {
 
     private func tickBinding(_ index: Int) -> Binding<Bool> {
         Binding(get: { index < ticks.count ? ticks[index] : true },
-                set: { if index < ticks.count { ticks[index] = $0 } })
+                set: { countdown?.stop(); if index < ticks.count { ticks[index] = $0 } })
     }
 
     private func actionBinding(_ index: Int, _ key: String) -> Binding<String> {
         Binding(get: { index < actionValues.count ? actionValues[index][key] ?? "" : "" },
-                set: { if index < actionValues.count { actionValues[index][key] = $0 } })
+                set: { countdown?.stop(); if index < actionValues.count { actionValues[index][key] = $0 } })
     }
 
     private var noteSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             caption("Note (optional)")
-            TextField("Add a note sent with your decision", text: $userNote)
+            TextField("Add a note sent with your decision", text: Binding(
+                get: { userNote },
+                set: { countdown?.stop(); userNote = $0 }))
                 .textFieldStyle(.roundedBorder)
         }
     }
@@ -291,7 +305,7 @@ struct ApprovalAlert: View {
     }
 
     private func binding(_ key: String) -> Binding<String> {
-        Binding(get: { values[key] ?? "" }, set: { values[key] = $0 })
+        Binding(get: { values[key] ?? "" }, set: { countdown?.stop(); values[key] = $0 })
     }
 
     private func caption(_ text: String) -> some View {
@@ -302,8 +316,21 @@ struct ApprovalAlert: View {
 
     private var buttonRow: some View {
         HStack {
+            if let label = alwaysAllowLabel, let onAlwaysAllow {
+                Button {
+                    countdown?.stop()
+                    onAlwaysAllow(userNote, currentEditedArgs)
+                } label: {
+                    Label(label, systemImage: "checkmark.seal")
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .help(label)
+                .disabled(!approveEnabled)
+            }
             Spacer()
             Button(role: .destructive) {
+                countdown?.stop()
                 onDecision(false, userNote, nil)
             } label: {
                 Label("Deny", systemImage: "xmark.circle.fill")
@@ -311,15 +338,8 @@ struct ApprovalAlert: View {
             .keyboardShortcut(.cancelAction)
 
             Button {
-                if let actions = bundleActions {
-                    onDecision(true, userNote,
-                               BundleCard.editedArgs(actions, ticks: ticks, values: actionValues))
-                    return
-                }
-                let edited = spec.flatMap {
-                    ApprovalEditSpec.editedArgs($0, toolArgs: payload.toolArgs, values: values)
-                }
-                onDecision(true, userNote, edited)
+                countdown?.stop()
+                onDecision(true, userNote, currentEditedArgs)
             } label: {
                 Label(approveLabel, systemImage: "checkmark.circle.fill")
             }
@@ -327,6 +347,20 @@ struct ApprovalAlert: View {
             .buttonStyle(.borderedProminent)
             .disabled(!approveEnabled)
         }
+    }
+
+    /// What Approve (and Always allow) send as `edited_args`.
+    private var currentEditedArgs: JSONValue? {
+        if let actions = bundleActions {
+            return BundleCard.editedArgs(actions, ticks: ticks, values: actionValues)
+        }
+        return spec.flatMap {
+            ApprovalEditSpec.editedArgs($0, toolArgs: payload.toolArgs, values: values)
+        }
+    }
+
+    private var alwaysAllowLabel: String? {
+        AlwaysAllowCard.label(payload)
     }
 
     private var approveLabel: String {
@@ -373,6 +407,10 @@ struct CompactApprovalCard: View {
     let payload: ApprovalRequestPayload
     let onDecision: (_ approved: Bool) -> Void
     let onEdit: () -> Void
+    /// #116: approve + remember, when the daemon sent `always_allow_label`.
+    var onAlwaysAllow: (() -> Void)? = nil
+    /// #117: the auto-approve countdown, owned by the presenter.
+    var countdown: AutoApproveCountdown? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -405,17 +443,25 @@ struct CompactApprovalCard: View {
             Text("You can undo this later in History.")
                 .appFont(.fine)
                 .foregroundStyle(.secondary)
+            if let countdown {
+                AutoApproveBar(countdown: countdown)
+            }
             HStack {
-                Button("Edit…", action: onEdit)
+                Button("Edit…") {
+                    countdown?.stop()
+                    onEdit()
+                }
                     .buttonStyle(.borderless)
                 Spacer()
                 Button(role: .destructive) {
+                    countdown?.stop()
                     onDecision(false)
                 } label: {
                     Text("Deny")
                 }
                 .keyboardShortcut(.cancelAction)
                 Button {
+                    countdown?.stop()
                     onDecision(true)
                 } label: {
                     Text(CompactCard.approveLabel(payload))
@@ -424,9 +470,35 @@ struct CompactApprovalCard: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!CompactCard.isComplete(payload))
             }
+            if let label = AlwaysAllowCard.label(payload), let onAlwaysAllow {
+                HStack {
+                    Spacer()
+                    Button {
+                        countdown?.stop()
+                        onAlwaysAllow()
+                    } label: {
+                        Label(label, systemImage: "checkmark.seal")
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .controlSize(.small)
+                    .help(label)
+                    .disabled(!CompactCard.isComplete(payload))
+                }
+            }
         }
         .padding(14)
         .frame(width: 380)
+        .stopsCountdown(countdown)
+    }
+}
+
+/// #116: the "Always allow" button's words, or nil (no button).
+enum AlwaysAllowCard {
+    static func label(_ payload: ApprovalRequestPayload) -> String? {
+        guard let text = payload.alwaysAllowLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else { return nil }
+        return text
     }
 }
 

@@ -411,6 +411,10 @@ struct SettingsView: View {
             Section("Standing rules") {
                 RulesView()
             }
+            // #116: "Always allow" pressed on a card; revoke here.
+            Section("Always allow") {
+                AlwaysAllowView()
+            }
 
             // Wave 15: watches (#88), right-moment delivery (#87), what the
             // assistant did with Undo (#83), what left this Mac (#82).

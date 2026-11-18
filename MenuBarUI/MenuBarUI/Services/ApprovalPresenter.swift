@@ -22,6 +22,10 @@ final class ApprovalPresenter {
     /// NSWindow.delegate is weak; these keep the close handlers alive.
     private var windowDelegate: WindowCloseHandler?
     private var codeWindowDelegate: WindowCloseHandler?
+    /// #117: the presented card's auto-approve countdown, if it has one.
+    /// Stopped whenever the card closes, so it can never send a response
+    /// for a card that is gone.
+    private var countdown: AutoApproveCountdown?
 
     func attach(to ws: WebSocketManager) {
         self.ws = ws
@@ -60,6 +64,15 @@ final class ApprovalPresenter {
     }
 
     private func present(_ payload: ApprovalRequestPayload) {
+        countdown?.stop()
+        countdown = AutoApproveCountdown(seconds: payload.autoApproveSeconds) { [weak self] in
+            guard let self, self.presentedId == payload.requestId else { return }
+            self.ws?.sendApprovalResponse(
+                requestId: payload.requestId, approved: true, userNote: nil,
+                editedArgs: nil, autoApproved: true
+            )
+            self.closeWindow()
+        }
         if CompactCard.applies(payload) {
             presentLight(payload)
         } else {
@@ -80,8 +93,11 @@ final class ApprovalPresenter {
             self.closeWindow()
         }, onEdit: { [weak self] in
             guard let self, self.presentedId == payload.requestId else { return }
+            self.countdown?.stop()
             self.presentFull(payload)
-        })
+        }, onAlwaysAllow: { [weak self] in
+            self?.sendAlwaysAllow(payload, note: nil, editedArgs: nil)
+        }, countdown: countdown)
 
         let hosting = NSHostingController(rootView: content.appTextSize())
         hosting.sizingOptions = [.preferredContentSize]
@@ -111,6 +127,36 @@ final class ApprovalPresenter {
         Self.placeTopRight(panel)
         // No NSApp.activate, no makeKey: the front app keeps keyboard focus.
         panel.orderFrontRegardless()
+        startCountdown(in: panel, stopOnKey: true)
+    }
+
+    /// #117: run the countdown, stopping it when the user reaches the card
+    /// in ways SwiftUI can't report: the pointer moves over the window, or
+    /// (light panel only, `stopOnKey`) the panel is clicked and becomes key.
+    /// The full window is made key when shown, so key status means nothing
+    /// there; typing and edits stop it from the view. A pointer already
+    /// resting where the card appeared counts only once it moves.
+    private func startCountdown(in window: NSWindow, stopOnKey: Bool) {
+        guard let countdown else { return }
+        let startMouse = NSEvent.mouseLocation
+        countdown.probe = { [weak window] in
+            guard let window, window.isVisible else { return false }
+            let mouse = NSEvent.mouseLocation
+            if mouse != startMouse, NSMouseInRect(mouse, window.frame, false) { return true }
+            return stopOnKey && window.isKeyWindow
+        }
+        countdown.start()
+    }
+
+    private func sendAlwaysAllow(_ payload: ApprovalRequestPayload, note: String?,
+                                 editedArgs: JSONValue?) {
+        guard presentedId == payload.requestId else { return }
+        countdown?.stop()
+        ws?.sendApprovalResponse(
+            requestId: payload.requestId, approved: true, userNote: note,
+            editedArgs: editedArgs, alwaysAllow: true
+        )
+        closeWindow()
     }
 
     /// Top-right of the screen with the mouse, under the menu bar.
@@ -134,7 +180,7 @@ final class ApprovalPresenter {
     private func presentFull(_ payload: ApprovalRequestPayload) {
         dropWindow()
 
-        let content = ApprovalAlert(payload: payload) { [weak self] approved, note, editedArgs in
+        let content = ApprovalAlert(payload: payload, onDecision: { [weak self] approved, note, editedArgs in
             guard let self, self.presentedId == payload.requestId else { return }
             self.ws?.sendApprovalResponse(
                 requestId: payload.requestId,
@@ -143,7 +189,9 @@ final class ApprovalPresenter {
                 editedArgs: editedArgs
             )
             self.closeWindow()
-        }
+        }, onAlwaysAllow: { [weak self] note, editedArgs in
+            self?.sendAlwaysAllow(payload, note: note, editedArgs: editedArgs)
+        }, countdown: countdown)
 
         let hosting = NSHostingController(rootView: content.appTextSize())
         let window = NSWindow(contentViewController: hosting)
@@ -164,6 +212,7 @@ final class ApprovalPresenter {
 
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
+        startCountdown(in: window, stopOnKey: false)
     }
 
     private func presentCode(_ payload: CodeApprovalRequestPayload) {
@@ -212,6 +261,8 @@ final class ApprovalPresenter {
         window = nil
         windowDelegate = nil
         presentedId = nil
+        countdown?.stop()
+        countdown = nil
         ws?.sendApprovalResponse(
             requestId: requestId, approved: false, userNote: nil, editedArgs: nil
         )
@@ -232,6 +283,8 @@ final class ApprovalPresenter {
     }
 
     private func closeWindow() {
+        countdown?.stop()
+        countdown = nil
         window?.delegate = nil
         window?.close()
         window = nil

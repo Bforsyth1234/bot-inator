@@ -71,6 +71,13 @@ class ApprovalRequestPayload(BaseModel):
     # #104: the tool is a generated tool the user trusted to run outside
     # the sandbox (or AGENT_TOOL_SANDBOX=0); the card says so.
     outside_sandbox: bool = False
+    # #116: the card may offer "Always allow" (the button's words, e.g.
+    # "Always add reminders from email"). ``None`` hides the button.
+    always_allow_label: str | None = None
+    # #117: the card approves itself after this many seconds unless the
+    # user denies, edits or touches it. Set only for undoable actions while
+    # the user is at the Mac. ``None`` waits for a click as before.
+    auto_approve_seconds: int | None = None
 
 
 class ApprovalResponsePayload(BaseModel):
@@ -82,6 +89,10 @@ class ApprovalResponsePayload(BaseModel):
     # When present, the orchestrator invokes the tool with these values
     # instead of the ones the agent originally proposed.
     edited_args: dict[str, Any] | None = None
+    # #116: the user clicked "Always allow" (implies approved).
+    always_allow: bool = False
+    # #117: the countdown ran out with no deny; the app approved it.
+    auto_approved: bool = False
 
 
 ApprovalOutcome = Literal["approved", "declined", "timed_out"]
