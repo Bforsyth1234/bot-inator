@@ -115,6 +115,7 @@ API auth → sandbox for installed tools → live checks.
 | 21 | A: #112 · B: #111 (user 2026-11-11: "go through the open todos … use subagents to complete them") | A `tools/tool_sandbox.py` (relay + child shim), `tools/meta_tool_generator.py` (prompt), `tools/draft_dry_run.py`, `ai/mcp_client.py` (relay entry), `ai/orchestrator.py` (relayed-call cards), README, new tests · B `tools/look_at_screen.py` (visible-area check), `events/remote_channel.py` `card_text` (skip empty args), the Mac card renderer only if it shows nulls, new tests | [x] closed 2026-11-11 (#111 #112 `[~] live`; 1923 tests; #113 added, not scheduled) |
 | 22 | A: #118 · B: #121 part 1 · C: #113 (user 2026-11-18: "scope every open item" → "Start wave 22") | A new `ai/training_corpus.py` (+ frozen held-out split), new `routes/training.py`, new `TrainingDataView.swift`, new `tests/test_training_corpus.py` · B `evals/run.py` (`--adapter`, callable entry), `evals/suites/__init__.py`, new `evals/suites/safety.py`, new `evals/cases/safety.json`, `ai/mlx_engine.py` (adapter load only), new `tests/test_personal_evals.py` · C `ai/orchestrator.py` (#113 reply fill-in + mail prompt only), `tools/email_draft.py`, `ai/needs_reply.py`, new `tests/test_reply_threading.py`. Runner at close: `ai/orchestrator.py` (#118 record hook, after C), `user_settings.py`, `main.py`, `SettingsView.swift`, LIVING_SPEC §1 | [x] closed 2026-11-18 (#113 #118 `[~] live`; #121 part 1 done; 2048 tests) |
 | 23 | A: #119 · B: #121 part 2 (user 2026-11-18: "Start wave 23") | A new `ai/personal_training.py`, `routes/training.py` (start / cancel / status), new `TrainingProgressView.swift`, new `scripts/seed_training_corpus.py`, new `tests/test_personal_training.py` · B new `evals/suites/personal.py`, new `ai/model_compare.py`, `ai/training_corpus.py` (additive comparison table only), `evals/suites/__init__.py`, `tests/test_personal_evals.py`. Runner at close: `ai/orchestrator.py` (threshold → training card; #79 never-run → corpus), `schemas/ws_messages.py` + `WSMessage.swift` (`training_progress`), `main.py`, `SettingsView.swift` | [x] closed 2026-11-18 (#119 #121 `[~] live`; 2102 tests) |
+| 24 | A: #120 (alone; user 2026-11-18: "Start wave 24") | A new `ai/model_eval.py`, `ai/mlx_engine.py` (adapter on/off), `user_settings.py` (active adapter key), new `routes/personal_model.py`, `routes/training.py` (opt-out turns the adapter off), new `PersonalModelView.swift`, new `tests/test_model_eval.py`. Runner at close: `ai/orchestrator.py` (10% base routing + comparison record), `main.py` (gate after training, daily switch-back check, router), `SettingsView.swift`, LIVING_SPEC | [x] closed 2026-11-18 (#120 `[~] live`; 2137 tests) |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -198,6 +199,10 @@ Wave 22, 2026-11-18 (#113, #118, #121 part 1):
 Wave 23, 2026-11-18 (#119, #121 part 2):
 - #119 Training: `cd agent-daemon && .venv/bin/python scripts/seed_training_corpus.py --path /tmp/seed.db --rows 340` → run a dev daemon with `AGENT_TRAINING_DB=/tmp/seed.db AGENT_TRAINING_CORPUS=1` → approve or deny any card → a "Train your own model?" card → Approve → plugged in and idle 3+ min → Settings → Training data shows progress; touch the mouse → paused; leave → resumes → a "Personal model" notice; `~/.bot-inator/models/1/` has `adapters.safetensors` and `meta.json` with status "done". Cancel on a second run removes its folder.
 - #121 Personal suite: `.venv/bin/python -m evals.suites.personal --db /tmp/seed.db` and again with `--adapter ~/.bot-inator/models/1` → offer accuracy and closeness printed, nothing written to `evals/results/`.
+
+Wave 24, 2026-11-18 (#120), after the #119 training check:
+- #120 Gate + switch: when the run finishes → a "Personal model" notice, then (on the real local model, a few minutes) either a "Use your personal model?" card with "offers you'd approve X% vs Y%" lines, or a notice saying why not. `~/.bot-inator/models/1/gate.json` holds only verdict + numbers. On a win → Approve → Settings → Personal model shows it active.
+- #120 Base share + rollback: with the adapter active, use the Mac until a few cards appear; all still need approval. Settings → "Use base model" → next turn has no adapter (`GET /api/personal_model` → `loaded_adapter: null`). Change the main MLX model → the adapter shows "stale". Switch main to Groq → "works with the local engine".
 
 ---
 
@@ -3120,7 +3125,7 @@ Results (subagent, wave 23 slot A + runner, 2026-11-18): built.
   `test_wave23_wiring.py` 4 (non-vacuous: removing the follow-up task fails
   the training-card test). mlx_lm's own loader read the seeded dataset.
 
-#120 — Use the personal model only if it beats the base model; one-click rollback [ ]
+#120 — Use the personal model only if it beats the base model; one-click rollback [~] live
 Wave: _ · Agent: _ · Added: 2026-11-18 · Source: user
 Ask: follows from #119: a trained model is only worth switching to if it is
 better, and the user must be able to go back.
@@ -3155,6 +3160,41 @@ Verify:
 ⚬ Non-vacuous: forcing "adapter wins" fails the worse-adapter test.
 ⚬ pytest gate; swiftc typecheck.
 Deviations:
+1. The switch card uses the normal Approve / Deny buttons (Approve = "Use my
+   model"); `model_eval.SWITCH_BUTTONS` holds the intended labels for when
+   cards get custom buttons.
+2. With a cloud main engine a saved active adapter is kept but not applied
+   (`engine_ok=false` + reason); a stale or no-longer-usable one is cleared.
+3. The gate builds its own engine, so while it runs two models are in
+   memory (~1 GB each for the 1.5B 4-bit model); one at a time inside it.
+4. The base share toggles LoRA `scale` to 0 under the generation lock (no
+   reload); DoRA adapters fall back to a swap. Turns are serialized, so a
+   parallel turn seeing the base model is theoretical.
+5. Runner: the comparison record and the training follow-up live in
+   `_note_card_source` / `_after_card_decision`, not inline, so
+   `_request_approval` never names the model (checked by
+   `test_consent_code_never_reads_the_model_or_adapter`).
+Results (subagent, wave 24 slot A + runner, 2026-11-18): built.
+⚬ `ai/model_eval.py`: `list_adapters` (done folders; stale on base change;
+  usable = gated adapter_wins + not stale + weights), `run_gate` (base then
+  adapter: personal, tool_calls, idea_judge, safety, all save=False; one
+  engine, unloaded in finally; `gate.json` = verdict + numbers + time,
+  0600), `switch_offer`, `PersonalModel` facade (`use_adapter`, `use_base`,
+  `apply_active`, `pick_source`, `using_base`, `gate`, `check_switch_back`).
+  Setting `AGENT_PERSONAL_ADAPTER`.
+⚬ `ai/mlx_engine.py`: `using_base()` (scale 0 under the generation lock,
+  exact restore, DoRA → reload), `adapter_active`, `adapter_layers`.
+⚬ `routes/personal_model.py` GET / POST use / POST use_base;
+  `routes/training.py` opt-out → `use_base()`. `PersonalModelView.swift`.
+⚬ Runner: `main.py` builds the facade, `apply_active()` at startup, after a
+  finished run gates the adapter → a "Use your personal model?" card on a
+  win (else a notice), daily `check_switch_back()` → notice, router;
+  orchestrator 10% base share for event/pattern turns inside `using_base()`,
+  card source recorded for the comparison; `use_personal_model` never from
+  the phone and never a corpus row; Settings "Personal model" section.
+⚬ Tests: `test_model_eval.py` 30 (non-vacuous: forced win fails 6, stale,
+  save=True, scale restore, opt-out hook, lock). `test_wave24_wiring.py` 4
+  (non-vacuous: removing the base-share branch and the record fails 2).
 
 
 #121 — Evals that show whether the personal model is better than the original [~] live

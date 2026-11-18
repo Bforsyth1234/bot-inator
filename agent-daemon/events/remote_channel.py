@@ -114,6 +114,7 @@ ATTACHMENT_CHAR = "\ufffc"  # the text of an attachment-only chat.db row
 NEVER_FROM_PHONE: frozenset[str] = frozenset({
     "generate_custom_tool", "run_shortcut",
     "train_personal_model",  # #119: training is approved on the Mac only
+    "use_personal_model",  # #120: switching models too
 })
 
 MAX_ARG_CHARS = 200

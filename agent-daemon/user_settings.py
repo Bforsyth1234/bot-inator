@@ -55,6 +55,9 @@ ALLOWED_KEYS = frozenset({
     # #118: opt-in training corpus ("1"/"0", default off, read live).
     "AGENT_TRAINING_CORPUS",
     "AGENT_TRAINING_KEEP_MAIL_TEXT",
+    # #120: the personal model (LoRA adapter folder) in use, "" = the base
+    # model. Written by ai.model_eval.PersonalModel, read live.
+    "AGENT_PERSONAL_ADAPTER",
     "AGENT_REMOTE",
     "AGENT_REMOTE_HANDLE",
     "AGENT_REMOTE_IDLE_MINUTES",

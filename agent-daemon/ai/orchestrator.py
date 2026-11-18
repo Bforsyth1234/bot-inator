@@ -416,6 +416,10 @@ class Orchestrator:
         self.training_corpus: Optional[Any] = None
         # #119: ``ai.personal_training.PersonalTraining`` (set by main.py).
         self.personal_training: Optional[Any] = None
+        # #120: ``ai.model_eval.PersonalModel`` (set by main.py).
+        self.personal_model: Optional[Any] = None
+        self._turn_model_source = ""
+        self._in_base_share = False
         self._training_offer_open = False
         self._current_prompt: str = ""
         # The idea offer the last idea card recorded (#79), so a successful
@@ -1495,6 +1499,26 @@ class Orchestrator:
         get more room. ``None`` falls back to smolagents' default.
         """
         self._current_prompt = prompt  # #118: the prompt behind any card
+        if not getattr(self, "_in_base_share", False):
+            self._turn_model_source = ""
+            pm = getattr(self, "personal_model", None)
+            if pm is not None and getattr(self, "_turn_kind", "") in ("event", "pattern"):
+                # #120 decision 4: while a personal model is on, ~10% of offer
+                # turns run on the base model, for the live comparison (#121).
+                try:
+                    active = bool(pm.adapter_active)
+                    src = pm.pick_source() if active else ""
+                except Exception:
+                    logger.exception("personal model: pick_source failed")
+                    active, src = False, ""
+                self._turn_model_source = src
+                if active and src == "base":
+                    self._in_base_share = True
+                    try:
+                        async with pm.using_base():
+                            return await self._run_agent(event_id, prompt, max_steps)
+                    finally:
+                        self._in_base_share = False
         if self._agent is None:
             return await self._fallback_run(event_id, prompt)
         self._current_event_id = event_id
@@ -2193,6 +2217,7 @@ class Orchestrator:
             ),
         )
         offer_id = self._record_offer_shown(tool_name, tool_args)
+        self._note_card_source(offer_id)
         delivery = getattr(self, "delivery", None)
         if delivery is not None and getattr(self, "_turn_kind", "") == "event":
             # #87: an ambient turn's card counts toward the daily cap.
@@ -2236,9 +2261,7 @@ class Orchestrator:
             event_id=event_id, trigger=trigger, reasoning=reasoning,
             summary=summary, actions=actions, origin_notes=origin_notes,
         )
-        if tool_name != "train_personal_model" and getattr(self, "personal_training", None) is not None:
-            # #119: enough decisions → offer to train, as its own card, after this one.
-            asyncio.create_task(self._maybe_offer_training())
+        self._after_card_decision(tool_name)
         if resp.approved and resp.always_allow and allow_label:
             # #116: only the user's click on a card that offered it. The
             # label check means a client can't grant what wasn't offered.
@@ -2349,6 +2372,24 @@ class Orchestrator:
         except Exception:
             logger.exception("idea_outcomes.record_verdict failed")
 
+    def _note_card_source(self, offer_id: Optional[str]) -> None:
+        """#121: which model made this card (its verdict and undo follow via
+        the corpus). Kept out of the approval path: consent never depends on
+        the model (LIVING_SPEC §1 Personal model)."""
+        src = getattr(self, "_turn_model_source", "")
+        pm = getattr(self, "personal_model", None)
+        if src and offer_id and pm is not None:
+            try:
+                pm.comparison.record(offer_id, src)
+            except Exception:
+                logger.exception("personal model: comparison.record failed")
+
+    def _after_card_decision(self, tool_name: str) -> None:
+        """#119: enough decisions → offer to train, as its own card, after this one."""
+        if tool_name not in ("train_personal_model", "use_personal_model") \
+                and getattr(self, "personal_training", None) is not None:
+            asyncio.create_task(self._maybe_offer_training())
+
     async def _maybe_offer_training(self) -> None:
         """#119: once the corpus passes the threshold, ask (one card) whether
         to train a personal model. Training is a side effect: the normal
@@ -2382,7 +2423,7 @@ class Orchestrator:
     ) -> None:
         """#118: one training-corpus row per card decision (no-op unless opted in)."""
         corpus = getattr(self, "training_corpus", None)
-        if corpus is None or tool_name == "train_personal_model":
+        if corpus is None or tool_name in ("train_personal_model", "use_personal_model"):
             return  # #119: the training card itself is never a training example
         try:
             from ai import training_corpus as tc  # noqa: WPS433

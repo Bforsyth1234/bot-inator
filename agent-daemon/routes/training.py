@@ -32,7 +32,8 @@ Nothing here sends anything off the Mac. The app-wide ``AuthMiddleware``
 Wiring (main.py): ``app.include_router(training_routes.router)`` and
 ``app.state.training_corpus = <ai.training_corpus.TrainingCorpus>``;
 ``app.state.personal_training = <ai.personal_training.PersonalTraining>``
-for the #119 routes (503 without it).
+for the #119 routes (503 without it). Turning the opt-in off also calls
+``app.state.personal_model.use_base()`` when it exists (#120).
 """
 from __future__ import annotations
 
@@ -86,7 +87,7 @@ def get_training(request: Request) -> dict[str, Any]:
 
 
 @router.put("/settings")
-def put_settings(body: TrainingSettingsUpdate, request: Request) -> dict[str, Any]:
+async def put_settings(body: TrainingSettingsUpdate, request: Request) -> dict[str, Any]:
     corpus = _corpus(request)
     updates: dict[str, str] = {}
     if body.enabled is not None:
@@ -102,6 +103,11 @@ def put_settings(body: TrainingSettingsUpdate, request: Request) -> dict[str, An
     deleted = 0
     if body.enabled is False:
         deleted = corpus.opt_out(delete_stored=body.delete_stored)
+        # #120/#121: no corpus means no comparison data, so the automatic
+        # switch-back could never fire: go back to the base model too.
+        personal_model = getattr(request.app.state, "personal_model", None)
+        if personal_model is not None:
+            await personal_model.use_base()
     return {**_view(corpus), "deleted": deleted}
 
 
