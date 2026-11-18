@@ -55,6 +55,29 @@ automatically" notice with one-click Undo and a macOS notification. A run
 whose tool failed is not journaled and the normal card path goes on.
 Store `~/.bot-inator/standing_rules.json` (0600, `AGENT_STANDING_RULES_PATH`).
 
+**Always allow and the countdown (amendment to 7a, user decisions
+2026-11-18, items #115–#117).** Asked "can we add a button that always
+allows something to happen ... I want the model to have more freedom but
+also want to balance that with the users trust". Two more ways to consent,
+both limited to the tools History can undo (`move_file`, `create_event`,
+`create_reminder`, `create_note`):
+
+1. **Always allow** (#116): a button on such a card. Clicking it approves
+   the card and lets that tool run without a card on the same trigger kind
+   from then on. The model still picks the arguments (this is what sets it
+   apart from a standing rule). Every run is journaled, posts a banner with
+   one-click Undo and a macOS notification; Settings → Always allowed lists
+   and removes each entry; two undos switch it off. A model can never add
+   one: only the user's click on a card that offered it.
+2. **Countdown** (#117): such a card approves itself after 10 s unless the
+   user denies or touches it. Only while the user used the Mac in the last
+   2 minutes (nobody there → it waits for a click), never for a turn from
+   the phone.
+
+Also (#115): suggestions from a burst of email reach the user as one card
+with a tick box each, not one card per email. Everything else still needs
+a card.
+
 **iPhone remote (amendment to 7a and 7c, user decisions 2026-11-10, item
 #85).** 7a: a reply `yes <code>` / `no <code>` sent from the user's own
 devices (`is_from_me = 1`, iMessage service, in the own thread only) is

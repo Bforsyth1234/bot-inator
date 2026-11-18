@@ -48,6 +48,12 @@ struct ApprovalRequestPayload: Codable, Hashable {
     /// #104: a generated tool the user trusted to run outside the sandbox.
     /// The card says "Runs outside the sandbox". nil (older daemons) = false.
     var outsideSandbox: Bool? = nil
+    /// #116: words for an "Always allow" button ("Always add reminders from
+    /// email"). nil (older daemons, cards that can't be always-allowed) = no button.
+    var alwaysAllowLabel: String? = nil
+    /// #117: seconds until the card approves itself unless the user touches
+    /// it. nil or <= 0 (older daemons, most cards) = no countdown.
+    var autoApproveSeconds: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -61,6 +67,8 @@ struct ApprovalRequestPayload: Codable, Hashable {
         case reversible
         case originNotes = "origin_notes"
         case outsideSandbox = "outside_sandbox"
+        case alwaysAllowLabel = "always_allow_label"
+        case autoApproveSeconds = "auto_approve_seconds"
     }
 }
 
@@ -93,13 +101,20 @@ struct ApprovalResponsePayload: Codable, Hashable {
     /// `{"args": [...], "kwargs": {...}}`. `nil` means "use the values the
     /// agent originally proposed".
     let editedArgs: JSONValue?
+    /// #116: the user pressed "Always allow" (implies approved).
+    var alwaysAllow: Bool = false
+    /// #117: the card's countdown ran out untouched (implies approved).
+    var autoApproved: Bool = false
 
     init(requestId: String, approved: Bool, userNote: String?,
-         editedArgs: JSONValue? = nil) {
+         editedArgs: JSONValue? = nil, alwaysAllow: Bool = false,
+         autoApproved: Bool = false) {
         self.requestId = requestId
         self.approved = approved
         self.userNote = userNote
         self.editedArgs = editedArgs
+        self.alwaysAllow = alwaysAllow
+        self.autoApproved = autoApproved
     }
 
     enum CodingKeys: String, CodingKey {
@@ -107,6 +122,29 @@ struct ApprovalResponsePayload: Codable, Hashable {
         case approved
         case userNote = "user_note"
         case editedArgs = "edited_args"
+        case alwaysAllow = "always_allow"
+        case autoApproved = "auto_approved"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        requestId = try c.decode(String.self, forKey: .requestId)
+        approved = try c.decode(Bool.self, forKey: .approved)
+        userNote = try c.decodeIfPresent(String.self, forKey: .userNote)
+        editedArgs = try c.decodeIfPresent(JSONValue.self, forKey: .editedArgs)
+        alwaysAllow = try c.decodeIfPresent(Bool.self, forKey: .alwaysAllow) ?? false
+        autoApproved = try c.decodeIfPresent(Bool.self, forKey: .autoApproved) ?? false
+    }
+
+    /// The two #116/#117 flags go out only when true; older daemons never see them.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(requestId, forKey: .requestId)
+        try c.encode(approved, forKey: .approved)
+        try c.encodeIfPresent(userNote, forKey: .userNote)
+        try c.encodeIfPresent(editedArgs, forKey: .editedArgs)
+        if alwaysAllow { try c.encode(true, forKey: .alwaysAllow) }
+        if autoApproved { try c.encode(true, forKey: .autoApproved) }
     }
 }
 

@@ -173,13 +173,17 @@ final class WebSocketManager: ObservableObject {
         requestId: String,
         approved: Bool,
         userNote: String?,
-        editedArgs: JSONValue? = nil
+        editedArgs: JSONValue? = nil,
+        alwaysAllow: Bool = false,
+        autoApproved: Bool = false
     ) {
         let payload = ApprovalResponsePayload(
             requestId: requestId,
             approved: approved,
             userNote: (userNote?.isEmpty == true) ? nil : userNote,
-            editedArgs: editedArgs
+            editedArgs: editedArgs,
+            alwaysAllow: approved && alwaysAllow,
+            autoApproved: approved && autoApproved
         )
         let msg = WSMessage.approvalResponse(
             seq: nextSeq(),

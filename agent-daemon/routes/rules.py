@@ -103,7 +103,8 @@ async def undo_run(entry_id: str, request: Request) -> JSONResponse:
     if journal is None:
         raise HTTPException(status_code=503, detail="action journal not ready")
     entry = journal.get(entry_id)
-    if entry is None or entry.get("source") != "rule":
+    # #116: an Always-allow run's notice uses the same one-click Undo.
+    if entry is None or entry.get("source") not in ("rule", "always_allow"):
         raise HTTPException(status_code=404, detail="no such automatic run")
     result = await asyncio.to_thread(journal.undo, entry_id)
     code = {"undone": 200, "not_found": 404}.get(result["status"], 409)

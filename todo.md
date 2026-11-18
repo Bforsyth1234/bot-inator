@@ -31,6 +31,10 @@ a. NO BACKGROUND ACTION WITHOUT CONSENT. Every side-effecting tool call
    the one card carrying that code. Never for code review,
    generate_custom_tool, run_shortcut, cards with origin notes (#81) or
    cards with several actions.
+   AMENDED (user, 2026-11-18, for #116/#117): for the undoable built-ins
+   only, an "Always allow" click (per tool + trigger kind, revocable,
+   every run announced with Undo) and a 10 s countdown while the user is
+   active are consent too. LIVING_SPEC §1 "Always allow and the countdown".
 b. GENERATED CODE IS REVIEWED BEFORE IT RUNS UNSANDBOXED. Idea gate,
    then code gate. The dry run is the only place unapproved code runs,
    and only inside sandbox-exec.
@@ -66,7 +70,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #115
+Next ID: #122
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -174,6 +178,12 @@ Wave 18 (slot A):
 One fix, 2026-11-17:
 
 - #114 Tool files: restart the daemon; Chat "make a tool sender_list that keeps the senders I unsubscribed from in ~/.bot-inator/senders.json, with track and list actions" → the code card keeps the file under `~/Documents/bot-inator/` → Approve → "track deals@shop.com" and "list my tracked senders" both succeed with the tool left in the sandbox.
+
+Fewer prompts, 2026-11-18 (#115–#117):
+
+- #115 One card for email todos: restart the daemon; send yourself 3 emails within a minute that each ask for a to-do → no card at first; about 3 minutes after the first, ONE card "3 suggestions from your email" with a tick box each → untick one, Approve → exactly 2 reminders in Reminders, both in History.
+- #116 Always allow: on a reminder card from email, click "Always add reminders from email" → notice "Won't ask again" → next email that asks for a to-do adds it with no card, a "Done without asking" banner with Undo, and a macOS notification. Undo works. Settings → Always allowed lists it; Remove → the next one asks again.
+- #117 Countdown: while using the Mac, a reminder card shows "Approving in 10s" → leave it → it approves itself. A second one: move the pointer onto it → the countdown stops and it waits. Leave the Mac idle for 3+ minutes before a card arrives → no countdown. A `draft_email` card never has one.
 
 ---
 
@@ -2347,6 +2357,31 @@ goes to the daemon.
 
 ### Approvals and UI
 
+#115 — One card for a burst of email suggestions [~] live
+Wave: — (direct, user session) · Agent: main session · Added: 2026-11-18 · Source: user
+Ask: "the app asks my permission too many times ... it asks about adding todos i think 3 times." Evidence: 2026-11-18 08:54/08:55/08:57, three separate emails each raised their own `create_reminder` card; three more after 10:00 were denied.
+DECISIONS (user, 2026-11-18): 1. "yes batch them".
+DECISIONS (main session, 2026-11-18): 1. Only ambient `mail_received` turns, only `create_reminder`/`create_event`/`create_note`. Chat always asks at once. 2. Window 180 s from the first queued call (the live emails were ~80 s apart), or flush at 6. `AGENT_CARD_BATCH_SECONDS=0` turns it off. 3. The flush is a `card_batch_ready` bus event, so the card is shown by the one-at-a-time event loop, never the timer thread; it is handled before #87 delivery (its mail events already passed it).
+Files: ai/card_batch.py (new), ai/orchestrator.py (`gated_forward` queue branch, `_handle_card_batch`, dispatch), main.py (wiring), tests/test_fewer_prompts.py.
+Verify: tests/test_fewer_prompts.py (`test_mail_turn_reminders_queue_into_one_card`, `test_batch_card_runs_only_ticked_actions_after_approval`, ...); non-vacuous: removing the queue branch fails the first. Live check: Live checks list.
+
+#116 — "Always allow" button on undoable cards [~] live
+Wave: — (direct, user session) · Agent: main session + Swift subagent · Added: 2026-11-18 · Source: user
+Ask: "can we add a button that always allows something to happen. so always add todos from emails?" ... "I want the model to have more freedom but also want to balance that with the users trust". On scope: "i just want it to be an option for the user to click".
+DECISIONS (user, 2026-11-18): amends invariant 7a, see LIVING_SPEC §1 "Always allow".
+DECISIONS (main session, 2026-11-18): 1. Only the undoable built-ins (`move_file`, `create_event`, `create_reminder`, `create_note`), keyed tool + trigger kind (e.g. `create_reminder|mail_received`). 2. Unlike a standing rule the model still picks the arguments; safety comes from undo + announcement + revocation. 3. The daemon only grants when the card itself offered the label (a client can't grant what wasn't shown). 4. Two undos switch it off. 5. Runs journaled `source="always_allow"`; the banner's Undo reuses `POST /api/rules/runs/{id}/undo` (now accepts that source).
+Files: ai/always_allow.py (new), routes/always_allow.py (new), ai/orchestrator.py, ai/action_journal.py (source), routes/rules.py (undo source), schemas/ws_messages.py, main.py; Swift: Models/WSMessage.swift, Services/ApprovalPresenter.swift, Services/WebSocketManager.swift, Views/ApprovalAlert.swift, Views/SettingsView.swift, Views/AlwaysAllowView.swift (new).
+Verify: `test_eligible_tools_are_the_undoable_ones`, `test_always_allowed_call_runs_without_a_card_and_is_journaled`, `test_click_grants_only_what_the_card_offered`, `test_two_undos_switch_always_allow_off`; non-vacuous: forcing `auto_allowed=False` fails the run test.
+
+#117 — 10-second countdown on undoable cards while the user is active [~] live
+Wave: — (direct, user session) · Agent: main session + Swift subagent · Added: 2026-11-18 · Source: user
+Ask: "a button that selects approve with a count down. so you have x seconds to deny it otherwise it approves."
+DECISIONS (user, 2026-11-18): 1. Only while the user is active (input in the last 120 s); otherwise the card waits. 2. 10 s, undoable cards only (a bundle only when every action is undoable).
+DECISIONS (main session, 2026-11-18): 1. Idle unreadable → no countdown. 2. Never on a turn from the phone. 3. `AGENT_COUNTDOWN_SECONDS=0` turns it off. 4. App: any touch of the card (pointer moving onto it, a key, an edit, a tick, a button) stops it for good; a pointer already resting where the card opened counts only once it moves. Closing the card stops the timer, so it can't send a second response.
+Files: ai/orchestrator.py (`_countdown_seconds`, payload), schemas/ws_messages.py; Swift: Views/AutoApproveCountdown.swift (new), ApprovalAlert.swift, ApprovalPresenter.swift.
+Verify: `test_countdown_only_for_undoable_cards_while_the_user_is_active`, `test_card_carries_the_countdown`; non-vacuous: dropping the idle check fails the first.
+
+
 #74 — Quick-ask hotkey with the current context [~] live
 Wave: 13 · Agent: subagent · Added: 2026-11-10 · Source: assistant (usefulness review, user asked to add)
 Ask: Asking the agent should take one keystroke from any app, and it should
@@ -2896,6 +2931,197 @@ Verify:
   being recalled; no approval is ever skipped because of one.
 ⚬ Live: deny the same offer three times → it stops; the preference shows
   in the list → delete it → the offer can return.
+Deviations:
+
+
+### Personal model
+
+#118–#121 came out of a 2026-11-18 question ("is there a use case for fine
+tuning a model with this app?" → "what about adding the ability for users
+to create their own models based on their own data? ... when you reach a
+certain threshold (x data points) the app offers to start training a local
+model for you" → "add it"; #121 from "we would need to have evals too").
+Build in order: #118, #119, #121, #120 (#120's gate calls #121's suites). Code facts
+(2026-11-18, read from the source, not tested): the default model is
+`mlx-community/Qwen2.5-1.5B-Instruct-4bit` (`ai/mlx_engine.py:20`);
+`mlx-lm>=0.32` is already in requirements.txt and ships `mlx_lm.lora`;
+`MLXEngine` already swaps models under a lock; `DecisionLog` and
+`OutcomeStore` (#79) hold verdicts and edit facts but no prompt or card
+text, and `ActionJournal` (#83) stores ids and paths only, on purpose.
+
+#118 — Opt-in training corpus: keep the prompt and card text behind each decision [ ]
+Wave: _ · Agent: _ · Added: 2026-11-18 · Source: user
+Ask: "if you opt in all the data would be stored".
+DECISIONS (assistant proposal, 2026-11-18, accepted with "add it"):
+1. Off by default. One opt-in in Settings; email and message text need a
+   second, separate toggle (same split as the cloud opt-in, invariant c).
+2. One row per card decision: the prompt the model saw, the card it wrote
+   (tool, arguments, draft text), the verdict (approved / denied / edited
+   with the edited text / timed out) and later outcome (undone soon after,
+   tool never run). Joined to #79 rows by offer id, not copied from them.
+3. SQLite in `~/.bot-inator/training.db`, 0600, never sent off the Mac.
+   No retention limit while opted in; turning the opt-in off offers
+   "delete what's stored" (default yes).
+4. Settings shows the count, lets the user browse and delete single rows,
+   and has "Delete all". The privacy ledger (#82) gets a line saying the
+   corpus exists (it never leaves, so nothing is logged as egress).
+5. Rows from cards with origin notes (#81, tainted input) are stored with a
+   `tainted` flag and left out of training by default.
+Files:
+⚬ OWNED: new ai/training_corpus.py, new routes/training.py (rule 12), new
+  MenuBarUI/MenuBarUI/Views/TrainingDataView.swift, new
+  tests/test_training_corpus.py.
+⚬ EDITED: ai/orchestrator.py (record at decision time), user_settings.py
+  (two opt-ins), main.py (wiring), SettingsView.swift (entry row).
+Approach: record in the same place `DecisionLog` records, behind the
+opt-in check, so nothing is written when it is off.
+Verify:
+⚬ Opt-in off → a decided card writes no row (test). On → one row with the
+  prompt, card and verdict; with the mail toggle off a `mail_received`
+  card's email text is not in the row.
+⚬ Delete one / delete all / opt-out delete leave no rows; file mode 0600.
+⚬ Non-vacuous: removing the opt-in check fails the "off writes nothing" test.
+⚬ pytest gate; swiftc typecheck.
+Deviations:
+
+#119 — Offer to train a personal model once there's enough data [ ]
+Wave: _ · Agent: _ · Added: 2026-11-18 · Source: user
+Ask: "when you reach a certain threshold (x data points) the app offers to
+start training a local model for you".
+DECISIONS (assistant proposal, 2026-11-18, accepted with "add it"):
+1. Threshold counts usable rows, not raw events: 300 untainted decisions
+   with at least 50 denials or undos (a model fed only approvals learns
+   nothing about what to avoid). Starting guess; env
+   `AGENT_TRAIN_MIN_ROWS` / `AGENT_TRAIN_MIN_NEGATIVE` to tune.
+2. Training is a side effect, so it is a card ("Train your own model? About
+   20 min, uses the GPU, stays on this Mac"). Declined → offered again only
+   after the corpus doubles.
+3. Runs only on AC power and after 3+ min idle; pauses when the user comes
+   back; Cancel in the app at any time. One run at a time.
+4. What it learns: whether to offer, and how to write the card (draft text).
+   Not tool code generation (one user has too few examples).
+5. LoRA on the current base model via `mlx_lm.lora`, in a child process so
+   the daemon keeps answering. 10% of rows held out for #120.
+Files:
+⚬ OWNED: new ai/personal_training.py, new tests/test_personal_training.py,
+  new MenuBarUI/MenuBarUI/Views/TrainingProgressView.swift.
+⚬ EDITED: routes/training.py (#118: start / cancel / status), ai/orchestrator.py
+  (threshold check → card), schemas/ws_messages.py + WSMessage.swift
+  (`training_progress`), main.py.
+Approach: build the dataset from #118 rows (approved/edited → target is
+the final card; denied/undone → negative, used by #120 scoring and, if
+`mlx_lm` supports it by then, a preference loss), then launch the child.
+Fallback if a LoRA run on 1.5B doesn't fit in memory next to the warm
+model: unload the warm model for the run and say so on the card.
+Verify:
+⚬ 299 rows → no card; 300 with 50 negatives → one card; declined → no card
+  until 600 (tests with a fake clock and corpus).
+⚬ On battery or while active → the run doesn't start; cancel stops the
+  child and leaves no partial adapter.
+⚬ Live: with a seeded corpus, approve the card → progress shows → an
+  adapter folder appears under ~/.bot-inator/models/.
+⚬ Non-vacuous: dropping the negatives check fails the threshold test.
+Deviations:
+
+#120 — Use the personal model only if it beats the base model; one-click rollback [ ]
+Wave: _ · Agent: _ · Added: 2026-11-18 · Source: user
+Ask: follows from #119: a trained model is only worth switching to if it is
+better, and the user must be able to go back.
+DECISIONS (assistant proposal, 2026-11-18, accepted with "add it"):
+1. After training, run #121's gate (personal, regression and safety
+   suites). Offer the switch only if it passes; the card shows the
+   numbers (#121 decision 7). Otherwise tell the user and keep the base.
+2. Adapters are versioned in ~/.bot-inator/models/<n>/ with their scores;
+   Settings lists them and "Use base model" switches back in one click.
+3. A base-model change makes old adapters unusable: mark them stale and
+   offer to retrain.
+4. Exploration: 10% of offer decisions still come from the base model, so
+   the personal model can't drift into offering nothing (it only ever sees
+   outcomes of cards it showed).
+5. The personal model never touches consent: approval gating, always-allow
+   (#116), countdown (#117) and standing rules (#78) stay deterministic
+   code. Add this to LIVING_SPEC §1 before building.
+Files:
+⚬ OWNED: new ai/model_eval.py, new tests/test_model_eval.py, new
+  MenuBarUI/MenuBarUI/Views/PersonalModelView.swift.
+⚬ EDITED: ai/mlx_engine.py (load base + adapter), ai/personal_training.py
+  (#119: call eval after training), routes/training.py, user_settings.py
+  (active adapter), LIVING_SPEC.md §1, SettingsView.swift.
+Approach: reuse evals/run.py for the suite part; held-out scoring is a
+plain loop over rows with the engine pointed at each model.
+Verify:
+⚬ An adapter that scores worse is never offered (test with fake scores).
+⚬ "Use base model" unloads the adapter; the next turn runs on the base.
+⚬ Changing DEFAULT_MODEL marks adapters stale.
+⚬ No code path lets the adapter's output skip an approval card (test that
+  the gate is called with the adapter active).
+⚬ Non-vacuous: forcing "adapter wins" fails the worse-adapter test.
+⚬ pytest gate; swiftc typecheck.
+Deviations:
+
+
+#121 — Evals that show whether the personal model is better than the original [ ]
+Wave: _ · Agent: _ · Added: 2026-11-18 · Source: user
+Ask: "how would the user know if their model was better than an original
+model? we would need to have evals too" → "add the evals to todo.md".
+DECISIONS (assistant proposal, 2026-11-18, accepted with "add the evals"):
+1. Four checks. Before the switch (a gate): (a) a personal suite on the
+   user's held-out rows, (b) the existing `tool_calls` and `idea_judge`
+   suites as regression. Ongoing: (c) a safety suite, (d) a live comparison.
+2. (a) Personal suite. The held-out set is frozen when #119 splits the
+   corpus, so both models are scored on the same rows. Metrics: offer
+   accuracy (would it have offered: right if the user approved, wrong if
+   they denied or undid it) and draft closeness (similarity of the model's
+   draft to the final text the user approved after editing). 3 repeats,
+   using `run.py`'s `--repeats`.
+3. (b) Regression. Any drop in `tool_calls` or `idea_judge` accuracy
+   beyond run-to-run noise blocks the switch (fine-tuning on one narrow
+   task can break tool calling).
+4. (c) Safety suite, new and static, shipped in the repo: cases where the
+   right answer is no action or a card (prompt-injection mail from #81,
+   delete requests, odd arguments). The adapter must score 100%, like the
+   base model. Runs at the gate and again on every base-model change.
+5. (d) Live comparison. The 10% base-model share from #120 decision 4
+   gives a side-by-side: approval rate and undo rate per model over 14
+   days. If the adapter does worse, switch back to the base model
+   automatically and tell the user (a notice, not a card: going back is
+   the safe direction).
+6. Margin. Small held-out sets (about 30–60 rows) are noisy. The adapter
+   "wins" only with at least +5 points offer accuracy on every repeat and
+   no drop in draft closeness. Otherwise the card says "Not enough
+   difference to tell yet" and keeps the original.
+7. What the user sees: plain numbers, no loss curves. Gate card: "Your
+   model vs the original, on N of your past decisions it hasn't seen:
+   offers you'd approve X% vs Y%, drafts close to what you sent X% vs Y%,
+   general tool skills: no change" with [Use my model] [Keep the
+   original]. A 14-day follow-up notice with the live numbers. Settings
+   keeps each adapter's scores (#120 decision 2).
+8. Held-out and live-comparison rows are the user's data: stored with the
+   #118 corpus under the same opt-in, deleted with it, never in
+   `evals/results/` (which is for the repo's own suites).
+Files:
+⚬ OWNED: new evals/suites/personal.py, new evals/suites/safety.py, new
+  evals/cases/safety.json, new ai/model_compare.py (live comparison +
+  auto switch-back), new tests/test_personal_evals.py.
+⚬ EDITED: evals/run.py (a `--adapter` flag and a callable entry point so
+  the daemon can run suites in-process, not only from the CLI),
+  evals/suites/__init__.py (register), ai/model_eval.py (#120: call the
+  gate), PersonalModelView.swift (#120: scores + follow-up).
+Approach: build (a)–(c) as normal suites so they also run from the CLI
+(`python -m evals.run --suite personal --adapter <path>`), then have #120's
+gate call them. Fallback if draft similarity is too noisy to gate on:
+report it on the card but gate on offer accuracy alone.
+Verify:
+⚬ An adapter with +3 points (below the margin) → "Not enough difference"
+  and no switch offer (test with fake runs).
+⚬ A regression drop in `tool_calls` blocks the switch even when the
+  personal suite wins (test).
+⚬ An adapter that fails one safety case is never offered (test).
+⚬ Live comparison: seeded 14 days where the adapter's undo rate is
+  higher → switched back to base + notice (fake clock).
+⚬ Opt-out of #118 deletes held-out and comparison rows too.
+⚬ Non-vacuous: removing the margin check fails the +3 points test.
+⚬ pytest gate; swiftc typecheck.
 Deviations:
 
 
