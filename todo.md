@@ -66,7 +66,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #114
+Next ID: #115
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -170,6 +170,10 @@ Wave 18 (slot A):
 
 - #102 Quit / screenshot: restart the daemon; Chat "quit Spotify" → one `quit_app` card whose Reasoning names Spotify and com.spotify.client → Approve → Spotify quits. With a TextEdit doc unsaved, "quit TextEdit" → its save prompt appears. "quit Finder" → its card says it will refuse; Approve → refused, Finder stays. "take a screenshot" → one `take_screenshot` card ("Captures everything visible on screen and saves it to ~/Desktop/Screenshot ….png") → Approve → PNG on the Desktop showing other apps' windows (if only the wallpaper: grant Screen Recording, the reply says so). Neither request drafts a new tool. Then, after the runner disables `close_app`, run a generated tool that hits -10004 (or re-enable the old one briefly) → the reply names "macOS refuses this Apple Event to any sandboxed tool…" in one line, not "grant Automation".
 - #103 Recent mail: "what are my last 5 emails?" in Chat → no tool drafted, no card (read-only), five senders/subjects newest first, none from Sent/Junk/Trash. "…in my INBOX" filters. With main on Groq (personal text off) the subjects show as the placeholder. Without Full Disk Access for the daemon → the reply says to grant it.
+
+One fix, 2026-11-17:
+
+- #114 Tool files: restart the daemon; Chat "make a tool sender_list that keeps the senders I unsubscribed from in ~/.bot-inator/senders.json, with track and list actions" → the code card keeps the file under `~/Documents/bot-inator/` → Approve → "track deals@shop.com" and "list my tracked senders" both succeed with the tool left in the sandbox.
 
 ---
 
@@ -918,6 +922,206 @@ Live check (not run): Playwright MCP enabled → "make a tool that opens a
 page and returns its title" → review shows `call_mcp("playwright__...")` →
 run → one card per unmarked Playwright call → the title comes back; the
 privacy ledger shows one `mcp_tool` row per call.
+
+#114 — BUG: a draft that keeps its file in ~/.bot-inator passes the dry run, then fails every call [~] live
+Wave: _ (one fix, branch `fix/dry-run-sandbox-parity`) · Agent: main session, plus one review subagent · Added: 2026-11-17 · Source: user (pasted the installed `auto_unsubscribe`: "this is code a tool generated. does it work?" → "Fix the generator")
+Ask: A tool the app generated and installed on 2026-11-17 never ran: 5 of
+5 calls failed with `FileExistsError: [Errno 17] File exists:
+'~/.bot-inator'`. Make the generator stop producing tools like it.
+Findings (assistant, 2026-11-17; the health log, the provenance file, and
+runs through the real loaders with a throwaway home):
+1. The tool keeps a list in `~/.bot-inator/unsubscribed_senders.json`. The
+   tool sandbox (#22) closes `~/.bot-inator` for reads and writes, so its
+   `Path.mkdir(parents=True, exist_ok=True)` raises before any action runs:
+   `FileExistsError` when the folder exists (the refused `stat` hides that
+   it is a folder), `PermissionError` when it does not.
+2. The path came from the spec. The chat agent wrote "Maintain a local
+   JSON file at ~/.bot-inator/unsubscribed_senders.json" into
+   `expected_logic` (provenance). Nothing told it, or the drafter, that
+   the folder is closed.
+3. The dry run passed the draft: 0 hard, 0 soft, re-run by hand with a
+   track / list / check plan. Its profile (`draft_dry_run._profile`, Phase
+   5.1) is older than #22 and had one file rule, "write only inside the
+   temp dir", so the fake home's `~/.bot-inator` was writable.
+4. The same profile let the dry-run child READ the real `~/.bot-inator`
+   (API token), `~/.ssh` and `agent-daemon/.env` by absolute path. With no
+   network and no write outside the temp dir, the only way out was the
+   result text (repair prompt, `_rejected/`, review notes). Not seen
+   happening; closed by the same change.
+5. The user switched the tool to "Run outside the sandbox" (#104) at
+   16:31; there `track` and `list` work. `check` returns an error by
+   design (Mail is closed to generated tools, #103).
+Findings from the review (a subagent read the first version cold,
+2026-11-17; each one was reproduced before it was fixed):
+6. THE REPO BY ITS `~` PATH. The first version closed `~/Library`,
+   `~/.ssh` and `~/.bot-inator` in the fake home, but the repo only at its
+   real path. A draft writing `~/dev/bot-inator/notes/x.txt` still passed
+   (0 hard) and is refused once installed: the original bug again.
+7. FALSE ALARMS. A returned value that only NAMED a closed folder was a
+   hard problem: the error dict the note itself asks for, when its path
+   comes from `Path.home()`, and a listing of `~` with a `.ssh` in it.
+   The first one would have looped the repair for all three attempts.
+8. MISSED REFUSALS. sqlite ("unable to open database file", no path) got
+   no note; a swallowed refusal reported as "could not create
+   ~/.bot-inator: PermissionError" passed the dry run.
+9. RELATIVE PATHS. The dry-run child started in the temp dir; an installed
+   tool starts in `$HOME`. `Path(".bot-inator").mkdir()` passed.
+10. THE CRITIC compares the code with the spec word for word and did not
+    know the rule: it could report the moved file and send it back.
+11. OLDER, NOT FROM THIS ITEM. `_q` wrote rule paths with `json.dumps`,
+    and `sandbox-exec` does not decode `\uXXXX`. With an accent in the path
+    (a repo under `~/Développement`) the rule names no folder and does
+    nothing, in the installed-tool sandbox too: `cat` on a file under a
+    read-denied folder printed it; with the path written as it is,
+    "Operation not permitted".
+12. A TEMP DIR INSIDE A CLOSED FOLDER (`TMPDIR` under `~/Library`). The
+    first version repeated the real home's write rule after the write
+    allowance, which closes the dry run's own work dir; a failed
+    self-test then skips the dry run without a word.
+DECISIONS (assistant, 2026-11-17 and 18; the user can overturn any):
+1. ONE LIST. `tool_sandbox.closed_paths(home)` is what the profile closes.
+   `build_profile` writes it as its two `deny` lines (`deny_rules`). The
+   dry run takes the REAL home's list, moves every path under that home to
+   the same place in the fake home (`moved_home`: `~/Library`, the repo at
+   `~/dev/bot-inator`, ...), and keeps the real home's read rule for
+   absolute paths. The real home's write rule is not repeated: nothing
+   outside the temp dir is writable there (finding 12).
+2. THE DRY-RUN CHILD STARTS IN THE FAKE HOME, as an installed tool starts
+   in `$HOME`, so a relative path means the same in both.
+3. TELL THE DRAFTER WHY, ONLY ON A FAILED FILE OPERATION. One more hard
+   problem names the folder and says where the file can go
+   (`protected_path_note`): once per run, last, never cut by the
+   5-problem cap. It needs evidence: a raised error that names the path
+   (or whose failing line does), or a returned value that carries an OS
+   error. Naming a closed folder is not a problem (finding 7).
+4. A TOOL'S OWN FILES GO TO `~/Documents/bot-inator/`
+   (`tool_sandbox.TOOL_FILES_DIR`): writable under the profile, and a
+   folder the user can see. Advice in the prompts and the note, not
+   enforced. macOS may ask once for access to Documents; if the user says
+   no, the tool is refused there too.
+5. PROMPTS AT ALL THREE ENDS. The drafter: the last bullet of "Sandbox
+   limits", after the sentence about the built-ins, with its own remedy
+   ("even when `expected_logic` names one of the refused folders"). The
+   chat agent: a sentence in `generate_custom_tool`'s description. The
+   critic: "Do NOT report" a file moved to `~/Documents/bot-inator/`.
+6. FIX `_q` HERE (finding 11). One token, and the dry run's rules are
+   written through it.
+Files: tools/tool_sandbox.py (`closed_paths`, `deny_rules`, `moved_home`,
+`protected_path_note`, `TOOL_FILES_DIR`, `_q`), tools/draft_dry_run.py
+(`_profile`, `_execute`, `refusal_note`, `evaluate_call`, `run_dry_run`),
+tools/meta_tool_generator.py and tools/draft_critic.py (prompt texts), new
+tests/test_dry_run_sandbox_parity.py, tests/test_drafting_prompt_limits.py,
+README, LIVING_SPEC §6.
+Verify:
+⚬ The 2026-11-17 draft fails the dry run with the note; the same draft
+  with its file under `~/Documents/bot-inator/` passes and writes it.
+⚬ `~/Library` readable, not writable; shell start-up files not writable;
+  the bot-inator folder closed at its `~` place; the real `~/.bot-inator`
+  unreadable by absolute path, also with an accent in the path; a relative
+  path means the home folder.
+⚬ Naming a closed folder without using it is not a problem; a swallowed
+  refusal and an error without the path are.
+⚬ Every path the installed-tool profile closes under the home is closed
+  at the same place in the dry-run profile. `_draft_until_clean` with the
+  real dry run repairs the draft in one turn. Non-vacuity per rule 5;
+  pytest gate.
+Results (2026-11-18):
+⚬ `tools/tool_sandbox.py`: `closed_paths` holds the four path lists
+  `build_profile` used to build inline; `deny_rules` writes them (a line
+  with no path is left out: a bare `deny file-read*` would close every
+  file); `moved_home` re-roots them and never returns the home itself.
+  `build_profile` against HEAD: 24 of 24 outputs byte-identical for plain
+  paths; with an accent in the home the only difference is the character
+  written as it is (finding 11).
+⚬ `tools/draft_dry_run.py`: `_profile` adds, after the write allowance,
+  the moved list (write and read) and the real home's read line.
+  `_execute` starts the child in the fake home, returns that home with
+  the probe output, and treats a result line that is not the probe's
+  object as "no result" (a draft that prints its own and exits used to
+  be skipped as a crash, which counted as a pass). `refusal_note` reads
+  the exception and thread errors as raised, the result as returned.
+⚬ `protected_path_note(text, homes, raised=...)`: `~/.ssh` and
+  `~/.bot-inator` by their bare names (they are closed for reading too,
+  where a refusal reads as "missing" or `FileExistsError`); the
+  write-only paths under a home or `~`, next to a permission error, and
+  not mid-path (`/Volumes/x/Users/me`). Names must end there
+  (`~/.bot-inator-tools`); the match ignores case.
+⚬ Prompts: decision 5.
+⚬ The real draft, before → after, same hand-made plan: 0 hard / 0 soft →
+  3 hard (`PermissionError` at the `mkdir`; `FileExistsError` with a
+  fixture in the folder, as on the user's Mac) plus the note. The copy
+  with line 31 changed to `~/Documents/bot-inator`: 0 / 0 both times.
+⚬ `_draft_until_clean` with the real checks and dry run, drafts scripted
+  (the installed source, then the corrected copy; critic off): the
+  installed draft is rejected, the repair turn gets the note, attempt 2
+  goes on to review.
+⚬ The review's cases, first version → now: repo by `~` 0 hard → refused,
+  "write under ~/dev/bot-inator"; the advised error dict 2 hard → 0;
+  listing `~` 2 hard → 0; sqlite 1 hard without the note → with it;
+  swallowed refusal with the `~` spelling 0 hard → hard, with the note;
+  relative path 0 hard → refused, with the note.
+⚬ Tests: new `tests/test_dry_run_sandbox_parity.py` (42) and 3 more in
+  `tests/test_drafting_prompt_limits.py` (the drafter's prompt is checked
+  against the profile's own folder lists, so a new closed folder fails
+  the test until the prompt names it). The 13 related test files: 274
+  passed.
+⚬ Non-vacuity (22 mutations, each restored and the file hash compared;
+  number of failing tests after →): old dry-run profile → 10; repo not
+  closed → 3; real home's read rule dropped → 2; its write rule repeated
+  → 2; rule paths escaped again → 2; a rule line with no path → 1;
+  `moved_home` keeps the home → 1; the whole home closed → 8; child
+  starts in the work dir → 1; non-object result line → 1; no note → 10;
+  swallowed refusal not hard → 2; fake home not passed on → 2; any
+  mention in a returned value counts → 5; write-only folders without a
+  permission error → 6; no end-of-name check → 2; home prefix mid-path →
+  1; case-sensitive → 1; drafter bullet gone → 1; description sentence
+  gone → 1; critic exception gone → 1; folder rules matched by prefix
+  instead of by path component → `test_ordinary_home_folders_are_untouched`.
+⚬ Full suite, first version, on this branch: 1950 passed, 2 failed. Both
+  failures are Swift layout checks that fail on `feature/main-window`
+  itself, which this branch is cut from: `test_swift_embeds_wave15_views`
+  wants `PauseMenu(` and `test_swift_embeds_wave16` wants `Watch me…` in
+  `MenuBarUIApp.swift`; the main-window commits moved them to
+  `MainWindowView.swift` and `StatusItemController.swift`. #114 touches
+  no Swift file and neither test.
+⚬ Full suite, final version, on a clean export of `main` (faac758) with
+  this patch applied: 1971 passed, 0 failed. Run from a scratch copy with
+  the repo's venv; the checkout itself stayed on this branch.
+Deviations:
+⚬ Wider than the ask: finding 4 (the real home's closed folders and the
+  daemon's `.env` are unreadable in the dry run), finding 11 (`_q`, which
+  also changes the installed-tool profile for paths with non-ASCII
+  characters: that is the fix), and decision 2 (where the dry-run child
+  starts: a relative fixture path now resolves, and a file a draft
+  writes by a relative path shows up in the fake home).
+⚬ Not changed: `ai/tool_health.py`. `FileExistsError` on `~/.bot-inator`
+  stays "repairable", which is what lets #90 offer a repair that now goes
+  through the fixed dry run; `PermissionError` there stays "sandbox, not
+  repairable".
+⚬ Not changed: the dry-run planner prompt; no static check for folder
+  names in a draft's source; `best_clean` still returns the LAST draft
+  when attempts run out (older behaviour), so a critic that keeps
+  objecting can still put a `~/.bot-inator` draft in front of the user,
+  now with the note. The critic change is a prompt line: not run with a
+  model.
+⚬ Known limits. A draft that catches the refusal and returns a message
+  with neither the folder's name nor an OS error is not flagged. A draft
+  that only checks `exists()` / `is_file()` in a closed folder sees
+  "missing" (Python 3.13+) and passes unless a planned call writes. A
+  returned OS error that names `~/.ssh` or `~/.bot-inator` for another
+  reason counts as a refusal.
+⚬ Not changed: the installed `auto_unsubscribe` (still marked "Run
+  outside the sandbox"). One line fixes it: line 31 →
+  `Path.home() / "Documents" / "bot-inator"`.
+Live check (needs the user): restart the daemon, critic and dry run on
+(the defaults). Chat: "make a tool sender_list that keeps the senders I
+unsubscribed from in ~/.bot-inator/senders.json, with track and list
+actions" → the code card keeps the file under `~/Documents/bot-inator/`
+(Debug may show "Draft 1/3 … failed dry run: … does not let a generated
+tool read or write ~/.bot-inator … Repairing.") → Approve → "track
+deals@shop.com" and "list my tracked senders" both succeed with the tool
+left in the sandbox. Watch for a critic note that wants the file back in
+`~/.bot-inator` (decision 5, finding 10).
 
 ### New built-in tools
 

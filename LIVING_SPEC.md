@@ -856,7 +856,19 @@ files and the repo (incl. `tools/generated`); reads everywhere except
 `~/.ssh`, `~/.bot-inator`, `agent-daemon/.env`; network only when the AST
 shows a network-module import (`network_allowed`, `sandbox_note` on the
 proxy); exec only Python, `osascript`, `open`, `shortcuts`, `mdfind`. The
-child has a minimal env and `dotenv` disabled. The approval gate and
+child has a minimal env and `dotenv` disabled. The two file rules come from
+`tool_sandbox.closed_paths`. The draft dry run (`tools/draft_dry_run.py`)
+closes the same paths (#114): what lies under the real home at the same
+`~`-relative place in its fake home (`moved_home`; the repo too when it is
+under the home), and the real home's read rule as it is. Its child starts
+in the fake home, as this one starts in `$HOME`. So a draft that keeps a
+file in `~/.bot-inator` fails before review, and the dry run's last hard
+problem tells the drafter why (`protected_path_note`: only on a failed
+file operation, never on a mere mention). The drafting prompt,
+`generate_custom_tool`'s description and the critic's prompt send a tool's
+own files to `~/Documents/bot-inator/` (`TOOL_FILES_DIR`; advice, not
+enforced). Rule paths are written unescaped (`_q`): `sandbox-exec` does not
+decode `\uXXXX`. The approval gate and
 `tool_result` thoughts wrap the proxy unchanged. A built-in the generated
 tool calls runs in the child with no second approval: the user approved the
 source and approves each call of the generated tool. A sandbox that is
