@@ -210,7 +210,7 @@ struct McpServersView: View {
                     }
                 }
                 .listStyle(.inset)
-                .frame(minHeight: 140, maxHeight: 320)
+                .frame(minHeight: 120, maxHeight: .infinity)
             }
         }
         .padding(.horizontal, 14)

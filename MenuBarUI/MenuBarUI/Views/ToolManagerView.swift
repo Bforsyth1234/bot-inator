@@ -137,21 +137,42 @@ struct ToolManagerView: View {
     @State private var pendingDelete: AgentTool?
     /// The row the user clicked; its detail (#61) shows in a sheet.
     @State private var selectedTool: AgentTool?
+    /// Which list fills the page: the tools themselves, or one of the
+    /// related lists (they used to stack under the tools and squeeze them).
+    @State private var pane: Pane = .tools
+
+    enum Pane: String, CaseIterable, Identifiable {
+        case tools = "Tools"
+        case declined = "Declined ideas"
+        case learned = "Learned preferences"
+        case mcp = "MCP servers"
+        var id: String { rawValue }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            Picker("Show", selection: $pane) {
+                ForEach(Pane.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 14)
+            .padding(.bottom, 10)
             Divider()
-            content
-            // DECLINED IDEAS (#56): review and remove remembered denials.
-            Divider()
-            DeclinedIdeasView()
-            // LEARNED PREFERENCES (#72): what card decisions taught the agent.
-            Divider()
-            LearnedPreferencesView()
-            // MCP SERVERS (#69): other apps' local tools, off until enabled.
-            Divider()
-            McpServersView()
+            Group {
+                switch pane {
+                case .tools:
+                    VStack(spacing: 0) { content }
+                case .declined:
+                    DeclinedIdeasView()
+                case .learned:
+                    LearnedPreferencesView()
+                case .mcp:
+                    McpServersView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(minWidth: 440, minHeight: 420)
         .sheet(item: $selectedTool, onDismiss: {
