@@ -224,6 +224,8 @@ async def evaluate(
     """
     mod = suites.get(suite) if isinstance(suite, str) else suite
     name = suite if isinstance(suite, str) else mod.__name__.rsplit(".", 1)[-1]
+    if getattr(mod, "NEVER_SAVE", False):
+        save = False  # #121 decision 8: the user's own data never lands in results/
     if settings is None:
         from config import settings as _settings
 
@@ -320,6 +322,9 @@ def main(argv: Optional[list[str]] = None) -> int:  # pragma: no cover - live ch
         ok, n = _ok_count(entry)
         print(f"  {entry['id']}: {ok}/{n}", flush=True)
 
+    if getattr(suite, "NEVER_SAVE", False):
+        parser.error(f"--suite {args.suite} runs on your own data and is never saved: "
+                     f"use python -m evals.suites.{args.suite}")
     cases = suite.load_cases(args.cases)
     if args.only:
         cases = [c for c in cases if args.only in c["id"]]

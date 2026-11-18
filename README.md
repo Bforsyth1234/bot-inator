@@ -3,9 +3,7 @@
 A local-first macOS agent that watches what you do and offers to help.
 Nothing runs without your approval.
 
-<!-- #91: a 30–60 s demo (a PDF lands in Downloads → card → Approve → it is
-moved) goes here as docs/demo.gif or .mp4, recorded with no personal text
-on screen. -->
+![A PDF lands in Downloads, bot-inator offers to file it, and it is moved after approval](docs/demo.gif)
 
 It notices activity on your Mac (new files in Downloads, incoming mail and
 iMessages, upcoming meetings, app switches), asks an LLM *"how could I help

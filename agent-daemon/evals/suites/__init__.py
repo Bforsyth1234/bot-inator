@@ -7,13 +7,17 @@
 ``async run_case(case, engine, settings) -> dict``
     One model run of one case. Must include ``ok`` (bool) and ``got``
     (the verdict, used to spot cases that flip between runs).
+
+``personal`` (#121) builds its cases from the training corpus, not a file,
+and its results are never saved: its ``load_cases`` refuses and
+``NEVER_SAVE`` is set; run it with ``evals.suites.personal.evaluate_personal``.
 """
 from __future__ import annotations
 
 from importlib import import_module
 from types import ModuleType
 
-SUITES = ("idea_judge", "tool_calls", "safety")
+SUITES = ("idea_judge", "tool_calls", "safety", "personal")
 
 
 def get(name: str) -> ModuleType:

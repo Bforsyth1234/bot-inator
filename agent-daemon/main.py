@@ -453,6 +453,38 @@ async def lifespan(app: FastAPI):
     )
     orchestrator.training_corpus = app.state.training_corpus
     app.state.action_journal.add_undo_listener(app.state.training_corpus.undo_listener)
+    # #119: offer to train a personal model once the corpus is big enough.
+    from ai import personal_training  # noqa: WPS433
+    from ai.mlx_engine import DEFAULT_MODEL as _MLX_DEFAULT, MLXEngine as _MLX  # noqa: WPS433
+
+    def _training_base_model() -> str:
+        # A LoRA adapter sits on the local MLX model, even when chat uses a cloud provider.
+        return engine.model_name if isinstance(engine, _MLX) else _MLX_DEFAULT
+
+    async def _training_finished(status: dict) -> None:
+        state = status.get("state")
+        if state == "done":
+            body = "Your personal model finished training. It is checked against the original before it is used."
+        elif state == "failed":
+            body = f"Training stopped: {status.get('error') or 'unknown error'}. Nothing changed."
+        else:
+            return
+        orchestrator.publish_notice({
+            "id": f"training_{state}:{status.get('adapter_dir') or ''}", "level": "info",
+            "title": "Personal model", "body": body,
+        })
+
+    app.state.personal_training = personal_training.PersonalTraining(
+        app.state.training_corpus, base_model=_training_base_model,
+        on_finished=_training_finished,
+    )
+    orchestrator.personal_training = app.state.personal_training
+    # #118/#79: approved tools never run in 30 days count against their offer.
+    try:
+        for _offer_id in idea_outcomes.never_run_offer_ids():
+            app.state.training_corpus.mark_tool_never_run(_offer_id)
+    except Exception:
+        logger.exception("training corpus: never-run sweep failed")
     # #90: generated-tool health; repeated failures offer a repair.
     from ai import tool_health  # noqa: WPS433
 
@@ -644,6 +676,10 @@ async def lifespan(app: FastAPI):
             app.state.action_journal.close()
         except Exception:
             logger.exception("Error closing the action journal")
+        try:
+            await app.state.personal_training.cancel()  # #119: never leave a child training
+        except Exception:
+            logger.exception("Error stopping personal training")
         try:
             app.state.training_corpus.close()
         except Exception:
