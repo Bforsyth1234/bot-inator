@@ -116,6 +116,7 @@ Sandbox limits (CRITICAL — your tool runs under macOS sandbox-exec; these fail
   - look at the screen or a window and describe or read what it shows (charts, images, layouts, text in a picture): the built-in `look_at_screen(question, target)`;
   - list recent emails: the built-in `list_recent_emails(count, mailbox)`; one email's body: `read_email(message_id)`.
 * If the requested tool needs one of these anyway, return ``{"status": "error", "message": "<which built-in to call instead>"}`` rather than code that cannot work.
+* Folders: it CANNOT read or write `~/.bot-inator` or `~/.ssh`, and CANNOT write under `~/Library` or to shell start-up files (`~/.zshrc`, `~/.bash_profile`, ...). Keep files your tool creates for itself (state, lists, logs) under `~/Documents/bot-inator/` (create the folder if it is missing), even when `expected_logic` names one of the refused folders. Only when the task needs a refused folder itself (not a file of the tool's own), return ``{"status": "error", "message": "<a generated tool cannot use that folder>"}``.
 
 User-visible output rules:
 * NEVER use `print()` to communicate with the user. The daemon's stdout is not a user interface.
@@ -1076,6 +1077,10 @@ def generate_custom_tool(
     generated tool runs in a sandbox that cannot do those, so call the
     built-ins ``quit_app``, ``take_screenshot``, ``look_at_screen``,
     ``list_recent_emails`` and ``read_email`` instead.
+    When the tool needs a file of its own (a list, saved state), name a
+    path under ``~/Documents/bot-inator/`` in ``expected_logic``: the
+    sandbox refuses ``~/.bot-inator`` and ``~/.ssh``, and writing under
+    ``~/Library``.
     The function drives the main MLX
     engine to write a stdlib-only Python module, runs static safety
     checks on the draft, asks the user to review (and optionally edit)
