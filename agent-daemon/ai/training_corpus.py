@@ -46,6 +46,14 @@ the choice in the DB, so every later call (and #120's gate) scores on the
 same rows. Rows added after a freeze are training rows until a new split is
 frozen (``refreeze=True``).
 
+Live comparison (#121 decision 5, 8): the ``comparisons`` table holds one
+row per offer shown while a personal model is active, saying which model
+wrote it (``base`` or ``adapter``), the verdict and whether it was undone.
+It lives here so the same opt-in covers it and :meth:`delete_all` /
+:meth:`opt_out` delete it. :class:`ai.model_compare.LiveComparison` reads
+and writes it; :meth:`record` and :meth:`mark_undone` also fill in the
+verdict / undo of a comparison row with the same offer id.
+
 ``path=None`` keeps the corpus in memory (tests); ``clock`` is injectable;
 ``enabled`` / ``keep_mail_text`` are callables (default: the live settings
 readers below), so the store needs nothing from ``user_settings`` writes.
@@ -139,7 +147,18 @@ CREATE TABLE IF NOT EXISTS heldout (
     row_id TEXT NOT NULL,
     PRIMARY KEY (split_id, row_id)
 );
+CREATE TABLE IF NOT EXISTS comparisons (
+    offer_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    verdict TEXT,
+    verdict_at REAL,
+    undone INTEGER NOT NULL DEFAULT 0,
+    undone_at REAL
+);
+CREATE INDEX IF NOT EXISTS comparisons_created ON comparisons(created_at);
 """
+COMPARISON_SOURCES = ("base", "adapter")
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +467,8 @@ class TrainingCorpus:
                 " mail_stripped) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 values,
             )
+            if offer_id and verdict in TRAINABLE_VERDICTS:
+                self._comparison_verdict(db, offer_id, verdict != "denied", now)
             db.commit()
         return self.get(row_id)
 
@@ -480,8 +501,12 @@ class TrainingCorpus:
         """The approved action was undone soon after (within
         :data:`UNDO_SOON_SECONDS` of the decision): a negative for #119.
         Matches by offer id (#79) or the journal entry's event id (#83).
-        Returns the number of rows marked."""
-        return self._mark("undone", offer_id, event_id, UNDO_SOON_SECONDS)
+        Returns the number of rows marked. A live-comparison row with the
+        same offer id is marked undone too (not counted)."""
+        n = self._mark("undone", offer_id, event_id, UNDO_SOON_SECONDS)
+        if offer_id:
+            self.mark_comparison_undone(offer_id)
+        return n
 
     def mark_tool_never_run(self, offer_id: str) -> int:
         """The tool this approved offer installed was never run (#79)."""
@@ -659,6 +684,7 @@ class TrainingCorpus:
             db.execute("DELETE FROM rows")
             db.execute("DELETE FROM heldout")
             db.execute("DELETE FROM splits")
+            db.execute("DELETE FROM comparisons")  # #121 decision 8
             db.commit()
             db.execute("VACUUM")
             return n
@@ -667,3 +693,95 @@ class TrainingCorpus:
         """The user turned the opt-in off; "delete what's stored" defaults
         to yes (decision 3). Deletes everything, held-out included."""
         return self.delete_all() if delete_stored else 0
+
+    # ---- live comparison (#121 decision 5) ---------------------------------
+
+    def record_comparison(self, offer_id: str, source: str, *, at: Optional[float] = None) -> bool:
+        """Note which model (``base`` / ``adapter``) wrote offer ``offer_id``.
+        Nothing is written (False) while the user has not opted in, as for
+        :meth:`record`. A second call for the same offer keeps the first."""
+        if source not in COMPARISON_SOURCES:
+            raise ValueError(f"source must be one of {COMPARISON_SOURCES}")
+        if not offer_id:
+            return False
+        try:
+            if not self.enabled():
+                return False
+        except Exception:
+            logger.exception("training corpus opt-in check failed; not recording")
+            return False
+        when = float(self.clock() if at is None else at)
+        with self._lock:
+            db = self._conn()
+            cur = db.execute(
+                "INSERT OR IGNORE INTO comparisons (offer_id, source, created_at) VALUES (?,?,?)",
+                (str(offer_id), source, when),
+            )
+            db.commit()
+            return cur.rowcount > 0
+
+    @staticmethod
+    def _comparison_verdict(db: sqlite3.Connection, offer_id: str, approved: bool, at: float) -> int:
+        return db.execute(
+            "UPDATE comparisons SET verdict = ?, verdict_at = ? WHERE offer_id = ?",
+            ("approved" if approved else "denied", at, str(offer_id)),
+        ).rowcount
+
+    def set_comparison_verdict(self, offer_id: str, approved: bool, *, at: Optional[float] = None) -> bool:
+        """The user approved (or edited and approved) / denied the offer."""
+        if not offer_id or not self._exists():
+            return False
+        with self._lock:
+            db = self._conn()
+            n = self._comparison_verdict(db, offer_id, bool(approved),
+                                         float(self.clock() if at is None else at))
+            db.commit()
+            return n > 0
+
+    def mark_comparison_undone(self, offer_id: str, *, at: Optional[float] = None) -> bool:
+        """The approved action from this offer was undone."""
+        if not offer_id or not self._exists():
+            return False
+        with self._lock:
+            db = self._conn()
+            cur = db.execute(
+                "UPDATE comparisons SET undone = 1, undone_at = ? WHERE offer_id = ?"
+                " AND verdict = 'approved' AND undone = 0",
+                (float(self.clock() if at is None else at), str(offer_id)),
+            )
+            db.commit()
+            return cur.rowcount > 0
+
+    def comparison_rows(self, *, since: Optional[float] = None) -> list[dict[str, Any]]:
+        """Live-comparison rows (offers shown at or after ``since``), oldest first."""
+        if not self._exists():
+            return []
+        sql, args = "SELECT * FROM comparisons", []
+        if since is not None:
+            sql += " WHERE created_at >= ?"
+            args.append(float(since))
+        sql += " ORDER BY created_at, rowid"
+        with self._lock:
+            out = []
+            for r in self._conn().execute(sql, args):
+                row = {k: r[k] for k in r.keys()}
+                row["undone"] = bool(row["undone"])
+                out.append(row)
+            return out
+
+    def comparison_count(self) -> int:
+        if not self._exists():
+            return 0
+        with self._lock:
+            return int(self._conn().execute("SELECT COUNT(*) FROM comparisons").fetchone()[0])
+
+    def delete_comparisons(self) -> int:
+        """Drop the live-comparison rows only (e.g. when the adapter they
+        measured is retired). Returns rows deleted."""
+        if not self._exists():
+            return 0
+        with self._lock:
+            db = self._conn()
+            n = db.execute("DELETE FROM comparisons").rowcount
+            db.commit()
+            return n

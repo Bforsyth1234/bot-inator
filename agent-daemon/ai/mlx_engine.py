@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
 import threading
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,59 @@ EVENT_ANALYSIS_SYSTEM_PROMPT = (
 THINK_BLOCK_RE = re.compile(
     r"^(?:(?!<think>).)*?</think>|<think>.*?</think>", re.DOTALL
 )
+
+
+# #120: mlx-lm 0.32 adapter layers whose output is ``base(x) + scale * z``
+# (``mlx_lm/tuner/lora.py``): ``scale = 0`` gives exactly the base output,
+# so the adapter can be switched off for a turn without reloading. DoRA
+# layers (``tuner/dora.py``) also rescale by a learned magnitude ``m`` and a
+# full fine-tune replaces weights, so neither can be switched off this way:
+# :meth:`MLXEngine.using_base` falls back to reloading for those.
+LORA_LAYER_CLASSES = frozenset({"LoRALinear", "LoRASwitchLinear", "LoRAEmbedding"})
+UNTOGGLEABLE_LAYER_CLASSES = frozenset({"DoRALinear", "DoRAEmbedding"})
+
+
+def _walk_modules(root: Any) -> Iterator[Any]:
+    """Every sub-module of ``root`` (an ``mlx.nn.Module`` tree, or any
+    object tree of dicts / lists / attributes in tests), each once."""
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, (list, tuple)):
+            stack.extend(node)
+            continue
+        if isinstance(node, dict) and type(node) is dict:
+            stack.extend(node.values())
+            continue
+        if isinstance(node, (str, bytes, int, float, bool)):
+            continue
+        yield node
+        children = getattr(node, "children", None)
+        if callable(children):  # mlx.nn.Module
+            try:
+                stack.extend(children().values())
+                continue
+            except Exception:  # pragma: no cover - not an nn.Module after all
+                pass
+        if hasattr(node, "__dict__"):
+            stack.extend(v for k, v in vars(node).items() if not k.startswith("_"))
+
+
+def adapter_layers(model: Any) -> tuple[list[Any], list[Any]]:
+    """``(toggleable, untoggleable)`` adapter layers in ``model``, by the
+    mlx-lm class names above."""
+    on, off = [], []
+    for mod in _walk_modules(model):
+        name = type(mod).__name__
+        if name in LORA_LAYER_CLASSES and hasattr(mod, "scale"):
+            on.append(mod)
+        elif name in UNTOGGLEABLE_LAYER_CLASSES:
+            off.append(mod)
+    return on, off
 
 
 def _clear_cache_fn(mx: Any) -> Any:
@@ -66,6 +120,10 @@ class MLXEngine:
     # own model weights, because they share the same physical device.
     _metal_lock: threading.Lock = threading.Lock()
 
+    # #120: this engine can carry a LoRA adapter (routes check this, not
+    # the class, so tests can use fakes).
+    supports_adapters: bool = True
+
     def __init__(
         self, model_name: str = DEFAULT_MODEL, adapter_path: Optional[str] = None
     ) -> None:
@@ -81,6 +139,8 @@ class MLXEngine:
         self.generation_lock: threading.Lock = MLXEngine._metal_lock
         self._gen_count: int = 0
         self._loaded: bool = False
+        # #120: saved ``scale`` per LoRA layer while the adapter is off.
+        self._saved_scales: Optional[list[tuple[Any, Any]]] = None
 
     @property
     def loaded(self) -> bool:
@@ -95,6 +155,86 @@ class MLXEngine:
         """The adapter folder applied to the loaded model, or ``None`` (base
         model only, or nothing loaded)."""
         return self.adapter_path if self._loaded else None
+
+    @property
+    def adapter_active(self) -> bool:
+        """True while the loaded model's adapter is applied (loaded, an
+        adapter set, and not switched off by :meth:`using_base`)."""
+        return bool(self._loaded and self.adapter_path and self._saved_scales is None)
+
+    def adapter_toggleable(self) -> bool:
+        """True when the loaded adapter can be switched off in place (plain
+        LoRA layers only; see :data:`LORA_LAYER_CLASSES`)."""
+        if not (self._loaded and self.adapter_path):
+            return False
+        on, off = adapter_layers(self._model)
+        return bool(on) and not off
+
+    def _set_adapter_off_locked(self) -> int:
+        """Caller holds :attr:`generation_lock`. Zero every LoRA scale and
+        remember the exact old values. Returns the number of layers."""
+        if self._saved_scales is not None:
+            return len(self._saved_scales)
+        on, _ = adapter_layers(self._model)
+        saved = [(layer, layer.scale) for layer in on]
+        for layer, _ in saved:
+            layer.scale = 0.0
+        self._saved_scales = saved
+        return len(saved)
+
+    def _set_adapter_on_locked(self) -> None:
+        """Caller holds :attr:`generation_lock`. Put back the saved scales
+        (the same objects, so the values are exact)."""
+        saved, self._saved_scales = self._saved_scales, None
+        for layer, value in saved or ():
+            layer.scale = value
+
+    def _toggle(self, off: bool) -> int:
+        with self.generation_lock:  # no generation sees a half-toggled model
+            if off:
+                return self._set_adapter_off_locked()
+            self._set_adapter_on_locked()
+            return 0
+
+    @contextlib.asynccontextmanager
+    async def using_base(self) -> AsyncIterator[str]:
+        """Run the body on the base model, then put the adapter back (#120
+        decision 4: the 10% base share). Yields how: ``"none"`` (no adapter
+        loaded, nothing to do), ``"toggle"`` (LoRA scales set to 0 under the
+        generation lock and restored exactly afterwards; no reload) or
+        ``"reload"`` (DoRA / full fine-tune: swapped to the base model and
+        back, which reloads twice).
+
+        Holds the engine's swap lock for the whole body, so a swap (e.g.
+        "Use base model") waits until the turn is done. The body must not
+        call :meth:`swap`, :meth:`load` or :meth:`unload` on this engine.
+        Not re-entrant.
+        """
+        if not self.adapter_path:
+            yield "none"
+            return
+        async with self._lock:
+            if not self._loaded:
+                await self._load_locked(self.model_name)
+            on, off = adapter_layers(self._model)
+            if on and not off:
+                await asyncio.to_thread(self._toggle, True)
+                try:
+                    yield "toggle"
+                finally:
+                    await asyncio.to_thread(self._toggle, False)
+                return
+            # Fallback: reload without the adapter, then with it.
+            adapter = self.adapter_path
+            await self._unload_locked()
+            self.adapter_path = None
+            await self._load_locked(self.model_name)
+            try:
+                yield "reload"
+            finally:
+                await self._unload_locked()
+                self.adapter_path = adapter
+                await self._load_locked(self.model_name)
 
     @property
     def model(self) -> Any:
@@ -253,6 +393,7 @@ class MLXEngine:
         if not self._loaded:
             return
         logger.info("Unloading MLX model: %s", self.model_name)
+        self._saved_scales = None
         self._model = None
         self._tokenizer = None
         self._loaded = False

@@ -336,3 +336,382 @@ def test_mlx_engine_swap_sets_or_drops_the_adapter(fake_mlx) -> None:
     assert fake_mlx[-1] == ("base/model", {}) and engine.current_adapter is None
     asyncio.run(engine.swap("other/model"))
     assert len(fake_mlx) == 4 and engine.current_model == "other/model"
+
+
+# ===========================================================================
+# #121 part 2: the personal suite, the switch gate, the live comparison
+# ===========================================================================
+
+import random  # noqa: E402
+
+from ai import model_compare  # noqa: E402
+from ai.model_compare import LiveComparison, compare_gate  # noqa: E402
+from ai.training_corpus import STRIPPED_PROMPT, TrainingCorpus  # noqa: E402
+from evals.suites import personal  # noqa: E402
+
+
+def _row(rid, verdict, tool="draft_email", final=None, outcome=None, prompt="Reply to Sam",
+         event_type="user_message"):
+    return {"id": rid, "verdict": verdict, "tool_name": tool, "prompt": prompt,
+            "event_type": event_type, "final_args": final, "outcome": outcome,
+            "card": {"args": final or {}}}
+
+
+# --- personal suite ---------------------------------------------------------
+
+def test_personal_cases_from_rows_and_skips() -> None:
+    rows = [
+        _row("a", "approved", final={"to": "sam@x", "body": "See you at 3", "subject": "Re: lunch"}),
+        _row("d", "denied"),
+        _row("u", "approved", outcome="undone", final={"body": "x"}),
+        _row("s", "approved", prompt=STRIPPED_PROMPT),
+        _row("e", "approved", prompt=""),
+        _row("g", "approved", tool="my_generated_tool"),
+        _row("t", "timed_out"),
+    ]
+    cases, skipped = personal.build_cases(rows, tool_names={"draft_email"})
+    assert [(c["id"], c["expected"]) for c in cases] == [("a", "offer"), ("d", "no_offer"),
+                                                         ("u", "no_offer")]
+    assert cases[0]["final_text"] == {"body": "See you at 3", "subject": "Re: lunch"}
+    assert cases[2]["final_text"] == {}  # a negative has no draft to match
+    assert {s["id"] for s in skipped} == {"s", "e", "g", "t"}
+
+
+def test_personal_score_offer_accuracy() -> None:
+    offer = {"tool": "draft_email", "expected": "offer", "final_text": {"body": "See you at 3"}}
+    refuse = {"tool": "draft_email", "expected": "no_offer", "final_text": {}}
+    draft = [{"tool": "read_email", "args": {}},
+             {"tool": "draft_email", "args": {"body": "See you at 3"}}]
+    assert personal.score(offer, draft)["ok"] is True
+    assert personal.score(offer, draft)["closeness"] == 1.0
+    assert personal.score(offer, [{"tool": "read_email", "args": {}}])["ok"] is False
+    assert personal.score(offer, [])["closeness"] is None
+    assert personal.score(refuse, draft)["ok"] is False
+    assert personal.score(refuse, [{"tool": "read_email", "args": {}}])["ok"] is True
+
+
+def test_personal_closeness_math() -> None:
+    import difflib
+
+    assert personal.similarity("Hello  World", "hello world") == 1.0
+    assert personal.similarity("", "") == 1.0
+    assert personal.similarity("abc", "") == 0.0
+    want = difflib.SequenceMatcher(None, "see you at 3", "see you at 4", autojunk=False).ratio()
+    assert personal.similarity("See you at 3", "see you at 4") == pytest.approx(want)
+    value, fields = personal.closeness({"body": "see you at 3"},
+                                       {"body": "see you at 4", "subject": "lunch"})
+    assert fields["subject"] == 0.0  # left out by the model
+    assert value == pytest.approx(want / 2)
+
+
+def test_personal_run_case_with_a_fake_model() -> None:
+    cases, _ = personal.build_cases([
+        _row("a", "approved", final={"to": "sam@x.com", "subject": "Lunch", "body": "See you at 3"}),
+        _row("d", "denied", final=None),
+    ], tool_names={"draft_email"})
+    call = ("draft_email", {"to": "sam@x.com", "subject": "Lunch", "body": "See you at 3pm"})
+
+    def run(case, *steps):
+        return asyncio.run(personal.run_case(case, None, SETTINGS, model=_scripted_model(*steps)))
+
+    approved = run(cases[0], call)
+    assert approved["ok"] is True and approved["got"] == "offer"
+    assert 0.9 < approved["closeness"] < 1.0
+    assert approved["tools"] == ["draft_email"]
+    assert run(cases[0])["ok"] is False
+    denied = run(cases[1], call)
+    assert denied["ok"] is False and "refused" in denied["reason"]
+    assert run(cases[1])["ok"] is True
+
+
+def test_personal_never_saves_and_reads_the_heldout_rows(tmp_path, monkeypatch) -> None:
+    corpus = TrainingCorpus(None, enabled=lambda: True, keep_mail_text=lambda: True)
+    for i in range(20):
+        corpus.record(tool_name="draft_email", verdict="approved" if i % 2 else "denied",
+                      tool_args={"kwargs": {"body": f"note {i}"}}, prompt=f"prompt {i}")
+    corpus.freeze_split()
+    held = {r["id"] for r in corpus.heldout_rows()}
+    assert held
+
+    mod = types.ModuleType("evals.suites.personal")
+    mod.role = personal.role
+
+    async def run_case(case, engine, settings):
+        return personal.score(case, [{"tool": "draft_email", "args": {"body": "note"}}])
+
+    mod.run_case = run_case
+    monkeypatch.setattr(eval_run, "RESULTS_DIR", tmp_path)
+    saves = []
+    monkeypatch.setattr(eval_run, "_save_result", lambda *a, **k: saves.append(a))
+    result = asyncio.run(personal.evaluate_personal(corpus, engine=FakeEngine(), settings=SETTINGS,
+                                                    repeats=2, suite=mod))
+    assert saves == [] and "saved_to" not in result and list(tmp_path.iterdir()) == []
+    assert {c["id"] for c in result["cases"]} == held
+    assert result["suite"] == "personal" and result["personal"]["cases"] == len(held)
+    with pytest.raises(ValueError, match="evals/results"):
+        personal.load_cases()
+    assert "personal" in suites.SUITES and suites.get("personal").NEVER_SAVE is True
+
+
+def test_personal_summary_per_repeat() -> None:
+    result = {"cases": [
+        {"id": "a", "expected": "offer", "runs": [{"ok": True, "closeness": 0.8},
+                                                  {"ok": False, "closeness": None}]},
+        {"id": "b", "expected": "no_offer", "runs": [{"ok": True}, {"ok": True}]},
+    ]}
+    p = personal.personal_summary(result)
+    assert p["offer_per_repeat"] == [1.0, 0.5] and p["offer_accuracy"] == 0.75
+    assert p["closeness"] == 0.8 and p["closeness_n"] == 1
+    assert p["closeness_per_repeat"] == [0.8, None]
+
+
+# --- the gate ---------------------------------------------------------------
+
+def _personal_result(per_repeat_ok, n=40, closeness=0.7):
+    """n cases; per_repeat_ok[i] cases right on repeat i."""
+    cases = []
+    for c in range(n):
+        runs = [{"ok": c < k, "closeness": closeness if c < k else None} for k in per_repeat_ok]
+        cases.append({"id": f"r{c}", "expected": "offer", "runs": runs})
+    return {"suite": "personal", "cases": cases}
+
+
+def _suite_result(name, ok_runs, cases=40, repeats=3):
+    runs = cases * repeats
+    return {"suite": name, "summary": {"cases": cases, "runs": runs, "ok_runs": ok_runs,
+                                       "accuracy": round(ok_runs / runs, 3)}}
+
+
+def _safety(case_runs):
+    """{case_id: [run, ...]} with runs "safe" / "unsafe:<tool>" / "error"."""
+    def run(spec):
+        if spec == "error":
+            return {"ok": False, "error": "BadRequestError: tool_use_failed"}
+        if spec == "safe":
+            return {"ok": True, "calls": [{"tool": "read_email", "args": {}}]}
+        return {"ok": False, "calls": [{"tool": spec.split(":", 1)[1], "args": {}}]}
+    return {"suite": "safety", "cases": [{"id": cid, "runs": [run(s) for s in specs]}
+                                         for cid, specs in case_runs.items()]}
+
+
+SAFE_BASE = _safety({"inj": ["safe"] * 3, "del": ["unsafe:move_file", "safe", "unsafe:move_file"],
+                     "odd": ["unsafe:open_url"] * 3})
+REG = [_suite_result("tool_calls", 100), _suite_result("idea_judge", 90)]
+
+
+def _gate(base, adapter, reg_adapter=REG, safety_adapter=SAFE_BASE, **kw):
+    return compare_gate(base, adapter, REG, reg_adapter, SAFE_BASE, safety_adapter, **kw)
+
+
+def test_gate_adapter_wins_with_margin_on_every_repeat() -> None:
+    out = _gate(_personal_result([20, 20, 20]), _personal_result([24, 24, 22]))
+    assert out["verdict"] == "adapter_wins"
+    n = out["numbers"]
+    assert n["offer"]["delta_points_per_repeat"] == [10.0, 10.0, 5.0]
+    card = n["card"]
+    assert card["n"] == 40 and card["offers"] == {"adapter": 58, "base": 50}
+    assert card["general_tool_skills"] == "no change"
+    assert card["lines"][0] == "Your model vs the original, on 40 of your past decisions it hasn't seen:"
+    assert "offers you'd approve 58% vs 50%" in card["lines"]
+    assert "drafts close to what you sent 70% vs 70%" in card["lines"]
+    assert "general tool skills: no change" in card["lines"]
+
+
+def test_gate_three_points_is_not_enough_difference() -> None:
+    # +3 points on every repeat (40 cases: 1.2 cases): below the 5-point margin.
+    base = _personal_result([20, 20, 20], n=100)
+    adapter = _personal_result([23, 23, 23], n=100)
+    assert _gate(base, adapter)["verdict"] == "not_enough_difference"
+    # One weak repeat is enough to keep the original.
+    assert _gate(_personal_result([20, 20, 20]), _personal_result([24, 24, 21]))["verdict"] \
+        == "not_enough_difference"
+
+
+def test_gate_closeness_drop_and_worse_adapter() -> None:
+    base = _personal_result([20, 20, 20], closeness=0.8)
+    dropped = _personal_result([26, 26, 26], closeness=0.7)
+    assert _gate(base, dropped)["verdict"] == "adapter_worse"
+    # #121 fallback: report closeness, gate on offers alone.
+    assert _gate(base, dropped, gate_on_closeness=False)["verdict"] == "adapter_wins"
+    assert _gate(base, _personal_result([26, 26, 26], closeness=0.795))["verdict"] == "adapter_wins"
+    assert _gate(base, _personal_result([15, 15, 15], closeness=0.8))["verdict"] == "adapter_worse"
+
+
+def test_gate_regression_drop_blocks_even_when_personal_wins() -> None:
+    base, adapter = _personal_result([20, 20, 20]), _personal_result([30, 30, 30])
+    # 40 cases x 3 repeats: noise is max(3 runs, ceil(2.4)) = 3 runs.
+    noisy = [_suite_result("tool_calls", 97), _suite_result("idea_judge", 90)]
+    assert _gate(base, adapter, reg_adapter=noisy)["verdict"] == "adapter_wins"
+    dropped = [_suite_result("tool_calls", 96), _suite_result("idea_judge", 90)]
+    out = _gate(base, adapter, reg_adapter=dropped)
+    assert out["verdict"] == "blocked_regression"
+    assert out["numbers"]["regression"]["blocked"] == ["tool_calls"]
+    assert out["numbers"]["card"]["general_tool_skills"] == "worse"
+    missing = [_suite_result("tool_calls", 100)]
+    assert _gate(base, adapter, reg_adapter=missing)["verdict"] == "blocked_regression"
+
+
+def test_gate_adapter_newly_failing_a_safe_case_is_blocked() -> None:
+    base, adapter = _personal_result([20, 20, 20]), _personal_result([30, 30, 30])
+    worse = _safety({"inj": ["safe", "unsafe:draft_email", "safe"],
+                     "del": ["unsafe:move_file", "safe", "unsafe:move_file"],
+                     "odd": ["unsafe:open_url"] * 3})
+    out = _gate(base, adapter, safety_adapter=worse)
+    assert out["verdict"] == "blocked_safety"
+    assert out["numbers"]["safety"]["newly_failing"] == ["inj"]
+    assert any("inj" in line for line in out["numbers"]["card"]["lines"])
+
+
+def test_gate_adapter_matching_the_base_failures_is_not_blocked() -> None:
+    base, adapter = _personal_result([20, 20, 20]), _personal_result([30, 30, 30])
+    same = _safety({"inj": ["safe"] * 3, "del": ["safe", "unsafe:move_file", "unsafe:move_file"],
+                    "odd": ["unsafe:open_url", "unsafe:open_url", "unsafe:open_url"]})
+    out = _gate(base, adapter, safety_adapter=same)
+    assert out["verdict"] == "adapter_wins"
+    assert out["numbers"]["safety"]["ok"] is True
+    # More unsafe runs on a case the base already fails -> blocked.
+    more = _safety({"inj": ["safe"] * 3, "del": ["unsafe:move_file"] * 3,
+                    "odd": ["unsafe:open_url"] * 3})
+    assert _gate(base, adapter, safety_adapter=more)["numbers"]["safety"]["worse"] == ["del"]
+    # Same count but a new unsafe tool the base never called -> blocked.
+    new_tool = _safety({"inj": ["safe"] * 3,
+                        "del": ["unsafe:move_file", "safe", "unsafe:quit_app"],
+                        "odd": ["unsafe:open_url"] * 3})
+    out = _gate(base, adapter, safety_adapter=new_tool)
+    assert out["verdict"] == "blocked_safety"
+    assert out["numbers"]["safety"]["new_unsafe_calls"] == {"del": ["quit_app"]}
+
+
+def test_gate_errored_safety_runs_are_not_unsafe() -> None:
+    base, adapter = _personal_result([20, 20, 20]), _personal_result([30, 30, 30])
+    errored = _safety({"inj": ["safe", "error", "error"],
+                       "del": ["error", "error", "error"],
+                       "odd": ["unsafe:open_url", "error", "unsafe:open_url"]})
+    out = _gate(base, adapter, safety_adapter=errored)
+    s = out["numbers"]["safety"]
+    assert out["verdict"] == "adapter_wins" and s["ok"] is True
+    assert s["errors"] == {"base": 0, "adapter": 6}
+    assert s["unscoreable"] == ["del"]
+    assert s["adapter_accuracy"] == pytest.approx(1 / 3)  # 1 safe of 3 scoreable runs
+    assert _gate(base, adapter, safety_adapter=None)["verdict"] == "blocked_safety"
+
+
+def test_gate_refuses_different_heldout_rows() -> None:
+    with pytest.raises(ValueError, match="held-out"):
+        _gate(_personal_result([1], n=3), _personal_result([1], n=4))
+
+
+# --- live comparison --------------------------------------------------------
+
+class Clock:
+    def __init__(self, t=1_800_000_000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def _live(enabled=True):
+    clock = Clock()
+    corpus = TrainingCorpus(None, enabled=lambda: enabled, clock=clock)
+    return LiveComparison(corpus, clock=clock, rng=random.Random(7)), corpus, clock
+
+
+def _seed(live, clock, source, n, approved, undone, start=0):
+    for i in range(n):
+        oid = f"{source}-{start + i}"
+        clock.t += 3600
+        live.record(oid, source)
+        live.record_verdict(oid, i < approved)
+        if i < undone:
+            live.record_undone(oid)
+
+
+def test_pick_source_share_and_no_adapter() -> None:
+    live, _, _ = _live()
+    picks = [live.pick_source() for _ in range(2000)]
+    assert 0.07 < picks.count("base") / len(picks) < 0.13
+    assert set(picks) == {"base", "adapter"}
+    assert all(live.pick_source(adapter_active=False) == "base" for _ in range(50))
+
+
+def test_live_comparison_switches_back_when_adapter_is_undone_more() -> None:
+    live, _, clock = _live()
+    # 14 days: base 15 cards (12 approved, 1 undone), adapter 120 (96 approved, 20 undone).
+    _seed(live, clock, "base", 15, approved=12, undone=1)
+    _seed(live, clock, "adapter", 120, approved=96, undone=20)
+    rep = live.report()
+    assert rep["base"]["approval_rate"] == pytest.approx(0.8)
+    assert rep["adapter"]["undo_rate"] == pytest.approx(20 / 96)
+    assert rep["base"]["undo_rate"] == pytest.approx(1 / 12)
+    assert live.should_switch_back() is True
+    assert "Switched back to the original model" in live.notice_text()
+    # Beyond the window the same cards no longer count.
+    clock.t += 30 * model_compare.DAY
+    assert live.should_switch_back() is False
+
+
+def test_live_comparison_approval_drop_and_equal_models() -> None:
+    live, _, clock = _live()
+    _seed(live, clock, "base", 12, approved=9, undone=0)
+    _seed(live, clock, "adapter", 100, approved=55, undone=0)
+    assert live.should_switch_back() is True  # 75% vs 55%
+    live2, _, clock2 = _live()
+    _seed(live2, clock2, "base", 12, approved=9, undone=0)
+    _seed(live2, clock2, "adapter", 100, approved=72, undone=5)
+    assert live2.should_switch_back() is False
+    assert "Keeping your model" in live2.notice_text()
+
+
+def test_live_comparison_small_samples_never_switch() -> None:
+    live, _, clock = _live()
+    _seed(live, clock, "base", 5, approved=5, undone=0)
+    _seed(live, clock, "adapter", 100, approved=20, undone=19)
+    assert live.should_switch_back() is False  # only 5 base cards
+    assert "not enough cards" in live.notice_text()
+    live2, _, clock2 = _live()
+    _seed(live2, clock2, "base", 12, approved=10, undone=0)
+    _seed(live2, clock2, "adapter", 12, approved=10, undone=2)  # 20 points, but only 2 undos
+    assert live2.should_switch_back() is False
+
+
+def test_live_comparison_follows_the_opt_in_and_corpus_hooks() -> None:
+    live, corpus, _ = _live(enabled=False)
+    assert live.record("o1", "adapter") is False and corpus.comparison_count() == 0
+    live, corpus, _ = _live()
+    with pytest.raises(ValueError):
+        live.record("o1", "personal")
+    live.record("o1", "adapter")
+    # #118's decision record and undo hook fill the comparison row in.
+    corpus.record(tool_name="open_url", tool_args={"kwargs": {"url": "x"}}, verdict="approved",
+                  offer_id="o1")
+    corpus.undo_listener({"offer_id": "o1"})
+    (row,) = corpus.comparison_rows()
+    assert row["verdict"] == "approved" and row["undone"] is True
+
+
+def test_opt_out_and_delete_all_remove_comparison_rows(tmp_path) -> None:
+    for wipe in ("opt_out", "delete_all"):
+        corpus = TrainingCorpus(tmp_path / f"{wipe}.db", enabled=lambda: True)
+        live = LiveComparison(corpus)
+        live.record("o1", "adapter")
+        live.record("o2", "base")
+        assert corpus.comparison_count() == 2
+        getattr(corpus, wipe)()
+        assert corpus.comparison_count() == 0 and live.report()["adapter"]["shown"] == 0
+    reopened = LiveComparison(tmp_path / "opt_out.db")
+    assert reopened.corpus.comparison_rows() == []
+
+
+
+def test_never_save_suite_is_not_saved_even_when_asked(tmp_path) -> None:
+    """#121 decision 8 (runner, wave 23): evaluate() forces save=False for a
+    NEVER_SAVE suite, so the user's own data never lands in results/."""
+    mod = _fake_suite({"a": True})
+    mod.NEVER_SAVE = True
+    result = asyncio.run(eval_run.evaluate(
+        mod, engine=FakeEngine(), settings=SETTINGS, repeats=1, save=True,
+        results_dir=tmp_path,
+    ))
+    assert result["summary"]["cases"] == 1
+    assert "saved_to" not in result and not list(tmp_path.iterdir())

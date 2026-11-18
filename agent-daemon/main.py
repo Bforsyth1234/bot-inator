@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -453,6 +454,78 @@ async def lifespan(app: FastAPI):
     )
     orchestrator.training_corpus = app.state.training_corpus
     app.state.action_journal.add_undo_listener(app.state.training_corpus.undo_listener)
+    # #119: offer to train a personal model once the corpus is big enough.
+    from ai import personal_training  # noqa: WPS433
+    from ai.mlx_engine import DEFAULT_MODEL as _MLX_DEFAULT, MLXEngine as _MLX  # noqa: WPS433
+
+    def _training_base_model() -> str:
+        # A LoRA adapter sits on the local MLX model, even when chat uses a cloud provider.
+        return engine.model_name if isinstance(engine, _MLX) else _MLX_DEFAULT
+
+    async def _training_finished(status: dict) -> None:
+        state = status.get("state")
+        if state == "done":
+            body = "Your personal model finished training. It is checked against the original before it is used."
+            if status.get("adapter_dir"):
+                asyncio.create_task(_gate_and_offer(str(status["adapter_dir"])))
+        elif state == "failed":
+            body = f"Training stopped: {status.get('error') or 'unknown error'}. Nothing changed."
+        else:
+            return
+        orchestrator.publish_notice({
+            "id": f"training_{state}:{status.get('adapter_dir') or ''}", "level": "info",
+            "title": "Personal model", "body": body,
+        })
+
+    async def _gate_and_offer(adapter_dir: str) -> None:
+        """#120: score the new adapter against the base model (#121 gate);
+        on a win, ask with a normal card; otherwise say why in a notice."""
+        pm = app.state.personal_model
+        try:
+            gate = await pm.gate(adapter_dir)
+            summary, lines = model_eval.switch_offer(gate)
+            n = int(Path(adapter_dir).name)
+            if summary is None:
+                orchestrator.publish_notice({
+                    "id": f"personal_model_gate:{n}", "level": "info",
+                    "title": "Personal model", "body": " ".join(lines),
+                })
+                return
+            approved, _ = await orchestrator._request_approval(
+                f"use_model_{n}", "use_personal_model", {"kwargs": {"n": n}},
+                " ".join(lines), summary=summary,
+            )
+            if approved:
+                await pm.use_adapter(n)
+        except Exception:
+            logger.exception("personal model gate/offer failed")
+
+    app.state.personal_training = personal_training.PersonalTraining(
+        app.state.training_corpus, base_model=_training_base_model,
+        on_finished=_training_finished,
+    )
+    orchestrator.personal_training = app.state.personal_training
+    # #120: the user's personal model (adapter) — used only after it wins the
+    # #121 gate and the user says so; "Use base model" any time.
+    from ai import model_compare, model_eval  # noqa: WPS433
+
+    app.state.personal_model = model_eval.PersonalModel(
+        personal_training.default_models_dir(), engine,
+        base_model=_training_base_model, corpus=app.state.training_corpus,
+        settings=settings,
+        comparison=model_compare.LiveComparison(app.state.training_corpus),
+    )
+    orchestrator.personal_model = app.state.personal_model
+    try:
+        await app.state.personal_model.apply_active()
+    except Exception:
+        logger.exception("personal model: apply_active failed")
+    # #118/#79: approved tools never run in 30 days count against their offer.
+    try:
+        for _offer_id in idea_outcomes.never_run_offer_ids():
+            app.state.training_corpus.mark_tool_never_run(_offer_id)
+    except Exception:
+        logger.exception("training corpus: never-run sweep failed")
     # #90: generated-tool health; repeated failures offer a repair.
     from ai import tool_health  # noqa: WPS433
 
@@ -559,6 +632,23 @@ async def lifespan(app: FastAPI):
     await orchestrator.start()
     delivery_task = asyncio.create_task(delivery.run_release_loop(bus), name="delivery-release")
 
+    async def _personal_model_daily() -> None:
+        # #121 decision 5: once a day, switch back to the base model if the
+        # personal model does worse on live cards (a notice, not a card).
+        while True:
+            await asyncio.sleep(24 * 3600)
+            try:
+                text = await app.state.personal_model.check_switch_back()
+                if text:
+                    orchestrator.publish_notice({
+                        "id": f"personal_model_switch_back:{int(time.time() // 86400)}",
+                        "level": "info", "title": "Personal model", "body": text,
+                    })
+            except Exception:
+                logger.exception("personal model daily check failed")
+
+    personal_model_task = asyncio.create_task(_personal_model_daily(), name="personal-model-daily")
+
     # #75: once a day, mine the activity history for routines and offer
     # one through the idea pipeline (source "routine").
     routine_ideas: Optional[RoutineIdeaSource] = None
@@ -612,6 +702,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         delivery_task.cancel()
+        personal_model_task.cancel()
         try:
             await delivery_task
         except (asyncio.CancelledError, Exception):
@@ -644,6 +735,10 @@ async def lifespan(app: FastAPI):
             app.state.action_journal.close()
         except Exception:
             logger.exception("Error closing the action journal")
+        try:
+            await app.state.personal_training.cancel()  # #119: never leave a child training
+        except Exception:
+            logger.exception("Error stopping personal training")
         try:
             app.state.training_corpus.close()
         except Exception:
@@ -720,6 +815,9 @@ app.include_router(meeting_notes_routes.router)
 from routes import training as training_routes  # noqa: E402
 
 app.include_router(training_routes.router)
+from routes import personal_model as personal_model_routes  # noqa: E402
+
+app.include_router(personal_model_routes.router)
 # #97: provider presets (List models, Test).
 app.include_router(providers_routes.router)
 # #93: first-run engine choice.

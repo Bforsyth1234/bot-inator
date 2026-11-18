@@ -379,6 +379,18 @@ class OutcomeStore(_JsonStore):
         """Multiply the source's cooldown by this (1, 2 or 4)."""
         return self.adjustment(source, idea_kind)["cooldown_multiplier"]
 
+    def never_run_offer_ids(self) -> list[str]:
+        """Ids of approved tool offers whose tool was never run in
+        :data:`REMOVAL_AFTER_SECONDS` (#118: feeds the training corpus)."""
+        now = float(self.clock())
+        with self._lock:
+            return [
+                str(o["id"]) for o in self.offers
+                if o.get("id") and o.get("verdict") == "approved" and not o.get("one_shot")
+                and int(o.get("run_count") or 0) == 0
+                and now - float(o.get("decided_at") or 0.0) >= REMOVAL_AFTER_SECONDS
+            ]
+
     def removal_candidates(self) -> list[dict[str, Any]]:
         """Installed tools approved >= 30 days ago and never run since."""
         now = float(self.clock())

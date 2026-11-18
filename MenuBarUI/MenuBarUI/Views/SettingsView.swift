@@ -418,6 +418,12 @@ struct SettingsView: View {
             // #118: opt-in training corpus for a personal model.
             Section("Training data") {
                 TrainingDataView()
+                // #119: progress of a personal-model run (polls the daemon).
+                TrainingProgressView()
+            }
+            // #120: use the personal model (only after it beats the original) or go back.
+            Section("Personal model") {
+                PersonalModelView()
             }
 
             // Wave 15: watches (#88), right-moment delivery (#87), what the

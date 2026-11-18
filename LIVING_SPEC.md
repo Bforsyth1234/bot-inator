@@ -92,7 +92,8 @@ decide what to offer and write the card, and nothing else:
    message text need a second toggle. Training, held-out and comparison
    rows never leave the Mac and are deleted with the opt-out.
 3. **It is used only if it measurably wins** (#121 gate: personal,
-   regression and safety suites, 100% on safety) and the user can return
+   regression and safety suites; no safety case the base model passes may
+   newly fail) and the user can return
    to the base model in one click.
 
 **iPhone remote (amendment to 7a and 7c, user decisions 2026-11-10, item

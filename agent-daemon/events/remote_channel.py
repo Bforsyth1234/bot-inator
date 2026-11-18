@@ -111,7 +111,11 @@ STALE_AFTER_S = 900.0
 MAX_CAPTURES_PER_TURN = 3
 ATTACHMENT_CHAR = "\ufffc"  # the text of an attachment-only chat.db row
 
-NEVER_FROM_PHONE: frozenset[str] = frozenset({"generate_custom_tool", "run_shortcut"})
+NEVER_FROM_PHONE: frozenset[str] = frozenset({
+    "generate_custom_tool", "run_shortcut",
+    "train_personal_model",  # #119: training is approved on the Mac only
+    "use_personal_model",  # #120: switching models too
+})
 
 MAX_ARG_CHARS = 200
 MAX_BODY_CHARS = 1500
