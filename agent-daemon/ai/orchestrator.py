@@ -414,6 +414,9 @@ class Orchestrator:
         # #118: ``ai.training_corpus.TrainingCorpus`` (set by main.py). Its
         # ``record`` is a no-op while the opt-in is off.
         self.training_corpus: Optional[Any] = None
+        # #119: ``ai.personal_training.PersonalTraining`` (set by main.py).
+        self.personal_training: Optional[Any] = None
+        self._training_offer_open = False
         self._current_prompt: str = ""
         # The idea offer the last idea card recorded (#79), so a successful
         # generate_custom_tool links the installed name to it.
@@ -2233,6 +2236,9 @@ class Orchestrator:
             event_id=event_id, trigger=trigger, reasoning=reasoning,
             summary=summary, actions=actions, origin_notes=origin_notes,
         )
+        if tool_name != "train_personal_model" and getattr(self, "personal_training", None) is not None:
+            # #119: enough decisions → offer to train, as its own card, after this one.
+            asyncio.create_task(self._maybe_offer_training())
         if resp.approved and resp.always_allow and allow_label:
             # #116: only the user's click on a card that offered it. The
             # label check means a client can't grant what wasn't offered.
@@ -2343,6 +2349,29 @@ class Orchestrator:
         except Exception:
             logger.exception("idea_outcomes.record_verdict failed")
 
+    async def _maybe_offer_training(self) -> None:
+        """#119: once the corpus passes the threshold, ask (one card) whether
+        to train a personal model. Training is a side effect: the normal
+        approval card, never always-allowed, counted down or phone-approved."""
+        trainer = getattr(self, "personal_training", None)
+        if trainer is None or getattr(self, "_training_offer_open", False):
+            return
+        try:
+            if not trainer.offer_due():
+                return
+            self._training_offer_open = True
+            tool, kwargs, reasoning, summary = trainer.offer_card()
+            trainer.mark_offered()
+            approved, _ = await self._request_approval(
+                f"train_{uuid.uuid4().hex[:8]}", tool, {"kwargs": kwargs}, reasoning,
+                summary=summary,
+            )
+            await trainer.on_card_decision(bool(approved))
+        except Exception:
+            logger.exception("personal training offer failed")
+        finally:
+            self._training_offer_open = False
+
     def _record_training_row(
         self,
         verdict: str,
@@ -2353,8 +2382,8 @@ class Orchestrator:
     ) -> None:
         """#118: one training-corpus row per card decision (no-op unless opted in)."""
         corpus = getattr(self, "training_corpus", None)
-        if corpus is None:
-            return
+        if corpus is None or tool_name == "train_personal_model":
+            return  # #119: the training card itself is never a training example
         try:
             from ai import training_corpus as tc  # noqa: WPS433
 
