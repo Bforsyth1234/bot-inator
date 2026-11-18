@@ -22,6 +22,12 @@ Sandbox profile (:func:`build_profile`):
   These two file rules come from :func:`closed_paths`; the draft dry run
   (``tools.draft_dry_run``) closes the same paths (#114), so a draft that
   keeps a file in ``~/.bot-inator`` fails before review, not after install;
+* deletes (#123, user decision B): no ``file-write-unlink`` under ``$HOME``
+  outside the tool's own folders (its temp dir and ``~/Documents/bot-inator``,
+  :func:`unlink_rules`). That operation also covers renames, so the child's
+  moves under ``$HOME`` and :func:`move_to_trash` go to the daemon over the
+  relay socket (:class:`FileRelay`): a move never replaces a file, and the
+  only delete is a move into ``~/.Trash``. The dry run has the same rule;
 * network: denied unless the module imports a network module
   (:data:`NETWORK_MODULES`, decided from the AST at load time and exposed
   as ``network_allowed`` / ``sandbox_note`` on the proxy). A dynamic import
@@ -74,6 +80,7 @@ generated tools: they never run unsandboxed silently.
 from __future__ import annotations
 
 import ast
+import errno
 import json
 import logging
 import os
@@ -382,6 +389,9 @@ def build_profile(
         "(deny file-write*)",
         f'(allow file-write* (subpath {_q(home)}) (subpath {_q(work)}) '
         '(literal "/dev/null") (literal "/dev/tty"))',
+        # #123: no unlink / rmdir / rename-away under $HOME outside the
+        # tool's own folders; moves and the Trash go through the relay.
+        *unlink_rules(home, own_folders(home, work / "tmp")),
         *deny_rules(closed_paths(
             home, extra_write_denied=(shims,), extra_read_denied=extra_read_denied,
         )),
@@ -511,7 +521,24 @@ def protected_path_note(text: str, homes: Any, *, raised: bool) -> str:
         for name in names["write_files"]:
             if found(under_home + re.escape(name)):
                 return _refusal_sentence(f"write ~/{name}", f"~/{name}")
+        if raised and _DELETE_CALL_RE.search(text):
+            return TRASH_SENTENCE
     return ""
+
+
+# #123: a refused delete, as the failing source line shows it.
+_DELETE_CALL_RE = re.compile(
+    r"\b(?:os\.(?:remove|unlink|rmdir|removedirs)|shutil\.rmtree|rmtree|removedirs)\s*\(|"
+    r"\.(?:unlink|rmdir)\s*\(|refused by the tool sandbox"
+)
+TRASH_SENTENCE = (
+    "The tool sandbox does not let a generated tool delete files or folders "
+    "(os.remove, os.unlink, os.rmdir, shutil.rmtree, Path.unlink) outside its "
+    f"own folders ({TOOL_FILES_DIR}/ and the temp dir), and a move may not "
+    "replace an existing file. To delete, move the items to the Trash: "
+    "`from tools.tool_sandbox import move_to_trash` and call "
+    "`move_to_trash(path)` (or a list of paths); it returns where each one went."
+)
 
 
 def _refusal_sentence(cannot: str, path: str) -> str:
@@ -522,6 +549,400 @@ def _refusal_sentence(cannot: str, path: str) -> str:
         f'the task needs {path} itself, return a {{"status": "error"}} dict '
         "that says a generated tool cannot use it."
     )
+
+
+# ---- deletes go to the Trash (#123) -------------------------------------------
+#
+# User decision B (2026-11-18): a generated tool may move things to the Trash
+# (recoverable), never unlink outside its own folders. The kernel rule is
+# ``file-write-unlink``, and on macOS that one operation covers unlink(2),
+# rmdir(2) AND both names of a rename(2): the source name, and a destination
+# name that already exists (tested with ``sandbox-exec -p``, see
+# tests/test_trash_only_tools.py). So "deny unlink under $HOME" also denies
+# every in-sandbox move, the Trash move included: a rename into ~/.Trash is
+# an unlink of the source name. A profile rule cannot tell a move into the
+# Trash from any other move.
+#
+# Hence the relay: under $HOME, outside the tool's own folders, the child's
+# ``os.rename`` / ``os.replace`` / ``shutil.move`` and :func:`move_to_trash`
+# ask the daemon over the per-call socket (the one the ``open`` shim and
+# ``call_mcp`` use), and :class:`FileRelay` does the rename after checking
+# it: both ends under $HOME, none in a folder the profile closes, nothing
+# replaced (a rename onto an existing name deletes it), nothing moved into
+# the tool's own folders (where it could then be unlinked). Moves keep
+# working; deletes can only go to the Trash.
+
+TRASH_DIRNAME = ".Trash"
+# Where the child finds its own folders (``os.pathsep``-joined).
+OWN_DIRS_ENV = "AGENT_TOOL_OWN_DIRS"
+RELAY_SOCKET_ENV = "AGENT_TOOL_RELAY_SOCKET"
+_RELAY_TIMEOUT_SECONDS = 60.0
+
+
+class TrashRefused(PermissionError):
+    """The relay did not move the item (the reason is the message)."""
+
+
+def own_folders(home: Path, tmp: Path) -> tuple[Path, ...]:
+    """Where a generated tool may unlink: its temp dir and :data:`TOOL_FILES_DIR`."""
+    return (Path(tmp), Path(home) / TOOL_FILES_DIR[2:])
+
+
+def unlink_rules(home: Path, own: tuple[Path, ...]) -> list[str]:
+    """Profile lines: no unlink / rmdir / rename-away under ``home``, except
+    in ``own``. They go after the ``allow file-write*`` line (the last
+    matching rule wins) and before :func:`deny_rules` (closed stays closed)."""
+    return [
+        f"(deny file-write-unlink (subpath {_q(home)}))",
+        "(allow file-write-unlink " + " ".join(f"(subpath {_q(p)})" for p in own) + ")",
+    ]
+
+
+def _relay_ask(sock: str, req: dict) -> dict:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(_RELAY_TIMEOUT_SECONDS)
+    try:
+        s.connect(sock)
+        s.sendall(json.dumps(req).encode("utf-8") + b"\n")
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        s.close()
+    return json.loads(buf.decode("utf-8") or "{}")
+
+
+def _flat_paths(paths: tuple[Any, ...]) -> list[str]:
+    flat: list[Any] = []
+    for p in paths:
+        flat.extend(p) if isinstance(p, (list, tuple, set, frozenset)) else flat.append(p)
+    return [os.path.abspath(os.path.expanduser(os.fspath(p))) for p in flat]
+
+
+def move_to_trash(*paths: Any) -> list[str]:
+    """Move files or folders to the Trash; return where each one went.
+
+    The one way a generated tool deletes (#123): ``from tools.tool_sandbox
+    import move_to_trash``. Accepts paths or lists of paths. Everything in
+    the Trash can be dragged back out. Raises :class:`TrashRefused` (a
+    ``PermissionError``) naming the first path that was refused; items
+    before it are already in the Trash.
+    """
+    flat = _flat_paths(paths)
+    if not flat:
+        return []
+    sock = os.environ.get(RELAY_SOCKET_ENV, "")
+    req = {"cmd": "trash", "paths": flat}
+    if sock:
+        resp = _relay_ask(sock, req)
+    else:
+        # In the daemon (a trusted tool, #104, or AGENT_TOOL_SANDBOX=0): the
+        # same checks, against the real home.
+        resp = FileRelay.for_home(sandbox_home()).answer(req)
+    if not resp.get("ok"):
+        message = str(resp.get("error") or "refused by the tool sandbox")
+        if isinstance(resp.get("errno"), int) and resp["errno"] != errno.EPERM:
+            raise OSError(resp["errno"], message)
+        raise TrashRefused(message)
+    return [str(p) for p in resp.get("trashed") or []]
+
+
+def _fd_path(fd: int) -> str:
+    import fcntl
+
+    raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+    return raw.rstrip(b"\0").decode("utf-8", "surrogateescape")
+
+
+def _within(path: str, root: str) -> bool:
+    """``path`` is ``root`` or inside it (the Mac's disk ignores case)."""
+    p, r = path.casefold().rstrip("/"), root.casefold().rstrip("/")
+    return p == r or p.startswith(r + "/")
+
+
+class _Pinned:
+    """A path's parent folder held open (so a symlink swapped in after the
+    check cannot redirect the rename) plus its last name."""
+
+    def __init__(self, path: str) -> None:
+        path = os.path.abspath(path)
+        self.name = os.path.basename(path.rstrip("/"))
+        if self.name in ("", ".", ".."):
+            raise TrashRefused(f"{path}: not a file or folder name")
+        parent = os.path.realpath(os.path.dirname(path.rstrip("/")))
+        self.fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            self.dir = _fd_path(self.fd)
+        except OSError:
+            os.close(self.fd)
+            raise
+        self.full = os.path.join(self.dir, self.name)
+
+    def exists(self) -> bool:
+        try:
+            os.stat(self.name, dir_fd=self.fd, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+class FileRelay:
+    """The daemon side of the child's moves and :func:`move_to_trash` (#123).
+
+    ``home`` is the home the profile protects (a fake one in the dry run),
+    ``closed`` what it closes there (:func:`closed_paths`), ``own`` the
+    tool's own folders (:func:`own_folders`), ``trash_dir`` where deletes
+    go (``home/.Trash``).
+    """
+
+    def __init__(
+        self, home: Path, closed: dict[str, list[Path]], own: tuple[Path, ...],
+        trash_dir: Optional[Path] = None,
+    ) -> None:
+        self.home = os.path.realpath(home)
+        self.closed = [os.path.realpath(p) for k in ("write", "write_files") for p in closed[k]]
+        self.own = [os.path.realpath(p) for p in own]
+        self.trash_dir = os.path.realpath(trash_dir or Path(self.home) / TRASH_DIRNAME)
+
+    @classmethod
+    def for_home(cls, home: Path, tmp: Optional[Path] = None) -> "FileRelay":
+        home = Path(os.path.realpath(home))
+        tmp = Path(tmp) if tmp is not None else Path(os.path.realpath(tempfile.gettempdir()))
+        closed = closed_paths(home)
+        return cls(home, closed, own_folders(home, tmp))
+
+    # -- checks --
+
+    def _check(self, p: _Pinned, what: str) -> None:
+        if not _within(p.full, self.home) or _within(self.home, p.full):
+            raise TrashRefused(f"{what} {p.full}: only files inside your home folder")
+        for c in self.closed:
+            if _within(p.full, c) or _within(c, p.full):
+                raise TrashRefused(
+                    f"{what} {p.full}: the tool sandbox protects {c}"
+                )
+
+    def _check_dest(self, p: _Pinned) -> None:
+        self._check(p, "moving to")
+        for o in self.own:
+            if _within(p.full, o):
+                raise TrashRefused(
+                    f"moving to {p.full}: a user's file may not go into the tool's "
+                    "own folder (it could be deleted there); use move_to_trash"
+                )
+
+    # -- requests --
+
+    def answer(self, req: dict) -> dict:
+        try:
+            if req.get("cmd") == "trash":
+                paths = req.get("paths")
+                if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+                    return {"ok": False, "error": "bad trash request"}
+                return {"ok": True, "trashed": [self.trash(p) for p in paths[:1000]]}
+            if req.get("cmd") == "move":
+                src, dst = req.get("src"), req.get("dst")
+                if not isinstance(src, str) or not isinstance(dst, str):
+                    return {"ok": False, "error": "bad move request"}
+                return {"ok": True, "moved": self.move(src, dst)}
+        except TrashRefused as exc:
+            logger.info("sandboxed file relay refused: %s", exc)
+            return {"ok": False, "error": str(exc)}
+        except OSError as exc:
+            # The child raises the same kind (FileNotFoundError for a
+            # missing source, as a plain rename would).
+            return {"ok": False, "errno": exc.errno,
+                    "error": f"{exc.strerror or exc}: {exc.filename or ''}".strip()}
+        return {"ok": False, "error": "unknown request"}
+
+    def move(self, src: str, dst: str) -> str:
+        """Rename ``src`` to ``dst`` (a free name); never replaces anything."""
+        s = _Pinned(src)
+        try:
+            d = _Pinned(dst)
+            try:
+                self._check(s, "moving")
+                self._check_dest(d)
+                if not s.exists():
+                    raise FileNotFoundError(2, "No such file or directory", s.full)
+                if d.exists():
+                    raise TrashRefused(
+                        f"moving to {d.full}: that name is taken, and replacing it "
+                        "would delete it; pick a free name, or move the old one "
+                        "to the Trash first (move_to_trash)"
+                    )
+                os.rename(s.name, d.name, src_dir_fd=s.fd, dst_dir_fd=d.fd)
+                return d.full
+            finally:
+                d.close()
+        finally:
+            s.close()
+
+    def trash(self, path: str) -> str:
+        """Move ``path`` into the Trash under a free name; return the new path."""
+        s = _Pinned(path)
+        try:
+            self._check(s, "moving to the Trash")
+            if _within(s.full, self.trash_dir) or _within(self.trash_dir, s.full):
+                raise TrashRefused(f"{s.full} is already in the Trash (emptying it is not allowed)")
+            if not s.exists():
+                raise FileNotFoundError(2, "No such file or directory", s.full)
+            os.makedirs(self.trash_dir, exist_ok=True)
+            tfd = os.open(self.trash_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                name = self._free_name(tfd, s.name)
+                try:
+                    os.rename(s.name, name, src_dir_fd=s.fd, dst_dir_fd=tfd)
+                except PermissionError:
+                    return self._finder_trash(s)
+                return os.path.join(_fd_path(tfd), name)
+            finally:
+                os.close(tfd)
+        finally:
+            s.close()
+
+    @staticmethod
+    def _free_name(dir_fd: int, name: str) -> str:
+        stem, dot, ext = name.rpartition(".") if not name.startswith(".") else ("", "", name)
+        if not dot:
+            stem, ext = name, ""
+        else:
+            ext = "." + ext
+        candidate, n = name, 1
+        stamp = time.strftime("%H.%M.%S")
+        while True:
+            try:
+                os.stat(candidate, dir_fd=dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return candidate
+            n += 1
+            candidate = f"{stem} {stamp}{'' if n == 2 else f' {n}'}{ext}"
+
+    def _finder_trash(self, s: _Pinned) -> str:
+        """The ~/.Trash rename was refused (macOS privacy): the system's own
+        Trash call, for the real home only, after re-checking the folder."""
+        if self.home != os.path.realpath(Path.home()):
+            raise TrashRefused(f"moving {s.full} to the Trash was refused")
+        try:
+            from Foundation import NSURL, NSFileManager  # type: ignore
+        except ImportError:  # pragma: no cover - pyobjc ships with the daemon
+            raise TrashRefused(f"moving {s.full} to the Trash was refused")
+        if _fd_path(s.fd) != s.dir:
+            raise TrashRefused(f"{s.full}: its folder moved during the check")
+        ok, url, err = NSFileManager.defaultManager().trashItemAtURL_resultingItemURL_error_(
+            NSURL.fileURLWithPath_(s.full), None, None,
+        )
+        if not ok:
+            raise TrashRefused(f"moving {s.full} to the Trash failed: {err}")
+        return str(url.path()) if url is not None else ""
+
+
+def trashes(source: str) -> bool:
+    """The reviewed source calls :func:`move_to_trash` (the card says so)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+            if name == "move_to_trash":
+                return True
+    return False
+
+
+def _path_like(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().startswith(("/", "~"))
+
+
+def trash_card_note(*args: Any, **kwargs: Any) -> str:
+    """The call card's line for a tool that calls :func:`move_to_trash`."""
+    n = 0
+    for value in [*args, *kwargs.values()]:
+        if isinstance(value, (list, tuple)) and value and all(_path_like(v) for v in value):
+            n += len(value)
+        elif _path_like(value):
+            n += 1
+    if n:
+        items = "item" if n == 1 else "items"
+        return (f"Moves {n} {items} to the Trash (nothing is deleted for good; "
+                "you can drag it back out)")
+    return ("Moves the items it picks to the Trash (nothing is deleted for good; "
+            "you can drag them back out)")
+
+
+# The child's half (installed child and dry-run probe alike: one string, so
+# both behave the same). Under ``home`` and outside the tool's own folders a
+# rename is an unlink the profile denies, so these go over the relay.
+FILE_RELAY_CHILD = r'''
+def _bot_inator_file_relay():
+    import errno, json, os, shutil, socket
+    sock = os.environ.get("AGENT_TOOL_RELAY_SOCKET", "")
+    own = [os.path.realpath(p) for p in os.environ.get("AGENT_TOOL_OWN_DIRS", "").split(os.pathsep) if p]
+    if not sock:
+        return
+    def ask(req):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(60)
+        try:
+            s.connect(sock)
+            s.sendall(json.dumps(req).encode("utf-8") + b"\n")
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+        finally:
+            s.close()
+        return json.loads(buf.decode("utf-8") or "{}")
+    def native_ok(src):
+        if not isinstance(src, (str, os.PathLike)):
+            return True
+        src = os.fspath(src)
+        if isinstance(src, bytes):
+            return True
+        parent = os.path.realpath(os.path.dirname(os.path.abspath(src).rstrip("/")))
+        low = parent.casefold()
+        return any(low == o.casefold() or low.startswith(o.casefold() + "/") for o in own)
+    def relay_move(src, dst):
+        resp = ask({"cmd": "move", "src": os.path.abspath(os.fspath(src)),
+                    "dst": os.path.abspath(os.fspath(dst))})
+        if not resp.get("ok"):
+            code = resp.get("errno")
+            if isinstance(code, int) and code != errno.EPERM:
+                raise OSError(code, str(resp.get("error")), os.fspath(src))
+            raise PermissionError(errno.EPERM, "refused by the tool sandbox: " + str(resp.get("error")), os.fspath(src))
+        return resp.get("moved")
+    def wrap(native):
+        def op(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+            if src_dir_fd is not None or dst_dir_fd is not None or native_ok(src):
+                return native(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+            relay_move(src, dst)
+        op.__name__ = native.__name__
+        return op
+    os.rename = wrap(os.rename)
+    os.replace = wrap(os.replace)
+    native_move = shutil.move
+    def move(src, dst, copy_function=shutil.copy2):
+        if native_ok(src):
+            return native_move(src, dst, copy_function=copy_function)
+        real = os.fspath(dst)
+        if os.path.isdir(real):
+            real = os.path.join(real, os.path.basename(os.fspath(src).rstrip("/")))
+        relay_move(src, real)
+        return real
+    shutil.move = move
+_bot_inator_file_relay()
+del _bot_inator_file_relay
+'''
 
 
 # ---- open / launch proxy (todo #53) ----------------------------------------
@@ -803,8 +1224,15 @@ def _launch_apps(names: list[str], ids: list[str], cwd: str, writable: tuple[Pat
 class _OpenProxy:
     """Per-call unix socket the child's ``open``/``osascript`` shims talk to."""
 
-    def __init__(self, home: Path, work: Path, mcp_relay: Any = None) -> None:
+    def __init__(
+        self, home: Path, work: Path, mcp_relay: Any = None, *,
+        files: Optional["FileRelay"] = None, file_only: bool = False,
+    ) -> None:
         self.writable = (home, work)
+        # #123: moves and move_to_trash; ``file_only`` (the dry run, whose
+        # code is not approved yet) answers nothing else.
+        self.files = files
+        self.file_only = file_only
         # #112: ``mcp_relay(name, arguments) -> text`` (raises to refuse);
         # None = no MCP calls in this run (describe, self-test).
         self.mcp_relay = mcp_relay
@@ -846,6 +1274,12 @@ class _OpenProxy:
 
     def answer(self, req: dict) -> dict:
         cwd = str(req.get("cwd") or self.writable[0])
+        if req.get("cmd") in ("trash", "move"):
+            if self.files is None:
+                return {"ok": False, "error": "file moves are not available here"}
+            return self.files.answer(req)
+        if self.file_only:
+            return {"rc": 1, "ok": False, "error": "not available in the dry run"}
         if req.get("cmd") == "open":
             try:
                 argv = check_open_args([str(a) for a in req.get("argv") or []], cwd, self.writable)
@@ -909,7 +1343,7 @@ class _OpenProxy:
 
 # argv: daemon_root, module_path, tool_name, mode ("describe" | "call"),
 # linger_seconds. stdin: {"args": [...], "kwargs": {...}, "exclude": [...]}.
-_CHILD = r'''
+_CHILD = FILE_RELAY_CHILD + r'''
 import json, os, sys, threading, time, traceback, types
 root, path, name, mode, linger = sys.argv[1:6]
 _res = os.fdopen(os.dup(1), "w")
@@ -982,8 +1416,10 @@ def _child_env(home: Path, work: Path, relay_socket: Optional[Path] = None) -> d
         "AGENT_DISABLE_LISTENERS": "1",
     }
     if relay_socket is not None:
-        # #112: where ``tools.mcp.call_mcp`` asks (a path, not a secret).
-        env["AGENT_TOOL_RELAY_SOCKET"] = str(relay_socket)
+        # #112: where ``tools.mcp.call_mcp`` asks (a path, not a secret);
+        # #123: also the file relay's (moves, move_to_trash).
+        env[RELAY_SOCKET_ENV] = str(relay_socket)
+    env[OWN_DIRS_ENV] = os.pathsep.join(str(p) for p in own_folders(home, work / "tmp"))
     for key in ("USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"):
         if os.environ.get(key):
             env[key] = os.environ[key]
@@ -1010,7 +1446,8 @@ def _spawn(
     work = Path(os.path.realpath(tempfile.mkdtemp(prefix="tool-sandbox-")))
     (work / "tmp").mkdir()
     python = sys.executable
-    proxy = _OpenProxy(home, work, mcp_relay)
+    files = FileRelay(home, closed_paths(home), own_folders(home, work / "tmp"))
+    proxy = _OpenProxy(home, work, mcp_relay, files=files)
     _write_shims(work / "bin", proxy.path, python)
     profile = work / "profile.sb"
     profile.write_text(build_profile(
@@ -1130,6 +1567,11 @@ _SELF_TEST_TOOL = (
     "    import os\n"
     "    open(os.path.expanduser('~/written.txt'), 'w').write('x')\n"
     "    try:\n"
+    "        os.remove(os.path.expanduser('~/keep.txt'))\n"
+    "        return {'status': 'unlinked'}\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "    try:\n"
     "        os.makedirs(os.path.expanduser('~/Library'), exist_ok=True)\n"
     "        open(os.path.expanduser('~/Library/escape.txt'), 'w').write('x')\n"
     "        return {'status': 'escaped'}\n"
@@ -1150,6 +1592,7 @@ def sandbox_available() -> bool:
             with tempfile.TemporaryDirectory(prefix="tool-sandbox-test-") as tmp:
                 home = Path(os.path.realpath(tmp))
                 (home / "Library").mkdir()
+                (home / "keep.txt").write_text("x", encoding="utf-8")  # #123
                 probe = home / "sandbox_probe.py"
                 probe.write_text(_SELF_TEST_TOOL, encoding="utf-8")
                 try:
@@ -1157,7 +1600,8 @@ def sandbox_available() -> bool:
                                  timeout=DESCRIBE_TIMEOUT_SECONDS, home=home)
                     status = (out.get("result") or {}).get("status")
                     ok = status == "ok" and (home / "written.txt").exists() \
-                        and not (home / "Library" / "escape.txt").exists()
+                        and not (home / "Library" / "escape.txt").exists() \
+                        and (home / "keep.txt").exists()
                     if not ok:
                         problem = f"self-test returned {out.get('result')!r}"
                 except Exception as exc:
@@ -1195,7 +1639,7 @@ class SandboxedTool(_Tool):  # type: ignore[misc,valid-type]
 
     def __init__(
         self, meta: dict, source_path: Path, network: Optional[str],
-        mcp_names: frozenset[str] = frozenset(),
+        mcp_names: frozenset[str] = frozenset(), trash: bool = False,
     ) -> None:
         self.name = meta["name"]
         self.description = meta["description"]
@@ -1212,6 +1656,10 @@ class SandboxedTool(_Tool):  # type: ignore[misc,valid-type]
         # #112: the MCP tools the reviewed source names literally (fixed at
         # load, like ``network_allowed``).
         self.mcp_names = frozenset(mcp_names)
+        if trash:
+            # #123: the reviewed source calls move_to_trash; the call card
+            # (the orchestrator reads ``card_note``) says so.
+            self.card_note = trash_card_note
         super().__init__()
 
     def _mcp_relay(self, name: str, arguments: dict) -> str:
@@ -1257,11 +1705,15 @@ def load_sandboxed_tool(
     )
     if not out.get("found"):
         return None
-    return SandboxedTool(out["meta"], Path(path), network, mcp_tool_names(source))
+    return SandboxedTool(
+        out["meta"], Path(path), network, mcp_tool_names(source), trashes(source),
+    )
 
 
 __all__ = [
-    "DENIED_APPLE_EVENT_TARGETS", "McpRelayRefused", "NETWORK_MODULES", "OpenRefused",
+    "DENIED_APPLE_EVENT_TARGETS", "FileRelay", "TrashRefused", "move_to_trash",
+    "own_folders", "trash_card_note", "trashes", "unlink_rules",
+    "McpRelayRefused", "NETWORK_MODULES", "OpenRefused",
     "SandboxedTool", "TOOL_FILES_DIR", "mcp_tool_names",
     "check_open_args", "ToolSandboxError", "ToolSandboxTimeout",
     "build_profile", "closed_paths", "deny_rules", "load_sandboxed_tool",

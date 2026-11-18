@@ -78,6 +78,25 @@ Also (#115): suggestions from a burst of email reach the user as one card
 with a tick box each, not one card per email. Everything else still needs
 a card.
 
+**Nothing is deleted for good (constraint on 7b, user decision
+2026-11-18, option B, items #122–#123).** Generated tools may "delete" only
+by moving to the Trash:
+
+1. **Files** go to `~/.Trash` through `tools.tool_sandbox.move_to_trash`.
+   The sandbox denies every unlink under `$HOME` outside the tool's own
+   folders (on macOS that also covers the source of a rename), so moves go
+   through a daemon relay that checks each path. Replacing an existing file
+   under `$HOME` is refused.
+2. **Mail** goes to Mail's Trash mailbox. **Reminders and events** have no
+   Trash: ideas to delete them, empty the Trash, or delete permanently are
+   refused before any card.
+3. The draft check rejects unlink-type calls and `rm`; the dry run enforces
+   the same profile (#114 parity). The call card says "Moves N items to the
+   Trash".
+4. In a turn that read outside text (#81), `run_shortcut` is refused before
+   any card unless the user typed the Shortcut's name in Chat, and a tool
+   idea that quotes 5+ words of that text is refused (#122).
+
 **Personal model (constraint on 7a and 7c, user decision 2026-11-18,
 items #118–#121).** Asked "the app offers to start training a local model
 for you"; approved with "Start wave 22". A user's own LoRA adapter may

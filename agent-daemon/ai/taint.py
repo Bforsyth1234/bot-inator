@@ -121,6 +121,9 @@ MAX_READS = 16  # per turn; later reads still mark, their text is not kept
 MAX_LABEL_CHARS = 80
 _MAX_DEPTH = 6
 
+# #122: an idea "quotes" outside text when it repeats this many words in a row.
+QUOTE_MIN_WORDS = 5
+_WORD_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)?")
 _WS_RE = re.compile(r"\s+")
 _SPLIT_RE = re.compile(r"[,;]")
 _PHONE_RE = re.compile(r"\+?\d[\d\s().\-]{5,}\d")
@@ -405,6 +408,36 @@ class TurnTaint:
                 if r.text and _found(r.text, v):
                     return "from " + KIND_PHRASES.get(r.kind, "what it read")
         return FROM_ASSISTANT
+
+    def user_typed(self, value: Any) -> bool:
+        """#122: True only in a chat turn whose typed message contains
+        ``value`` (whole-token match, as :meth:`origin_of`). Quick-ask's
+        selected / clipboard text is a read, not typed, so it never counts."""
+        if self.kind != "chat":
+            return False
+        v = str(value if value is not None else "")
+        with self._lock:
+            return bool(self._user_text) and _found(self._user_text, v)
+
+    def quotes_outside(self, text: Any, *, min_words: int = QUOTE_MIN_WORDS) -> bool:
+        """#122: True when ``text`` repeats ``min_words`` or more words in a
+        row from outside text read this turn, and the user did not type
+        that run of words themselves. Deterministic; no model call."""
+        words = _WORD_RE.findall(_norm(text or ""))
+        if len(words) < min_words:
+            return False
+        with self._lock:
+            reads = [" ".join(_WORD_RE.findall(r.text)) for r in self._reads if r.text]
+            typed = " ".join(_WORD_RE.findall(self._user_text)) if self._user_text else ""
+        if not reads:
+            return False
+        for i in range(len(words) - min_words + 1):
+            run = " ".join(words[i : i + min_words])
+            if typed and _contains(typed, run):
+                continue
+            if any(_contains(r, run) for r in reads):
+                return True
+        return False
 
     def notes_for(
         self,
