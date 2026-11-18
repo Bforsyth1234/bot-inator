@@ -39,7 +39,12 @@ CRITIC_SYSTEM_PROMPT = (
     "- missing error handling for permissions, missing folders, full "
     "disks, locked files, or other failures the spec does not mention;\n"
     "- style, naming, comments, docstrings, type hints, logging, "
-    "performance, or extra features.\n\n"
+    "performance, or extra features;\n"
+    # #114: the drafter is told to do exactly this (the tool sandbox closes
+    # those folders); a critic that reports it sends the file back there.
+    "- a file the tool keeps for itself under ~/Documents/bot-inator/ "
+    "when the spec names ~/.bot-inator, ~/.ssh or ~/Library for it: the "
+    "tool cannot use those folders, so the code is right to move it.\n\n"
     "Every problem must quote the exact spec sentence it violates and "
     "the exact code that violates it, copied character for character. "
     f"At most {MAX_CRITIC_PROBLEMS} problems. Most correct code has none.\n\n"

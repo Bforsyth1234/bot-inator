@@ -22,8 +22,9 @@ it couldn't do, it offers to build a tool for it:
    nothing is written until you approve.
 2. **It drafts and checks the code.** Static checks, a second model pass
    that compares the code with the idea, and a dry run in a throwaway
-   sandbox with a fake home folder. Problems go back to the model to fix
-   before you see anything.
+   sandbox with a fake home folder that closes the same folders as the
+   real sandbox. Problems go back to the model to fix before you see
+   anything.
 3. **You read the full source** and approve it, edit it or throw it away.
 4. **It runs sandboxed.** Each call starts a short-lived child under
    macOS `sandbox-exec`, and still asks before it runs.
@@ -205,6 +206,11 @@ starts a short-lived Python child under macOS `sandbox-exec`:
   `~/.bot-inator`, your shell start-up files, or this repo;
 - it can't read `~/.ssh`, `~/.bot-inator` (API token, memory) or
   `agent-daemon/.env`, and gets no API keys in its environment;
+- a tool that needs a file of its own (a list, saved state) is told to
+  keep it under `~/Documents/bot-inator/`. The dry run before review
+  closes the same folders as the two rules above, so a draft that puts
+  its file in `~/.bot-inator` goes back to the model with the reason
+  (if it still fails after three tries, you see it with a note);
 - it has no network unless its source imports a network module
   (`urllib`, `http`, `socket`, `ssl`, …). The tool's `sandbox_note` says
   which;

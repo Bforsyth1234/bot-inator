@@ -45,3 +45,46 @@ def test_generate_custom_tool_tells_the_agent_to_use_the_builtins() -> None:
     desc = tools.generate_custom_tool.description
     for name in ("quit_app", "take_screenshot", "list_recent_emails"):
         assert name in desc
+
+
+def test_the_drafting_prompt_names_every_folder_the_sandbox_closes() -> None:
+    """#114: read from the profile's own lists, so the two stay in step."""
+    from tools import tool_sandbox
+
+    prompt = _drafting_system_prompt()
+    closed = set(tool_sandbox._READ_DENIED_IN_HOME) | set(tool_sandbox._WRITE_DENIED_IN_HOME)
+    assert closed >= {".bot-inator", ".ssh", "Library"}
+    for name in closed:
+        assert f"`~/{name}`" in prompt, name
+    assert "CANNOT read or write `~/.bot-inator`" in prompt
+    assert "shell start-up files" in prompt
+    assert f"under `{tool_sandbox.TOOL_FILES_DIR}/`" in prompt
+    assert "even when `expected_logic` names one of the refused folders" in prompt
+    # After the sentence about "one of these" (the built-in tasks), which
+    # must not read as covering the folders: its remedy is another one.
+    limits = prompt[prompt.index("Sandbox limits"):prompt.index("User-visible output rules")]
+    assert limits.index("If the requested tool needs one of these anyway") < limits.index("* Folders:")
+    assert limits.rstrip().splitlines()[-1].startswith("* Folders:")
+
+
+def test_generate_custom_tool_tells_the_agent_where_a_tool_keeps_its_files() -> None:
+    """#114: the 2026-11-17 spec named ``~/.bot-inator``; the agent wrote it."""
+    from tools import tool_sandbox
+
+    desc = tools.generate_custom_tool.description
+    for folder in ("~/.bot-inator", "~/.ssh", "~/Library"):
+        assert folder in desc, folder
+    assert f"{tool_sandbox.TOOL_FILES_DIR}/" in desc
+    assert "When the tool needs a file of its own" in desc
+
+
+def test_the_critic_does_not_send_the_file_back() -> None:
+    """#114: the critic compares the code with the spec word for word, and
+    the spec may name the folder the drafter was told to stay out of."""
+    from tools import draft_critic, tool_sandbox
+
+    prompt = draft_critic.CRITIC_SYSTEM_PROMPT
+    skip = prompt[prompt.index("Do NOT report"):prompt.index("Every problem must")]
+    assert f"{tool_sandbox.TOOL_FILES_DIR}/" in skip
+    for folder in ("~/.bot-inator", "~/.ssh", "~/Library"):
+        assert folder in skip, folder

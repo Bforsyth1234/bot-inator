@@ -18,7 +18,10 @@ Sandbox profile (:func:`build_profile`):
   for the app-bundled daemon (#96) its ``AGENT_DATA_DIR`` and moved
   generated-tools dir;
 * reads: allowed, except ``~/.ssh``, ``~/.bot-inator`` (API token, memory)
-  and the daemon's ``.env`` (cloud API keys; ``<AGENT_DATA_DIR>/.env`` too);
+  and the daemon's ``.env`` (cloud API keys; ``<AGENT_DATA_DIR>/.env`` too).
+  These two file rules come from :func:`closed_paths`; the draft dry run
+  (``tools.draft_dry_run``) closes the same paths (#114), so a draft that
+  keeps a file in ``~/.bot-inator`` fails before review, not after install;
 * network: denied unless the module imports a network module
   (:data:`NETWORK_MODULES`, decided from the AST at load time and exposed
   as ``network_allowed`` / ``sandbox_note`` on the proxy). A dynamic import
@@ -152,6 +155,11 @@ _SHELL_STARTUP_FILES: tuple[str, ...] = (
     ".profile",
 )
 _READ_DENIED_IN_HOME: tuple[str, ...] = (".ssh", ".bot-inator")
+# #114: where the drafting prompt and :func:`protected_path_note` send a
+# tool's own files (state, lists, logs): writable under the profile, and a
+# folder the user can see. Advice, not a rule: a tool may write elsewhere
+# under $HOME.
+TOOL_FILES_DIR = "~/Documents/bot-inator"
 
 
 class ToolSandboxError(RuntimeError):
@@ -275,7 +283,10 @@ def _default_mcp_relay(tool_name: str, allowed: frozenset[str], name: str, argum
 
 
 def _q(path: Any) -> str:
-    return json.dumps(str(path))
+    # ensure_ascii=False (#114): sandbox-exec does not decode ``\uXXXX``, so
+    # an escaped non-ASCII path named a folder that does not exist and its
+    # rule did nothing (a repo under ``~/Développement``: ``.env`` readable).
+    return json.dumps(str(path), ensure_ascii=False)
 
 
 def _protected_repo_dir(home: Path) -> Path:
@@ -286,38 +297,94 @@ def _protected_repo_dir(home: Path) -> Path:
     return repo
 
 
+def closed_paths(
+    home: Path, *, extra_write_denied: tuple[Path, ...] = (),
+    extra_read_denied: tuple[Path, ...] = (),
+) -> dict[str, list[Path]]:
+    """What the profile closes on disk for ``home``.
+
+    ``write`` and ``read`` are folders (everything under them);
+    ``write_files`` and ``read_files`` are single files. This is the one
+    list of what a generated tool may not touch: ``home``'s protected
+    folders and shell start-up files, the bot-inator tree, and the secrets.
+    :func:`build_profile` turns it into the installed tool's two ``deny``
+    lines (:func:`deny_rules`); the draft dry run (``tools.draft_dry_run``,
+    #114) closes the same paths, so a draft is refused before review where
+    the installed tool would be.
+    """
+    daemon = Path(os.path.realpath(_DAEMON_ROOT))
+    return {
+        "write": [
+            *(home / d for d in _WRITE_DENIED_IN_HOME),
+            _protected_repo_dir(home),
+            daemon / "tools" / "generated",
+            *_moved_write_denied(),
+            *extra_write_denied,
+        ],
+        "write_files": [home / f for f in _SHELL_STARTUP_FILES],
+        "read": [home / d for d in _READ_DENIED_IN_HOME],
+        "read_files": [daemon / ".env", *_moved_read_denied(), *extra_read_denied],
+    }
+
+
+def deny_rules(
+    closed: dict[str, list[Path]], *, writes: bool = True, reads: bool = True,
+) -> list[str]:
+    """``closed`` as profile lines: ``deny file-write*``, then ``deny
+    file-read*``. They go after any ``allow file-write*``. A line with no
+    path is left out (a bare ``deny file-read*`` would close every file).
+    """
+    rules: list[str] = []
+    for kind, wanted in (("write", writes), ("read", reads)):
+        folders = [f"(subpath {_q(p)})" for p in closed[kind]]
+        files = [f"(literal {_q(p)})" for p in closed[kind + "_files"]]
+        if wanted and (folders or files):
+            rules.append(
+                f"(deny file-{kind}* " + " ".join(folders) + " " + " ".join(files) + ")"
+            )
+    return rules
+
+
+def moved_home(
+    closed: dict[str, list[Path]], old: Path, new: Path,
+) -> dict[str, list[Path]]:
+    """``closed`` as it lies under another home: each path inside ``old`` at
+    the same place inside ``new``; paths outside ``old`` are left out.
+
+    The dry run's ``~`` is a fake home. What the profile closes under the
+    real one (``~/Library``, a repo at ``~/dev/bot-inator``) has to be
+    closed at the same ``~``-relative place there, or a draft that writes
+    ``~/dev/bot-inator/notes.txt`` passes the dry run and fails installed.
+    """
+    def move(path: Path) -> Optional[Path]:
+        try:
+            rel = Path(path).relative_to(old)
+        except ValueError:
+            return None
+        return new / rel if rel.parts else None
+
+    return {
+        key: [p for p in map(move, paths) if p is not None]
+        for key, paths in closed.items()
+    }
+
+
 def build_profile(
     *, home: Path, work: Path, python: str, network: bool,
     extra_read_denied: tuple[Path, ...] = (),
     proxy_socket: Optional[Path] = None,
 ) -> str:
     base = os.path.realpath(sys.base_prefix)
-    daemon = Path(os.path.realpath(_DAEMON_ROOT))
     shims = work / "bin"
-    write_denied = [home / d for d in _WRITE_DENIED_IN_HOME]
-    write_denied.append(_protected_repo_dir(home))
-    write_denied.append(daemon / "tools" / "generated")
-    write_denied.extend(_moved_write_denied())
-    write_denied.append(shims)
-    write_literals = [home / f for f in _SHELL_STARTUP_FILES]
-    read_denied = [home / d for d in _READ_DENIED_IN_HOME]
-    read_literals = [daemon / ".env", *_moved_read_denied(), *extra_read_denied]
     lines = [
         "(version 1)",
         "(allow default)",
         "(deny file-write*)",
         f'(allow file-write* (subpath {_q(home)}) (subpath {_q(work)}) '
         '(literal "/dev/null") (literal "/dev/tty"))',
-        "(deny file-write* "
-        + " ".join(f"(subpath {_q(p)})" for p in write_denied)
-        + " "
-        + " ".join(f"(literal {_q(p)})" for p in write_literals)
-        + ")",
-        "(deny file-read* "
-        + " ".join(f"(subpath {_q(p)})" for p in read_denied)
-        + " "
-        + " ".join(f"(literal {_q(p)})" for p in read_literals)
-        + ")",
+        *deny_rules(closed_paths(
+            home, extra_write_denied=(shims,), extra_read_denied=extra_read_denied,
+        )),
     ]
     if not network:
         lines.append("(deny network*)")
@@ -373,6 +440,88 @@ def _extra_read_denied() -> tuple[Path, ...]:
     if not override:
         return ()
     return (Path(os.path.realpath(Path(override).expanduser())),)
+
+
+# ---- a refusal, in words (#114) ----------------------------------------------
+
+_REFUSED_RE = re.compile(
+    r"operation not permitted|permission denied|\[Errno (?:1|13)\]|PermissionError",
+    re.I,
+)
+# Any sign that a file operation failed. A refused ``stat`` in a folder that
+# is closed for reading does not look like a permission error: the file
+# "is missing", or ``mkdir(exist_ok=True)`` raises ``FileExistsError``.
+_OS_ERROR_RE = re.compile(
+    r"\[Errno \d+\]|operation not permitted|permission denied|file exists|"
+    r"no such file|unable to open database|"
+    r"(?:Permission|FileExists|FileNotFound|NotADirectory|OS)Error",
+    re.I,
+)
+# A name starts a path component, and ends one (``~/.bot-inator-tools`` and
+# ``~/Library2`` are other folders; ``/Volumes/x/Users/me`` is not ``/Users/me``).
+_PATH_START = r"(?<![\w.\-])"
+_HOME_START = r"(?<![\w./\-])"
+_PATH_END = r"""(?=$|[/'"`\s\\:;,)\]}])"""
+
+
+def _closed_names(home: Path) -> dict[str, list[str]]:
+    """:func:`closed_paths` for ``home`` as ``~``-relative names."""
+    moved = moved_home(closed_paths(home), home, Path("~"))
+    return {key: [p.as_posix()[2:] for p in paths] for key, paths in moved.items()}
+
+
+def protected_path_note(text: str, homes: Any, *, raised: bool) -> str:
+    """A sentence for the drafting model when ``text`` shows a generated tool
+    failing on a path the profile closes; "" otherwise.
+
+    ``text`` comes from a run under the profile (the draft dry run passes
+    the draft's). ``raised=True``: it is the message of an error the run
+    raised, with the failing source line. ``raised=False``: it is a value
+    the tool returned, which counts only when it carries an OS error: a
+    tool may name a closed folder in what it returns without having touched
+    it (a listing of ``~``, or the very error this note asks for).
+
+    ``~/.ssh`` and ``~/.bot-inator`` are closed for reading too, so their
+    bare names are enough (``".bot-inator"`` in the failing line). The
+    other closed paths (``~/Library``, shell start-up files, the bot-inator
+    folder) are closed for writing: they count only under one of ``homes``
+    or ``~``, next to a permission error.
+    """
+    names = _closed_names(sandbox_home())
+    failed = raised or _OS_ERROR_RE.search(text) is not None
+
+    def found(pattern: str) -> bool:
+        # re.I: the Mac's disk is case-insensitive (~/library is ~/Library).
+        return re.search(pattern + _PATH_END, text, re.I) is not None
+
+    roots = [re.escape(str(h).rstrip("/")) for h in homes if str(h).strip("/")]
+    under_home = _HOME_START + "(?:" + "|".join([*roots, "~"]) + ")/"
+    if failed:
+        for name in names["read"]:
+            bare = _PATH_START if name.startswith(".") else under_home
+            if found(bare + re.escape(name)):
+                return _refusal_sentence(f"read or write ~/{name}", f"~/{name}")
+        for name in names["read_files"]:
+            if found(under_home + re.escape(name)):
+                return _refusal_sentence(f"read ~/{name}", f"~/{name}")
+    if _REFUSED_RE.search(text) is not None:
+        for name in names["write"]:
+            if found(under_home + re.escape(name)):
+                return _refusal_sentence(f"write under ~/{name}", f"~/{name}")
+        for name in names["write_files"]:
+            if found(under_home + re.escape(name)):
+                return _refusal_sentence(f"write ~/{name}", f"~/{name}")
+    return ""
+
+
+def _refusal_sentence(cannot: str, path: str) -> str:
+    return (
+        f"The tool sandbox does not let a generated tool {cannot}, so this "
+        "fails after install too. Keep files the tool creates for itself "
+        f"under {TOOL_FILES_DIR}/ instead, even if the spec names {path}; if "
+        f'the task needs {path} itself, return a {{"status": "error"}} dict '
+        "that says a generated tool cannot use it."
+    )
 
 
 # ---- open / launch proxy (todo #53) ----------------------------------------
@@ -1113,8 +1262,9 @@ def load_sandboxed_tool(
 
 __all__ = [
     "DENIED_APPLE_EVENT_TARGETS", "McpRelayRefused", "NETWORK_MODULES", "OpenRefused",
-    "SandboxedTool", "mcp_tool_names",
+    "SandboxedTool", "TOOL_FILES_DIR", "mcp_tool_names",
     "check_open_args", "ToolSandboxError", "ToolSandboxTimeout",
-    "build_profile", "load_sandboxed_tool", "network_reason", "reset_sandbox_cache",
+    "build_profile", "closed_paths", "deny_rules", "load_sandboxed_tool",
+    "moved_home", "network_reason", "protected_path_note", "reset_sandbox_cache",
     "sandbox_available", "sandbox_enabled", "sandbox_problem",
 ]

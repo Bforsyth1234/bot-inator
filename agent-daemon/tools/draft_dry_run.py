@@ -15,7 +15,17 @@ Isolation is layered, because the code has not been approved yet:
 
 * ``sandbox-exec`` profile: no network, no file writes outside the
   per-call temp dir, and no running other programs (only Python itself).
-* ``HOME`` points at the fake home, so ``~`` paths land in it.
+* What the installed-tool sandbox closes on disk is closed here too
+  (#114, ``tools.tool_sandbox.closed_paths``): at the same ``~``-relative
+  place in the fake home (``~/.bot-inator``, ``~/.ssh``, ``~/Library``
+  for writes, shell start-up files, a bot-inator folder under the home),
+  and for reading in the real home (plus the daemon's ``.env``). A draft
+  that keeps its file in ``~/.bot-inator`` used to pass here and then
+  fail on every call once installed; now it fails here, and
+  :func:`refusal_note` tells the drafter where the file can go.
+* ``HOME`` points at the fake home, so ``~`` paths land in it, and the
+  child starts there, as an installed tool starts in ``$HOME`` (relative
+  paths mean the same in both).
 * The environment is minimal (no API keys from the daemon's env).
 * Inside the probe, ``subprocess`` is replaced by a recorder that does
   nothing and reports success, and ``urlopen`` refuses with a recorded
@@ -84,6 +94,7 @@ PLANNER_SYSTEM_PROMPT = (
 )
 
 from ai.mlx_engine import THINK_BLOCK_RE as _THINK_BLOCK_RE
+from tools import tool_sandbox
 
 # Runs inside the sandbox. argv: daemon_root, draft_path, tool_name, kwargs_json
 _PROBE = r'''
@@ -295,12 +306,29 @@ def plan_dry_run(
     return plan
 
 
-def _profile(work: Path, python: str) -> str:
+def _profile(work: Path, python: str, home: Optional[Path] = None) -> str:
+    """The dry-run profile; ``home`` is the fake home (``work/home``).
+
+    #114: after the write allowance come the paths the installed-tool
+    sandbox closes for the real home, moved to the same place in the fake
+    home (where ``~`` lands), then the real home's own read rule (absolute
+    paths: the secrets an unapproved draft must not read). The real home's
+    write rule is left out: nothing outside ``work`` is writable here, and
+    it would close ``work`` itself when the temp dir lies inside a closed
+    folder (a ``TMPDIR`` under ``~/Library``).
+    """
     base = os.path.realpath(sys.base_prefix)
+    real_home = tool_sandbox.sandbox_home()
+    real = tool_sandbox.closed_paths(
+        real_home, extra_read_denied=tool_sandbox._extra_read_denied(),
+    )
+    fake = tool_sandbox.moved_home(real, real_home, home or work / "home")
+    rules = tool_sandbox.deny_rules(fake) + tool_sandbox.deny_rules(real, writes=False)
     return (
         "(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n"
         f'(allow file-write* (subpath "{work}") (literal "/dev/null"))\n'
-        "(deny process-exec)\n"
+        + "".join(rule + "\n" for rule in rules)
+        + "(deny process-exec)\n"
         f'(allow process-exec (literal "{python}") (subpath "{base}"))\n'
     )
 
@@ -327,7 +355,7 @@ def _execute(
         draft.write_text(source, encoding="utf-8")
         profile = work / "profile.sb"
         python = sys.executable
-        profile.write_text(_profile(work, python), encoding="utf-8")
+        profile.write_text(_profile(work, python, home), encoding="utf-8")
         env = {
             "HOME": str(home),
             "TMPDIR": str(work / "tmp"),
@@ -341,7 +369,7 @@ def _execute(
                 [_SANDBOX_EXEC, "-f", str(profile), python, "-c", _PROBE,
                  str(_DAEMON_ROOT), str(draft), tool_name, json.dumps(kwargs)],
                 capture_output=True, text=True, timeout=_CALL_TIMEOUT_SECONDS,
-                cwd=str(work), env=env,
+                cwd=str(home), env=env,
             )
             stdout, stderr = proc.stdout, proc.stderr
         except subprocess.TimeoutExpired:
@@ -352,7 +380,15 @@ def _execute(
     marker = next((ln for ln in reversed(stdout.splitlines()) if ln.startswith("__DRY_RUN__")), None)
     if marker is None:
         return {"no_output": (stderr.strip().splitlines() or ["no output"])[-1]}, after
-    return json.loads(marker[len("__DRY_RUN__"):]), after
+    try:
+        out = json.loads(marker[len("__DRY_RUN__"):])
+    except ValueError:
+        out = None
+    if not isinstance(out, dict):
+        # A draft that prints its own marker line and exits.
+        return {"no_output": "its last result line was not the probe's"}, after
+    out["home"] = str(home)  # the paths in its messages start here (#114)
+    return out, after
 
 
 _SANDBOX_OK: Optional[bool] = None
@@ -417,6 +453,35 @@ class DryRunResult:
         return self.hard + self.soft
 
 
+def _refusal(text: str, out: dict, *, raised: bool) -> str:
+    homes = [Path(h) for h in (out.get("home"),) if h]
+    return tool_sandbox.protected_path_note(
+        text, homes + [tool_sandbox.sandbox_home()], raised=raised,
+    )
+
+
+def _result_text(out: dict) -> str:
+    result = out.get("result")
+    return "" if result is None else json.dumps(result, default=str, ensure_ascii=False)
+
+
+def refusal_note(out: dict) -> str:
+    """What the tool sandbox refused in this call, for the drafter (#114).
+
+    "" unless the call's error or a background-thread error names a path
+    the installed-tool sandbox closes, or its returned value reports a
+    failed file operation on one (see
+    :func:`tools.tool_sandbox.protected_path_note`). :func:`run_dry_run`
+    adds it to the hard problems once per run.
+    """
+    errors = [str(out.get("exception") or ""), *map(str, out.get("thread_errors") or [])]
+    for text in errors:
+        note = _refusal(text, out, raised=True) if text else ""
+        if note:
+            return note
+    return _refusal(_result_text(out), out, raised=False)
+
+
 def evaluate_call(call: DryRunCall, out: dict, after: set[str], label: str) -> DryRunResult:
     """Turn one probe result into hard and soft problems."""
     if out.get("timeout"):
@@ -434,6 +499,13 @@ def evaluate_call(call: DryRunCall, out: dict, after: set[str], label: str) -> D
         if not isinstance(result, dict) or "status" not in result:
             problems.append(
                 f"{label}: returned {_short(result)} instead of a dict with a 'status' key"
+            )
+        elif _refusal(_result_text(out), out, raised=False):
+            # #114: the draft caught the sandbox's refusal and reported it. A
+            # well-formed result, but the tool cannot do its job like this.
+            problems.append(
+                f"{label}: returned {_short(result)}, which shows a path the "
+                "tool sandbox refuses"
             )
         elif (
             call.expect_status
@@ -461,6 +533,7 @@ def run_dry_run(tool_name: str, source: str, plan: DryRunPlan) -> DryRunResult:
     if not sandbox_available():
         return DryRunResult()
     total = DryRunResult()
+    notes: list[str] = []
     for i, call in enumerate(plan.calls, 1):
         label = f"dry run {i} {tool_name}(**{_short(call.kwargs, 80)}) with files {sorted(plan.files)}"
         try:
@@ -471,7 +544,12 @@ def run_dry_run(tool_name: str, source: str, plan: DryRunPlan) -> DryRunResult:
         one = evaluate_call(call, out, after, label)
         total.hard.extend(one.hard)
         total.soft.extend(one.soft)
-    total.hard = total.hard[:MAX_DRY_RUN_PROBLEMS]
+        note = refusal_note(out)
+        if note and one.hard and note not in notes:
+            notes.append(note)
+    # #114: the sandbox's reason goes last, once, and is never cut off: it
+    # is the line that tells the drafter what to change.
+    total.hard = total.hard[:MAX_DRY_RUN_PROBLEMS] + notes
     total.soft = total.soft[:MAX_DRY_RUN_PROBLEMS]
     return total
 
@@ -484,5 +562,5 @@ def remove_sandbox_cache() -> None:
 
 __all__ = [
     "DryRunCall", "DryRunPlan", "DryRunResult", "dry_run_enabled", "evaluate_call",
-    "parse_plan", "plan_dry_run", "run_dry_run", "sandbox_available",
+    "parse_plan", "plan_dry_run", "refusal_note", "run_dry_run", "sandbox_available",
 ]
