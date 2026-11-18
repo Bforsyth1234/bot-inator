@@ -53,6 +53,7 @@ from . import (
 from . import standing_rules
 from . import always_allow as always_allow_mod
 from . import card_batch
+from . import needs_reply as reply_checks
 
 # #117: an undoable card approves itself after this many seconds, only
 # while the user touched the keyboard / mouse in the last
@@ -151,6 +152,118 @@ def _offered_tool(meta: dict[str, Any]) -> str:
         except Exception:
             logger.exception("prepared offer unreadable")
     return str(meta.get("builtin_tool") or "")
+
+
+# ---- #113: a reply drafts in the thread, not as a new email ----------------
+# The live run: the agent read the email (message_id 449983), then called
+# draft_email(to=<sender>, subject="Re: ...", reply_to_message_id=0), which
+# opens a NEW message. In a turn about one email, such a call gets that
+# email's id before its card. It never changes a recipient and never turns a
+# draft to someone else into a reply; the card still asks (7a).
+_MAIL_READ_TOOLS = frozenset({"read_email", "list_recent_emails"})
+_RE_PREFIX_RE = re.compile(r"^\s*re\s*:", re.IGNORECASE)
+
+
+def _note_mail_read(orch: Any, event_id: str, tool_name: str, result: Any) -> None:
+    """Remember (in memory, this turn only) the emails a read returned."""
+    if tool_name not in _MAIL_READ_TOOLS or not isinstance(result, dict):
+        return
+    if result.get("status") != "ok":
+        return
+    found = [result] if tool_name == "read_email" else list(result.get("emails") or [])
+    store = getattr(orch, "_turn_mail_reads", None)
+    if not store or store[0] != event_id:
+        store = (event_id, {})
+        orch._turn_mail_reads = store
+    for item in found:
+        if not isinstance(item, dict):
+            continue
+        try:
+            mid = int(item.get("message_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if mid > 0:
+            store[1][mid] = {
+                "message_id": mid,
+                "sender": str(item.get("sender") or ""),
+                "subject": str(item.get("subject") or ""),
+            }
+
+
+def _turn_email(orch: Any, event_id: str) -> Optional[dict[str, Any]]:
+    """The one email this turn is about, or None: a ``mail_received``
+    event's email; else, in a turn whose idea names a message (#70), that
+    message once read; else the only email the turn's reads returned."""
+    store = getattr(orch, "_turn_mail_reads", None)
+    reads: dict[int, dict[str, Any]] = store[1] if store and store[0] == event_id else {}
+    meta = getattr(orch, "_current_event_meta", None) or {}
+    if getattr(orch, "_current_event_type", "") == "mail_received":
+        try:
+            mid = int(meta.get("message_id") or 0)
+        except (TypeError, ValueError):
+            mid = 0
+        if mid <= 0:
+            return None
+        seen = reads.get(mid, {})
+        return {
+            "message_id": mid,
+            "sender": str(meta.get("sender") or seen.get("sender") or ""),
+            "subject": str(meta.get("subject") or seen.get("subject") or ""),
+        }
+    idea = getattr(orch, "_current_idea", None) or {}
+    if idea.get("reply_to_message_id"):
+        try:
+            return reads.get(int(idea["reply_to_message_id"]))
+        except (TypeError, ValueError):
+            return None
+    if len(reads) == 1:
+        return next(iter(reads.values()))
+    return None
+
+
+def _fill_reply_id(
+    orch: Any, event_id: str, param_names: list[str],
+    call_args: list[Any], call_kwargs: dict[str, Any],
+) -> Optional[tuple[dict[str, Any], dict[str, Any]]]:
+    """``(kwargs with reply_to_message_id set, the email)`` when a
+    ``draft_email`` call with id 0 answers the turn's one email: its ``to``
+    includes that email's sender, or it has no ``to`` and its subject is
+    "Re: <that subject>". None otherwise (the call is left as it is)."""
+    merged = dict(zip(param_names, call_args))
+    merged.update(call_kwargs)
+    try:
+        if int(merged.get("reply_to_message_id") or 0):
+            return None
+    except (TypeError, ValueError):
+        return None
+    email_ = _turn_email(orch, event_id)
+    if not email_:
+        return None
+    sender = set(reply_checks.extract_addresses(email_["sender"]))
+    to = merged.get("to") or ""
+    to_addrs = set(reply_checks.extract_addresses(
+        ",".join(map(str, to)) if isinstance(to, (list, tuple)) else str(to)
+    ))
+    if to_addrs:
+        matches = bool(sender & to_addrs)
+    else:
+        subject = str(merged.get("subject") or "")
+        original = reply_checks.strip_subject_prefix(email_["subject"]).casefold()
+        matches = bool(
+            original and _RE_PREFIX_RE.match(subject)
+            and reply_checks.strip_subject_prefix(subject).casefold() == original
+        )
+    if not matches:
+        return None
+    merged["reply_to_message_id"] = email_["message_id"]
+    return merged, email_
+
+
+def _sender_label(sender: str) -> str:
+    from email.utils import parseaddr
+
+    name, addr = parseaddr(sender or "")
+    return name or addr or sender or "the sender"
 
 
 def _now_iso() -> str:
@@ -298,6 +411,10 @@ class Orchestrator:
         # the approval-card decision log (``DecisionLog``), set by main.py.
         self.idea_outcomes: Optional[Any] = None
         self.approval_decisions: Optional[Any] = None
+        # #118: ``ai.training_corpus.TrainingCorpus`` (set by main.py). Its
+        # ``record`` is a no-op while the opt-in is off.
+        self.training_corpus: Optional[Any] = None
+        self._current_prompt: str = ""
         # The idea offer the last idea card recorded (#79), so a successful
         # generate_custom_tool links the installed name to it.
         self._last_offer_id: Optional[str] = None
@@ -950,6 +1067,7 @@ class Orchestrator:
         self._turn_kind = "event"
         self._current_event_type = event.event_type
         self._current_event_meta = dict(event.metadata or {})
+        self._current_prompt = ""
         self._current_idea = None
         # Personal text an idea may quote later (#51).
         privacy.note_personal_event(event)
@@ -1373,6 +1491,7 @@ class Orchestrator:
         user-chat turns (which may invoke ``generate_custom_tool``)
         get more room. ``None`` falls back to smolagents' default.
         """
+        self._current_prompt = prompt  # #118: the prompt behind any card
         if self._agent is None:
             return await self._fallback_run(event_id, prompt)
         self._current_event_id = event_id
@@ -1461,6 +1580,18 @@ class Orchestrator:
             call_kwargs: dict[str, Any] = {
                 k: v for k, v in kwargs.items() if v is not None
             }
+            reply_email: Optional[dict[str, Any]] = None
+            if tool_name == "draft_email" and not bypass:
+                # #113: before any card, batch or dedupe key.
+                filled = _fill_reply_id(
+                    orchestrator, event_id, param_names, call_args, call_kwargs,
+                )
+                if filled is not None:
+                    call_kwargs, reply_email = filled
+                    call_args = []
+                    args, kwargs = (), dict(call_kwargs)
+                    logger.info("draft_email: reply_to_message_id set to %s (#113)",
+                                reply_email["message_id"])
             if (
                 tool_name == "generate_custom_tool"
                 and tool_name in orchestrator._turn_tool_calls
@@ -1586,6 +1717,10 @@ class Orchestrator:
                         "\n" + extra["summary"] if extra.get("summary") else ""
                     )
                 reasoning = f"Agent wants to call {tool_name}"
+                if reply_email is not None:
+                    reasoning += (
+                        f". Reply in the thread with {_sender_label(reply_email['sender'])}"
+                    )
                 note_fn = getattr(tool, "card_note", None)
                 if callable(note_fn):
                     # #102: a built-in's one line for its card (app, file).
@@ -1678,6 +1813,11 @@ class Orchestrator:
                         orchestrator, tool_name, exc=exc, args=call_args, kwargs=call_kwargs,
                     )
                 raise
+            try:
+                # #113: which email(s) this turn read, before redaction.
+                _note_mail_read(orchestrator, event_id, tool_name, result)
+            except Exception:
+                logger.exception("mail read note failed")
             if shield is not None:
                 # #81: what this call returned marks the turn. Before the
                 # read_email redaction below: the shield matches the real
@@ -1837,6 +1977,7 @@ class Orchestrator:
         self._current_event_type = str(meta.get("event_type") or "mail_received")
         self._current_event_meta = {}
         self._current_idea = None
+        self._current_prompt = ""
         self._current_builtin_idea = None
         self._current_event_id = event_id
         await self._emit_thought(
@@ -2064,6 +2205,12 @@ class Orchestrator:
             self._pending.pop(request_id, None)
             logger.info("Approval %s timed out", request_id)
             self._record_offer_verdict(offer_id, "timed_out")
+            self._record_training_row(
+                "timed_out", tool_name, tool_args, None, offer_id=offer_id,
+                request_id=request_id, event_id=event_id, trigger=trigger,
+                reasoning=reasoning, summary=summary, actions=actions,
+                origin_notes=origin_notes,
+            )
             await self._send_approval_resolved(request_id, "timed_out")
             return False, None
         finally:
@@ -2080,6 +2227,12 @@ class Orchestrator:
             offer_id, "approved" if resp.approved else "declined"
         )
         self._record_decision(tool_name, tool_args, bool(resp.approved), resp.edited_args)
+        self._record_training_row(
+            "approved" if resp.approved else "denied", tool_name, tool_args,
+            resp.edited_args, offer_id=offer_id, request_id=request_id,
+            event_id=event_id, trigger=trigger, reasoning=reasoning,
+            summary=summary, actions=actions, origin_notes=origin_notes,
+        )
         if resp.approved and resp.always_allow and allow_label:
             # #116: only the user's click on a card that offered it. The
             # label check means a client can't grant what wasn't offered.
@@ -2189,6 +2342,37 @@ class Orchestrator:
             outcomes.record_verdict(offer_id, verdict)
         except Exception:
             logger.exception("idea_outcomes.record_verdict failed")
+
+    def _record_training_row(
+        self,
+        verdict: str,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        edited_args: Optional[dict[str, Any]],
+        **kw: Any,
+    ) -> None:
+        """#118: one training-corpus row per card decision (no-op unless opted in)."""
+        corpus = getattr(self, "training_corpus", None)
+        if corpus is None:
+            return
+        try:
+            from ai import training_corpus as tc  # noqa: WPS433
+
+            origin_notes = kw.pop("origin_notes", None)
+            corpus.record(
+                tool_name=tool_name, tool_args=tool_args, verdict=verdict,
+                edited_args=edited_args,
+                prompt=getattr(self, "_current_prompt", "") or "",
+                event_type=getattr(self, "_current_event_type", "") or "",
+                event_meta=(getattr(self, "_current_idea", None)
+                            or getattr(self, "_current_event_meta", None) or {}),
+                tainted=bool(origin_notes),
+                outside_kinds=tc.outside_kinds_of(getattr(self, "_taint", None)),
+                **{k: (v if v is not None else "") if k in ("summary", "trigger") else v
+                   for k, v in kw.items()},
+            )
+        except Exception:
+            logger.exception("training_corpus.record failed")
 
     def _record_decision(
         self, tool_name: str, tool_args: dict[str, Any], approved: bool,
@@ -2470,11 +2654,16 @@ class Orchestrator:
             if privacy.should_redact("main"):
                 raw_details = meta.get("event_details_redacted", privacy.PLACEHOLDER)
             details = json.dumps(raw_details, default=str)[:1500]
+            reply_line = ""
+            if builtin == "draft_email" and meta.get("reply_to_message_id"):
+                # #113 / #70: a reply drafts in the thread.
+                reply_line = reply_checks.reply_instruction(meta["reply_to_message_id"]) + "\n"
             return (
                 "You are an on-device macOS assistant. An event just happened "
                 "that has a known follow-up.\n\n"
                 f"Event details: {details}\n"
                 f"Follow-up: {description}\n\n"
+                f"{reply_line}"
                 f"Call the built-in `{builtin}` tool now to do this follow-up, "
                 "with arguments taken from the event details (if the follow-up "
                 "says to read an email first, call `read_email` with its "
@@ -2608,6 +2797,7 @@ class Orchestrator:
             "- A meeting or appointment with a date and time: call "
             "`create_event` exactly once.\n"
             "Both tools ask the user for approval before anything is saved.\n"
+            f"{reply_checks.reply_instruction(message_id)}\n"
             "Newsletters, receipts, promotions, notifications and anything "
             "that needs no action from the user: call `final_answer` with "
             "'no action'."

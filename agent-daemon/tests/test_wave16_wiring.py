@@ -637,7 +637,9 @@ def test_swift_embeds_wave16() -> None:
     settings = _swift("SettingsView.swift")
     for view in ("RulesView()", "RemoteSettingsView()", "MeetingNotesSettingsView()", "RecordShortcut"):
         assert view in settings, view
-    app = _swift("MenuBarUIApp.swift")
+    # The main-window commits (#31) split the menu bar UI across these files.
+    app = "\n".join(_swift(n) for n in (
+        "MenuBarUIApp.swift", "MainWindowView.swift", "StatusItemController.swift"))
     for part in ("DemonstrationPanelController(", "RecordHotKeyController.shared.start",
                  "Watch me…", "record.circle.fill", "MeetingRecorderMenuItems()",
                  ".demonstrationTrace"):

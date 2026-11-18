@@ -445,6 +445,14 @@ async def lifespan(app: FastAPI):
         _store_path("AGENT_ACTIONS_DB", action_journal.default_path()), outcomes=idea_outcomes,
     )
     orchestrator.action_journal = app.state.action_journal
+    # #118: opt-in training corpus (records nothing while the opt-in is off).
+    from ai import training_corpus  # noqa: WPS433
+
+    app.state.training_corpus = training_corpus.TrainingCorpus(
+        _store_path("AGENT_TRAINING_DB", training_corpus.default_path()),
+    )
+    orchestrator.training_corpus = app.state.training_corpus
+    app.state.action_journal.add_undo_listener(app.state.training_corpus.undo_listener)
     # #90: generated-tool health; repeated failures offer a repair.
     from ai import tool_health  # noqa: WPS433
 
@@ -636,6 +644,10 @@ async def lifespan(app: FastAPI):
             app.state.action_journal.close()
         except Exception:
             logger.exception("Error closing the action journal")
+        try:
+            app.state.training_corpus.close()
+        except Exception:
+            logger.exception("Error closing the training corpus")
         set_default_memory(None)
         screen_text.set_turn_kind_provider(None)
         try:
@@ -704,6 +716,10 @@ from routes import rules as rules_routes  # noqa: E402
 app.include_router(rules_routes.router)
 app.include_router(remote_routes.router)
 app.include_router(meeting_notes_routes.router)
+# Wave 22: opt-in training corpus (#118).
+from routes import training as training_routes  # noqa: E402
+
+app.include_router(training_routes.router)
 # #97: provider presets (List models, Test).
 app.include_router(providers_routes.router)
 # #93: first-run engine choice.

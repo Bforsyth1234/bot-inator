@@ -223,7 +223,8 @@ def draft_email(to: str, subject: str, body: str, cc: str = "",
     Args:
         to: Recipient email address, or several separated by commas. For a
             reply, the address of the person being replied to.
-        subject: Subject line. For a reply, leave empty to keep "Re: ...".
+        subject: Subject line. For a reply, leave it empty: Mail sets
+            "Re: <original subject>" itself and a typed subject is ignored.
         body: Plain-text body of the email; line breaks are kept.
         cc: Optional Cc address(es), comma-separated. Empty for none.
         reply_to_message_id: To reply to an existing email, the
@@ -264,6 +265,14 @@ def draft_email(to: str, subject: str, body: str, cc: str = "",
         return fail("subject must be a single line")
 
     to_arg, cc_arg = ",".join(to_list), ",".join(cc_list)
+    typed_subject = subject
+    if reply_id:
+        # #113: a reply's subject comes from Mail's own ``reply`` ("Re: ...").
+        # A subject the model typed is ignored, so it is never "Re: Re: ...".
+        subject = ""
+        base["subject"] = ""
+        if typed_subject:
+            base["ignored_subject"] = typed_subject
     try:
         if reply_id:
             out = _run(_REPLY_SCRIPT, str(reply_id), to_arg, cc_arg, subject, body,
@@ -273,8 +282,44 @@ def draft_email(to: str, subject: str, body: str, cc: str = "",
     except Exception as exc:
         return fail(_error(exc))
     if out == "NOT_FOUND":
-        return fail(f"No message with id {reply_id} in Mail; nothing was drafted.")
+        missing = (f"No message with id {reply_id} in Mail (moved or deleted?), "
+                   "so this is not a reply in the thread.")
+        if not to_list:
+            return fail(missing + " Nothing was drafted.")
+        # #113: the card said so (``card_note``): a new message instead.
+        try:
+            _run(_NEW_SCRIPT, to_arg, cc_arg, typed_subject, body)
+        except Exception as exc:
+            return fail(missing + " A new message could not be opened either: " + _error(exc))
+        return {"status": "ok", **base, "subject": typed_subject, "reply_to_message_id": 0,
+                "reply_not_found": reply_id, "fallback": "new_message",
+                "note": missing + " Opened a NEW message instead. " + _NOTE}
     result = {"status": "ok", **base, "note": _NOTE}
     if out == "OK_NO_QUOTE":
         result["note"] = _NOTE + " The original message could not be quoted in the draft."
     return result
+
+
+def card_note(to: Any = "", subject: Any = "", body: Any = "", cc: Any = "",
+              reply_to_message_id: Any = 0, *args: Any, **kwargs: Any) -> str:
+    """#113: the card's line for a reply, including what happens if Mail
+    can no longer find the email (the only case that opens a new message)."""
+    try:
+        reply_id = int(reply_to_message_id or 0)
+    except (TypeError, ValueError):
+        reply_id = 0
+    if reply_id <= 0:
+        return "Opens a new, unsent email draft in Mail"
+    try:
+        to_list = parse_addresses(to)
+    except ValueError:
+        to_list = []
+    line = (f"Opens an unsent reply in the thread of email {reply_id}, quoting it; "
+            "Mail sets the \"Re:\" subject")
+    if to_list:
+        return line + (". If Mail can't find that email, it opens a new message to "
+                       + ", ".join(to_list) + " instead")
+    return line + ". If Mail can't find that email, nothing is drafted"
+
+
+draft_email.card_note = card_note  # type: ignore[attr-defined]

@@ -170,7 +170,8 @@ def test_reply_accepts_numeric_string_and_extra_recipients() -> None:
     with mock.patch.object(email_draft.subprocess, "run", run):
         draft_email(to="a@example.com", subject="Re: x", body="ok", cc="c@example.com",
                     reply_to_message_id="12")
-    assert _argv(run)[3:] == ["--", "12", "a@example.com", "c@example.com", "Re: x", "ok"]
+    # #113: Mail's reply sets "Re: …"; a typed subject on a reply is ignored.
+    assert _argv(run)[3:] == ["--", "12", "a@example.com", "c@example.com", "", "ok"]
 
 
 @pytest.mark.parametrize("bad_id", ["abc", -3, "1; quit", "1.5x"])

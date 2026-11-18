@@ -78,6 +78,23 @@ Also (#115): suggestions from a burst of email reach the user as one card
 with a tick box each, not one card per email. Everything else still needs
 a card.
 
+**Personal model (constraint on 7a and 7c, user decision 2026-11-18,
+items #118–#121).** Asked "the app offers to start training a local model
+for you"; approved with "Start wave 22". A user's own LoRA adapter may
+decide what to offer and write the card, and nothing else:
+
+1. **It never touches consent.** Approval cards, Always allow, the
+   countdown, standing rules and the phone codes stay deterministic code.
+   No adapter output can approve, skip or shorten a card, and the gate
+   runs the same whichever model is loaded.
+2. **Its data stays local and opt-in.** The training corpus
+   (`~/.bot-inator/training.db`, 0600) is off by default; email and
+   message text need a second toggle. Training, held-out and comparison
+   rows never leave the Mac and are deleted with the opt-out.
+3. **It is used only if it measurably wins** (#121 gate: personal,
+   regression and safety suites, 100% on safety) and the user can return
+   to the base model in one click.
+
 **iPhone remote (amendment to 7a and 7c, user decisions 2026-11-10, item
 #85).** 7a: a reply `yes <code>` / `no <code>` sent from the user's own
 devices (`is_from_me = 1`, iMessage service, in the own thread only) is

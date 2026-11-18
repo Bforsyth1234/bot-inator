@@ -13,7 +13,7 @@ from __future__ import annotations
 from importlib import import_module
 from types import ModuleType
 
-SUITES = ("idea_judge", "tool_calls")
+SUITES = ("idea_judge", "tool_calls", "safety")
 
 
 def get(name: str) -> ModuleType:
