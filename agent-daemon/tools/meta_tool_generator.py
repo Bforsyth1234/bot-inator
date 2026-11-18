@@ -116,6 +116,9 @@ Sandbox limits (CRITICAL — your tool runs under macOS sandbox-exec; these fail
   - look at the screen or a window and describe or read what it shows (charts, images, layouts, text in a picture): the built-in `look_at_screen(question, target)`;
   - list recent emails: the built-in `list_recent_emails(count, mailbox)`; one email's body: `read_email(message_id)`.
 * If the requested tool needs one of these anyway, return ``{"status": "error", "message": "<which built-in to call instead>"}`` rather than code that cannot work.
+* Deleting (CRITICAL): it CANNOT delete anything for good. `os.remove`, `os.unlink`, `os.rmdir`, `os.removedirs`, `shutil.rmtree`, `Path.unlink`, `Path.rmdir`, `rm` and emptying the Trash fail under the sandbox outside the tool's own folders (`~/Documents/bot-inator/` and the temp dir), and a move or rename may not replace an existing file. To delete files or folders, move them to the Trash (the user can get them back): `from tools.tool_sandbox import move_to_trash`, then `move_to_trash(path)` or `move_to_trash([path, ...])`; it returns the new paths and raises `PermissionError` naming a path it refused. Do not use Finder's AppleScript `delete` (the sandbox blocks Apple Events to Finder). Moving files with `shutil.move` / `os.rename` still works, to a name that is free.
+* Mail: to delete messages, move them to Mail's Trash mailbox (`move theMessage to trash mailbox` inside `tell application "Mail"`), never `delete`; never empty or erase deleted messages.
+* Reminders and Calendar events have no Trash, so a generated tool MUST NOT delete reminders, lists, events or calendars. If asked to, return ``{"status": "error", "message": "reminders and calendar events have no Trash, so a generated tool cannot delete them; delete them in the Reminders or Calendar app"}``.
 * Folders: it CANNOT read or write `~/.bot-inator` or `~/.ssh`, and CANNOT write under `~/Library` or to shell start-up files (`~/.zshrc`, `~/.bash_profile`, ...). Keep files your tool creates for itself (state, lists, logs) under `~/Documents/bot-inator/` (create the folder if it is missing), even when `expected_logic` names one of the refused folders. Only when the task needs a refused folder itself (not a file of the tool's own), return ``{"status": "error", "message": "<a generated tool cannot use that folder>"}``.
 
 User-visible output rules:
@@ -407,6 +410,216 @@ def _validate_source(tool_name: str, source: str) -> None:
         raise ToolGenerationError(
             f"no @tool function named {tool_name!r} found in draft"
         )
+    delete_problem = delete_code_problem(tree)
+    if delete_problem:
+        raise ToolGenerationError(delete_problem)
+
+
+# ---- deletes go to the Trash (#123) -------------------------------------
+#
+# User decision B (2026-11-18): a generated tool may move things to the
+# Trash, never unlink outside its own folders. The sandbox enforces it
+# (``tools.tool_sandbox.unlink_rules``); these checks catch it in the draft,
+# so the drafter fixes it before the dry run and the review card.
+
+# Text in a delete call's path that names the tool's own folders.
+_OWN_FOLDER_MARKERS: tuple[str, ...] = (
+    "bot-inator", "tempfile", "mkdtemp", "mkstemp", "gettempdir",
+    "TemporaryDirectory", "NamedTemporaryFile", "TMPDIR",
+)
+_OS_DELETE_FUNCS = frozenset({"remove", "unlink", "rmdir", "removedirs"})
+_SHUTIL_DELETE_FUNCS = frozenset({"rmtree"})
+_PATH_DELETE_METHODS = frozenset({"unlink", "rmdir"})
+_SHELL_DELETE_PROGRAMS = frozenset({"rm", "rmdir", "unlink", "srm", "shred"})
+_APPLESCRIPT_TELL_RE = re.compile(r'tell\s+application\s+(?:id\s+)?"([^"]+)"', re.I)
+_APPLESCRIPT_DELETE_RE = re.compile(r"\b(?:delete|erase)\b", re.I)
+_EMPTY_TRASH_RE = re.compile(r"\bempty\s+(?:the\s+)?trash\b", re.I)
+_NO_TRASH_APPS = ("reminders", "calendar", "ical", "com.apple.reminders", "com.apple.ical")
+
+_TRASH_FIX = (
+    "To delete files or folders, move them to the Trash instead: "
+    "`from tools.tool_sandbox import move_to_trash` and call "
+    "`move_to_trash(path)`; generated tools may unlink only inside their own "
+    "folders (~/Documents/bot-inator/ or the temp dir)"
+)
+_NO_TRASH_FIX = (
+    "reminders and calendar events have no Trash, so a generated tool may not "
+    "delete them; return {\"status\": \"error\", \"message\": \"delete them in the "
+    "Reminders or Calendar app\"} instead"
+)
+
+
+def _assignments(tree: ast.AST) -> dict[str, list[ast.expr]]:
+    names: dict[str, list[ast.expr]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for t in ast.walk(target):
+                    if isinstance(t, ast.Name):
+                        names.setdefault(t.id, []).append(node.value)
+        elif isinstance(node, (ast.For, ast.comprehension)):
+            for t in ast.walk(node.target):
+                if isinstance(t, ast.Name):
+                    names.setdefault(t.id, []).append(node.iter)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    for t in ast.walk(item.optional_vars):
+                        if isinstance(t, ast.Name):
+                            names.setdefault(t.id, []).append(item.context_expr)
+    return names
+
+
+def _names_own_folder(expr: ast.expr, assigned: dict[str, list[ast.expr]], depth: int = 4) -> bool:
+    """``expr`` (a delete call's path) visibly lies in the tool's own folders."""
+    text = ast.unparse(expr)
+    if any(marker in text for marker in _OWN_FOLDER_MARKERS):
+        return True
+    if depth <= 0:
+        return False
+    for node in ast.walk(expr):
+        if isinstance(node, ast.Name):
+            for value in assigned.get(node.id, []):
+                if value is not expr and _names_own_folder(value, assigned, depth - 1):
+                    return True
+    return False
+
+
+def _string_text(node: ast.AST) -> Optional[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            v.value for v in node.values
+            if isinstance(v, ast.Constant) and isinstance(v.value, str)
+        )
+    return None
+
+
+def _applescript_problem(text: str) -> str:
+    if _EMPTY_TRASH_RE.search(text):
+        return ("draft empties the Trash, which deletes for good; a generated "
+                "tool may only move things to the Trash")
+    apps = [a.lower() for a in _APPLESCRIPT_TELL_RE.findall(text)]
+    if not apps or not _APPLESCRIPT_DELETE_RE.search(text):
+        return ""
+    if any(a in _NO_TRASH_APPS for a in apps):
+        return f"draft deletes reminders or calendar events in AppleScript: {_NO_TRASH_FIX}"
+    if "mail" in apps:
+        return ("draft deletes Mail messages with AppleScript `delete`; move them "
+                "to Mail's Trash mailbox instead (`move theMessage to trash mailbox`)")
+    if "finder" in apps or "system events" in apps:
+        return ("draft deletes files through Finder or System Events (the sandbox "
+                "blocks those Apple Events). " + _TRASH_FIX)
+    return ""
+
+
+def delete_code_problem(tree: ast.AST) -> str:
+    """Why the draft deletes something for good (#123), or "".
+
+    Rejected: ``os.remove`` / ``os.unlink`` / ``os.rmdir`` /
+    ``os.removedirs`` / ``shutil.rmtree`` / ``<path>.unlink()`` /
+    ``<path>.rmdir()`` on a path that does not visibly lie in the tool's own
+    folders (``~/Documents/bot-inator/``, a ``tempfile`` folder), those
+    functions imported by name, ``rm`` / ``rmdir`` / ``shred`` run as a
+    program, and AppleScript that empties the Trash, deletes Mail messages
+    (move them to the Trash mailbox) or deletes reminders or events (no
+    Trash). The message says what to do instead; the drafter gets it back.
+    """
+    assigned = _assignments(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in ("os", "shutil", "pathlib"):
+            banned = _OS_DELETE_FUNCS if node.module == "os" else _SHUTIL_DELETE_FUNCS
+            for alias in node.names:
+                if node.module != "pathlib" and alias.name in banned:
+                    return (f"draft imports {node.module}.{alias.name}, which deletes for "
+                            f"good. {_TRASH_FIX}")
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                owner = func.value.id if isinstance(func.value, ast.Name) else ""
+                target: Optional[ast.expr] = None
+                label = ""
+                if owner == "os" and func.attr in _OS_DELETE_FUNCS:
+                    target, label = (node.args[0] if node.args else None), f"os.{func.attr}"
+                elif owner == "shutil" and func.attr in _SHUTIL_DELETE_FUNCS:
+                    target, label = (node.args[0] if node.args else None), f"shutil.{func.attr}"
+                elif func.attr in _PATH_DELETE_METHODS and owner != "os":
+                    target, label = func.value, f".{func.attr}()"
+                if label and (target is None or not _names_own_folder(target, assigned)):
+                    where = ast.unparse(target) if target is not None else "a path"
+                    return (f"draft calls {label} on {where}, which deletes for good "
+                            f"outside the tool's own folders. {_TRASH_FIX}")
+            program = _subprocess_program(node)
+            if program in _SHELL_DELETE_PROGRAMS:
+                return f"draft runs `{program}`, which deletes for good. {_TRASH_FIX}"
+        text = _string_text(node)
+        if text:
+            problem = _applescript_problem(text)
+            if problem:
+                return problem
+    return ""
+
+
+def _subprocess_program(node: ast.Call) -> str:
+    """The program name of ``subprocess.run(["rm", ...])``-style calls."""
+    if _shell_call_name(node) not in {"run", "call", "check_call", "check_output", "Popen"}:
+        return ""
+    if not node.args:
+        return ""
+    first = node.args[0]
+    if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+        head = _string_text(first.elts[0])
+    else:
+        head = _string_text(first)
+        head = head.split()[0] if head and head.split() else head
+    return os.path.basename(head or "").lower()
+
+
+# A delete verb, then (within a few words) something with no Trash.
+_NO_TRASH_DELETE_RE = re.compile(
+    r"\b(?:delet|remov|clear|eras|purg|wip|trash|cancel)\w*\s+(?:[\w'-]+\s+){0,3}?"
+    r"(?:reminders?|to-?dos?|calendar\s+events?|events?|calendars?|meetings?|"
+    r"appointments?|invites?|invitations?)\b",
+    re.I,
+)
+_PERMANENT_RE = re.compile(
+    r"\b(?:empty(?:ing)?\s+(?:the\s+|my\s+)?trash|permanent\w*|for\s+good|"
+    r"secure(?:ly)?\s+(?:delet|eras)\w*|shred\w*|unlink\w*|rm\s+-rf?)\b",
+    re.I,
+)
+_NEGATED_PERMANENT_RE = re.compile(
+    r"\b(?:never|not|no|without|instead\s+of|rather\s+than)\s+(?:\w+\s+){0,3}?"
+    r"(?:permanent\w*|for\s+good|unlink\w*|empty\w*)",
+    re.I,
+)
+
+
+def delete_idea_problem(tool_name: str, description: str, expected_logic: str) -> str:
+    """Why a tool idea may not be built under #123's rule, or "".
+
+    Deterministic, before any drafting: an idea that deletes reminders or
+    calendar events (no Trash to get them back from), empties the Trash, or
+    deletes permanently. Deleting files and mail is fine: the generated tool
+    moves them to the Trash.
+    """
+    text = " ".join((tool_name.replace("_", " "), description or "", expected_logic or ""))
+    if _NO_TRASH_DELETE_RE.search(text):
+        return (
+            "Reminders and calendar events have no Trash, so a generated tool may "
+            "not delete them. Tell the user they can delete them in the Reminders "
+            "or Calendar app."
+        )
+    permanent = _PERMANENT_RE.search(_NEGATED_PERMANENT_RE.sub(" ", text))
+    if permanent:
+        return (
+            f"A generated tool may not delete anything for good ({permanent.group(0)!r}); "
+            "it can only move files to the Trash (and Mail messages to Mail's Trash "
+            "mailbox), where the user can get them back. Offer that instead, or tell "
+            "the user to empty the Trash themselves."
+        )
+    return ""
 
 
 _BANNED_BUILTIN_CALLS = frozenset({"eval", "exec", "compile", "__import__"})
@@ -1077,6 +1290,10 @@ def generate_custom_tool(
     generated tool runs in a sandbox that cannot do those, so call the
     built-ins ``quit_app``, ``take_screenshot``, ``look_at_screen``,
     ``list_recent_emails`` and ``read_email`` instead.
+    A generated tool can delete files and Mail messages only by moving
+    them to the Trash (say so in ``expected_logic``); it cannot delete
+    reminders or calendar events (they have no Trash), empty the Trash, or
+    delete anything for good.
     When the tool needs a file of its own (a list, saved state), name a
     path under ``~/Documents/bot-inator/`` in ``expected_logic``: the
     sandbox refuses ``~/.bot-inator`` and ``~/.ssh``, and writing under
@@ -1111,6 +1328,12 @@ def generate_custom_tool(
         _validate_identifier(tool_name)
     except ToolGenerationError as exc:
         return {"status": "error", "tool_name": tool_name, "error": str(exc)}
+
+    # #123: deletes go to the Trash; ideas that cannot (reminders, events,
+    # emptying the Trash) are refused before any drafting.
+    refusal = delete_idea_problem(tool_name, description, expected_logic)
+    if refusal:
+        return {"status": "error", "tool_name": tool_name, "error": refusal}
 
     # Name-collision guard (todo #24): a generated tool with this exact
     # name already exists (on disk or loaded). Reject before any drafting

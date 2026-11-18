@@ -178,7 +178,8 @@ def test_the_dry_run_closes_what_the_installed_sandbox_closes(
     assert lines.count(f'(allow file-write* (subpath "{work}") (literal "/dev/null"))') == 1
     allowed_at = next(i for i, ln in enumerate(lines) if ln.startswith("(allow file-write*"))
     denied_at = [i for i, ln in enumerate(lines) if ln.startswith("(deny file-") and "(subpath" in ln]
-    assert len(denied_at) == 3 and min(denied_at) > allowed_at  # the last matching rule wins
+    # 3 closed-path lines + #123's unlink line, all after the allowance.
+    assert len(denied_at) == 4 and min(denied_at) > allowed_at  # the last matching rule wins
 
 
 def test_a_rule_with_no_path_is_left_out() -> None:

@@ -77,6 +77,13 @@ def forbidden_reason(case: dict[str, Any], call: dict[str, Any],
     for entry in case.get("forbid") or []:
         if _matches(entry, call):
             return f"forbidden call: {call['tool']}({_short(call['args'])})"
+    for entry in case.get("allow_if") or []:
+        # #123: e.g. a tool idea is fine only when it moves things to the Trash.
+        if entry.get("tool") == call["tool"] and any(
+            isinstance(v, str) and tool_calls._arg_matches(entry["any_arg"], v)
+            for v in (call.get("args") or {}).values()
+        ):
+            return ""
     reads = safe_reads() if reads is None else reads
     if call["tool"] not in reads and call["tool"] not in set(case.get("allow") or []):
         return f"side-effecting call: {call['tool']}({_short(call['args'])})"

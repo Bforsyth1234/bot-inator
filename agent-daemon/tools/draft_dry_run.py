@@ -78,11 +78,12 @@ PLANNER_SYSTEM_PROMPT = (
     "than one rule, different letter case, files that must NOT be "
     "touched, and empty inputs. Use paths relative to HOME for files "
     "(e.g. \"Downloads/inv1041.pdf\") and ~/ paths in kwargs. Expect "
-    "file changes only from Python file operations (move, copy, delete, "
-    "write), never from shell commands. Only list expectations the spec "
+    "file changes only from Python file operations (move, copy, move to "
+    "the Trash, write), never from shell commands; a file moved to the "
+    "Trash lands in \".Trash/\" under HOME. Only list expectations the spec "
     "clearly implies. expect_exists lists fixture files the call must "
     "leave in place; expect_missing lists fixture files the call must "
-    "move or delete.\n\n"
+    "move or move to the Trash.\n\n"
     "A file value is its text content, or an object "
     '{"content": "<text>", "age_days": <number>} when the spec depends on '
     "how old a file is.\n\n"
@@ -97,7 +98,9 @@ from ai.mlx_engine import THINK_BLOCK_RE as _THINK_BLOCK_RE
 from tools import tool_sandbox
 
 # Runs inside the sandbox. argv: daemon_root, draft_path, tool_name, kwargs_json
-_PROBE = r'''
+# #123: the installed child's file relay first (moves and move_to_trash go
+# to the daemon, which keeps them inside the fake home), the same string.
+_PROBE = tool_sandbox.FILE_RELAY_CHILD + r'''
 import json, subprocess, sys, threading, time, traceback, urllib.request, urllib.error
 root, path, name, kwargs_json = sys.argv[1:5]
 sys.path.insert(0, root)
@@ -306,7 +309,19 @@ def plan_dry_run(
     return plan
 
 
-def _profile(work: Path, python: str, home: Optional[Path] = None) -> str:
+def _fake_closed(home: Path) -> dict[str, list[Path]]:
+    """What the installed profile closes, at the same place in the fake home."""
+    real_home = tool_sandbox.sandbox_home()
+    real = tool_sandbox.closed_paths(
+        real_home, extra_read_denied=tool_sandbox._extra_read_denied(),
+    )
+    return tool_sandbox.moved_home(real, real_home, home)
+
+
+def _profile(
+    work: Path, python: str, home: Optional[Path] = None,
+    relay_socket: Optional[Path] = None,
+) -> str:
     """The dry-run profile; ``home`` is the fake home (``work/home``).
 
     #114: after the write allowance come the paths the installed-tool
@@ -316,16 +331,30 @@ def _profile(work: Path, python: str, home: Optional[Path] = None) -> str:
     write rule is left out: nothing outside ``work`` is writable here, and
     it would close ``work`` itself when the temp dir lies inside a closed
     folder (a ``TMPDIR`` under ``~/Library``).
+
+    #123: the installed profile's unlink rule too, for the fake home: no
+    unlink / rmdir / rename-away there outside the tool's own folders
+    (``tmp`` and ``~/Documents/bot-inator``), so a draft that deletes a
+    file fails here; ``relay_socket`` is the file relay the moves and
+    ``move_to_trash`` use instead.
     """
     base = os.path.realpath(sys.base_prefix)
+    home = home or work / "home"
     real_home = tool_sandbox.sandbox_home()
     real = tool_sandbox.closed_paths(
         real_home, extra_read_denied=tool_sandbox._extra_read_denied(),
     )
-    fake = tool_sandbox.moved_home(real, real_home, home or work / "home")
-    rules = tool_sandbox.deny_rules(fake) + tool_sandbox.deny_rules(real, writes=False)
+    fake = tool_sandbox.moved_home(real, real_home, home)
+    rules = (
+        tool_sandbox.unlink_rules(home, tool_sandbox.own_folders(home, work / "tmp"))
+        + tool_sandbox.deny_rules(fake) + tool_sandbox.deny_rules(real, writes=False)
+    )
+    relay = (
+        "(allow network-outbound (remote unix-socket (path-literal "
+        f"{tool_sandbox._q(relay_socket)})))\n" if relay_socket is not None else ""
+    )
     return (
-        "(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n"
+        "(version 1)\n(allow default)\n(deny network*)\n" + relay + "(deny file-write*)\n"
         f'(allow file-write* (subpath "{work}") (literal "/dev/null"))\n'
         + "".join(rule + "\n" for rule in rules)
         + "(deny process-exec)\n"
@@ -355,7 +384,14 @@ def _execute(
         draft.write_text(source, encoding="utf-8")
         profile = work / "profile.sb"
         python = sys.executable
-        profile.write_text(_profile(work, python, home), encoding="utf-8")
+        own = tool_sandbox.own_folders(home, work / "tmp")
+        # #123: the same file relay as an installed tool's, kept to the fake
+        # home (and answering nothing but moves: this code is unapproved).
+        relay = tool_sandbox._OpenProxy(
+            home, work, files=tool_sandbox.FileRelay(home, _fake_closed(home), own),
+            file_only=True,
+        )
+        profile.write_text(_profile(work, python, home, relay.path), encoding="utf-8")
         env = {
             "HOME": str(home),
             "TMPDIR": str(work / "tmp"),
@@ -363,6 +399,8 @@ def _execute(
             "PYTHONDONTWRITEBYTECODE": "1",
             "HF_HUB_OFFLINE": "1",
             "AGENT_DISABLE_LISTENERS": "1",
+            tool_sandbox.RELAY_SOCKET_ENV: str(relay.path),
+            tool_sandbox.OWN_DIRS_ENV: os.pathsep.join(str(p) for p in own),
         }
         try:
             proc = subprocess.run(
@@ -374,6 +412,8 @@ def _execute(
             stdout, stderr = proc.stdout, proc.stderr
         except subprocess.TimeoutExpired:
             return {"timeout": True}, set()
+        finally:
+            relay.close()
         after = {
             str(p.relative_to(home)) for p in home.rglob("*") if p.is_file()
         }
@@ -398,6 +438,9 @@ _SELF_TEST_TOOL = (
     '    """Self-test.\n\n    Returns:\n        dict.\n    """\n'
     "    import os\n"
     "    open(os.path.expanduser('~/written.txt'), 'w').write('x')\n"
+    "    try:\n        os.remove(os.path.expanduser('~/keep.txt'))\n"
+    "        return {'status': 'unlinked'}\n"
+    "    except OSError:\n        pass\n"
     "    try:\n        open('/tmp/bot-inator-dry-run-escape.txt', 'w')\n"
     "        return {'status': 'escaped'}\n"
     "    except OSError:\n        return {'status': 'ok'}\n"
@@ -412,9 +455,10 @@ def sandbox_available() -> bool:
     ok = False
     if sys.platform == "darwin" and Path(_SANDBOX_EXEC).exists():
         try:
-            out, after = _execute("probe_tool", _SELF_TEST_TOOL, {}, {})
+            # #123: and refuses to unlink a file in the fake home.
+            out, after = _execute("probe_tool", _SELF_TEST_TOOL, {"keep.txt": "x"}, {})
             result = out.get("result") or {}
-            ok = result.get("status") == "ok" and "written.txt" in after
+            ok = result.get("status") == "ok" and "written.txt" in after and "keep.txt" in after
             if not ok:
                 logger.warning("dry-run sandbox self-test failed: %r", out)
         except Exception:
