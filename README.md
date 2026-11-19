@@ -102,7 +102,7 @@ Python environment and builds the menu bar app. It is safe to run again.
 
 `run.sh` starts the daemon in that terminal (Ctrl-C stops it) and opens
 the app once the daemon answers. With the default local provider the first
-start downloads the models (about 12.7 GB); `run.sh` lists them first. It
+start downloads the models (about 12.7 GB, or 8 GB on a Mac under 24 GB); `run.sh` lists them first. It
 adds no login item: run it again after a restart.
 
 ### Pick a model provider
