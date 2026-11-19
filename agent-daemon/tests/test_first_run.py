@@ -21,13 +21,14 @@ from ai import first_run  # noqa: E402
 from ai.groq_engine import OpenAICompatibleEngine  # noqa: E402
 from ai.mlx_engine import MLXEngine  # noqa: E402
 from auth import auth_header  # noqa: E402
-from config import MLX_DEFAULT_MODELS  # noqa: E402
+from config import default_mlx_models  # noqa: E402
 
 SECRET = "sk-ant-test-SECRET-1234abcd"
+_DEFAULTS = default_mlx_models()
 STOCK = {
-    "main": MLX_DEFAULT_MODELS["MLX_MAIN_MODEL"],
-    "analysis": MLX_DEFAULT_MODELS["MLX_ANALYSIS_MODEL"],
-    "drafting": MLX_DEFAULT_MODELS["MLX_DRAFTING_MODEL"],
+    "main": _DEFAULTS["MLX_MAIN_MODEL"],
+    "analysis": _DEFAULTS["MLX_ANALYSIS_MODEL"],
+    "drafting": _DEFAULTS["MLX_DRAFTING_MODEL"],
 }
 _PROVIDER_KEYS = (
     "AGENT_PROVIDER", "AGENT_PROVIDER_MAIN", "AGENT_PROVIDER_ANALYSIS",
@@ -99,6 +100,25 @@ def test_recommend_by_memory(gb, choice):
     rec = first_run.recommend(gb)
     assert rec["choice"] == choice
     assert f"{gb:.0f} GB" in rec["reason"]
+
+
+def test_stock_models_follow_memory(monkeypatch):
+    """#129: a Mac under 24 GB gets the ~8 GB set, every model with a known
+    size so the Download button states the total."""
+    for key in ("MLX_MAIN_MODEL", "MLX_ANALYSIS_MODEL", "MLX_DRAFTING_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    small = default_mlx_models(16)
+    assert small == config.MLX_SMALL_MODELS and default_mlx_models(24) == config.MLX_DEFAULT_MODELS
+    total = sum(first_run.STOCK_MODEL_BYTES[m] for m in small.values())
+    assert total < 9e9
+    for gb, expected in ((16.0, config.MLX_SMALL_MODELS), (64.0, config.MLX_DEFAULT_MODELS),
+                         (None, config.MLX_DEFAULT_MODELS)):
+        monkeypatch.setattr(config, "_mlx_defaults", None)
+        monkeypatch.setattr(first_run, "physical_memory_gb", lambda gb=gb: gb)
+        assert config.default_mlx_models() == expected
+        assert config.Settings().model_path == expected["MLX_MAIN_MODEL"]
+    monkeypatch.setattr(config, "_mlx_defaults", None)
+    assert "about 8 GB" in first_run.recommend(16)["reason"]
 
 
 def test_unknown_memory_recommends_local():

@@ -114,13 +114,44 @@ GROQ_DEFAULT_MODELS: dict[str, str] = {
     "GROQ_DRAFTING_MODEL": "openai/gpt-oss-120b",
 }
 
-# Local MLX model defaults: small enough (~14 GB total) for any Apple
-# Silicon Mac. Bigger machines override them with ``MLX_*_MODEL``.
+# Local MLX model defaults (~14 GB total) for a Mac with 24 GB or more.
+# Bigger machines override them with ``MLX_*_MODEL``.
 MLX_DEFAULT_MODELS: dict[str, str] = {
     "MLX_MAIN_MODEL": "mlx-community/Hermes-3-Llama-3.1-8B-4bit",
     "MLX_ANALYSIS_MODEL": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
     "MLX_DRAFTING_MODEL": "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit",
 }
+# The set for a Mac under ``MLX_SMALL_BELOW_GB`` (16 GB): ~8.0 GB total, so
+# all three loaded at once leave room for macOS and the user's apps. Sizes
+# and mlx-lm support (``qwen3_5`` / ``qwen2``) checked on Hugging Face
+# 2026-11-19; not yet measured on a 16 GB Mac.
+MLX_SMALL_MODELS: dict[str, str] = {
+    "MLX_MAIN_MODEL": "mlx-community/Qwen3.5-4B-4bit",
+    "MLX_ANALYSIS_MODEL": "mlx-community/Qwen3.5-0.8B-4bit",
+    "MLX_DRAFTING_MODEL": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+}
+MLX_SMALL_BELOW_GB = 24
+
+_mlx_defaults: Optional[dict[str, str]] = None
+
+
+def default_mlx_models(gb: Optional[float] = None) -> dict[str, str]:
+    """The stock local models for ``gb`` of memory (this Mac's when None):
+    :data:`MLX_SMALL_MODELS` under :data:`MLX_SMALL_BELOW_GB`, else
+    :data:`MLX_DEFAULT_MODELS`. Unknown memory gets the standard set."""
+    global _mlx_defaults
+    if gb is not None:
+        return dict(MLX_SMALL_MODELS if gb < MLX_SMALL_BELOW_GB else MLX_DEFAULT_MODELS)
+    if _mlx_defaults is None:
+        try:
+            from ai.first_run import physical_memory_gb  # noqa: WPS433
+
+            mem = physical_memory_gb()
+        except Exception:
+            mem = None
+        small = mem is not None and mem < MLX_SMALL_BELOW_GB
+        _mlx_defaults = MLX_SMALL_MODELS if small else MLX_DEFAULT_MODELS
+    return dict(_mlx_defaults)
 
 
 logger = logging.getLogger(__name__)
@@ -195,17 +226,17 @@ class Settings:
     # tool-calling agent stays on a generalist chat model.
     model_path: str = field(
         default_factory=lambda: _env(
-            "MLX_MAIN_MODEL", MLX_DEFAULT_MODELS["MLX_MAIN_MODEL"]
+            "MLX_MAIN_MODEL", default_mlx_models()["MLX_MAIN_MODEL"]
         )
     )
     analysis_model_path: str = field(
         default_factory=lambda: _env(
-            "MLX_ANALYSIS_MODEL", MLX_DEFAULT_MODELS["MLX_ANALYSIS_MODEL"]
+            "MLX_ANALYSIS_MODEL", default_mlx_models()["MLX_ANALYSIS_MODEL"]
         )
     )
     drafting_model_path: str = field(
         default_factory=lambda: _env(
-            "MLX_DRAFTING_MODEL", MLX_DEFAULT_MODELS["MLX_DRAFTING_MODEL"]
+            "MLX_DRAFTING_MODEL", default_mlx_models()["MLX_DRAFTING_MODEL"]
         )
     )
     # Groq settings. ``groq_api_key`` falls back to the ``GROQ_API_KEY``

@@ -26,7 +26,7 @@ from pydantic import BaseModel
 import providers
 import user_settings
 from ai import first_run
-from config import ENGINE_ROLES, MLX_DEFAULT_MODELS, settings
+from config import ENGINE_ROLES, default_mlx_models, settings
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ def _view() -> dict[str, Any]:
         "presets": _cloud_presets(),
         "local": {
             "models": models,
-            "stock": dict(MLX_DEFAULT_MODELS),
+            "stock": default_mlx_models(),
             "downloaded": {r: first_run.is_downloaded(m) for r, m in models.items()},
             "download": download,
             "server_base": providers.PRESETS["local_server"].api_base,

@@ -18,7 +18,8 @@ bot-inator** and asks you to pick one:
 
 The screen reads your Mac's memory and marks one choice **Recommended for
 this Mac**: Cloud key under 24 GB, Local at 24 GB and up (the stock local
-models need about 13 GB of memory). It is only a recommendation. Nothing
+models need about 13 GB of memory; under 24 GB a smaller set of about 8 GB
+is used: Qwen3.5-4B, Qwen3.5-0.8B and Qwen2.5-Coder-7B). It is only a recommendation. Nothing
 is selected for you.
 
 Local models can come from:

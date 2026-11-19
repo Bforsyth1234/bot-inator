@@ -194,6 +194,11 @@ final class ApprovalPresenter {
         }, countdown: countdown)
 
         let hosting = NSHostingController(rootView: content.appTextSize())
+        // Size from preferredContentSize, not Auto Layout constraints: a
+        // constraint-sized hosting window can hit AppKit's "needs another
+        // Update Constraints pass" abort when its frame changes (crash
+        // 2026-11-19, NSWindow _postWindowNeedsUpdateConstraints).
+        hosting.sizingOptions = [.preferredContentSize]
         let window = NSWindow(contentViewController: hosting)
         window.title = "Approval Required"
         window.styleMask = [.titled, .closable]
@@ -231,6 +236,7 @@ final class ApprovalPresenter {
         }
 
         let hosting = NSHostingController(rootView: content.appTextSize())
+        hosting.sizingOptions = [.preferredContentSize]  // see presentFull
         let window = NSWindow(contentViewController: hosting)
         window.title = "Review Generated Tool"
         window.styleMask = [.titled, .closable, .resizable]

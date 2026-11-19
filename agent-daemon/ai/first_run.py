@@ -16,7 +16,8 @@ DECISIONS (todo #93):
 * While pending the daemon builds :class:`PendingEngine` stand-ins, which
   never load or download anything (decision 5).
 * Thresholds: under :data:`CLOUD_BELOW_GB` (24 GB) → Cloud key; 24 GB and
-  up → Local. Deterministic; not yet measured on a 16 GB Mac.
+  up → Local. Deterministic; not yet measured on a 16 GB Mac. Under 24 GB
+  the stock local set is ``config.MLX_SMALL_MODELS`` (~8 GB, #129).
 * Local has three ways in: a folder of MLX models (checked here), a local
   server (the ``local_server`` preset on a loopback URL), or downloading
   the stock set on a button that states its size.
@@ -44,6 +45,11 @@ STOCK_MODEL_BYTES: dict[str, int] = {
     "mlx-community/Hermes-3-Llama-3.1-8B-4bit": 4_526_702_592,
     "mlx-community/Qwen2.5-1.5B-Instruct-4bit": 880_197_632,
     "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit": 8_321_122_304,
+    # The under-24 GB set (``config.MLX_SMALL_MODELS``): sum of the repo's
+    # files from the Hugging Face API on 2026-11-19. 8.0 GB = 7.5 GiB.
+    "mlx-community/Qwen3.5-4B-4bit": 3_061_130_647,
+    "mlx-community/Qwen3.5-0.8B-4bit": 652_029_391,
+    "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit": 4_295_890_004,
 }
 
 NOT_CHOSEN = "Choose an engine first: the first-run screen has not been answered"
@@ -77,11 +83,14 @@ def recommend(gb: Optional[float]) -> dict[str, str]:
         }
     shown = f"{gb:.0f} GB"
     if gb < CLOUD_BELOW_GB:
+        from config import default_mlx_models  # noqa: WPS433
+
+        need = sum(STOCK_MODEL_BYTES.get(m, 0) for m in default_mlx_models(gb).values())
         return {
             "choice": "cloud",
             "reason": (
-                f"This Mac has {shown} of memory; the local models need about 13 GB "
-                "of it, so a cloud key will be faster and leave room for your apps."
+                f"This Mac has {shown} of memory; the local models need about "
+                f"{need / 1e9:.0f} GB of it, so a cloud key will be faster and leave room for your apps."
             ),
         }
     return {

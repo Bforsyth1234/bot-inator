@@ -1500,7 +1500,10 @@ class Orchestrator:
         model = self._build_smolagents_model()
         if model is None:
             return None
-        return ToolCallingAgent(tools=wrapped, model=model)
+        from ai.repeat_guard import agent_class  # noqa: WPS433
+
+        # #129: an identical repeat call in one turn is skipped, not re-run.
+        return agent_class()(tools=wrapped, model=model)
 
     def _build_smolagents_model(self) -> Any:
         """Pick the right smolagents ``Model`` adapter for ``self.engine``.

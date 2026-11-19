@@ -417,9 +417,14 @@ final class FirstRunWindowController {
     private func present(_ model: FirstRunViewModel) {
         let view = FirstRunView(model: model) { [weak self] in self?.window?.close() }
             .appTextSize()
-        let window = NSWindow(contentViewController: NSHostingController(rootView: view))
+        let hosting = NSHostingController(rootView: view)
+        // The window's size is ours, not constraints from the view (see
+        // ApprovalPresenter.presentFull for the crash this avoids).
+        hosting.sizingOptions = []
+        let window = NSWindow(contentViewController: hosting)
         window.title = "Set up bot-inator"
         window.styleMask.insert([.titled, .closable, .resizable])
+        window.contentMinSize = NSSize(width: 520, height: 560)
         window.setContentSize(NSSize(width: 560, height: 640))
         window.isReleasedWhenClosed = false
         window.center()

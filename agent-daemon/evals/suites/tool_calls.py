@@ -131,7 +131,7 @@ def _step_errors(agent: Any) -> list[str]:
 async def run_case(case: dict[str, Any], engine: Any, settings: Any, *, model: Any = None) -> dict[str, Any]:
     """One agent turn. ``model`` (a smolagents ``Model``) replaces the
     engine's adapter in tests."""
-    from smolagents import ToolCallingAgent
+    from ai.repeat_guard import agent_class
 
     from ai.orchestrator import Orchestrator
     from events.event_bus import EventBus
@@ -145,7 +145,7 @@ async def run_case(case: dict[str, Any], engine: Any, settings: Any, *, model: A
         if model is None:
             raise RuntimeError(f"no smolagents model adapter for {type(engine).__name__}")
     calls: list[dict[str, Any]] = []
-    agent = ToolCallingAgent(
+    agent = agent_class()(
         tools=stub_tools(list(AVAILABLE_TOOLS), calls, case.get("tool_results")),
         model=model, verbosity_level=0,
     )

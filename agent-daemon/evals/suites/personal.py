@@ -196,7 +196,7 @@ def personal_summary(result: Mapping[str, Any]) -> dict[str, Any]:
 async def run_case(case: dict[str, Any], engine: Any, settings: Any, *, model: Any = None) -> dict[str, Any]:
     """Replay the row's prompt once. ``model`` (a smolagents ``Model``)
     replaces the engine's adapter in tests."""
-    from smolagents import ToolCallingAgent
+    from ai.repeat_guard import agent_class
 
     from tools import AVAILABLE_TOOLS
 
@@ -210,7 +210,7 @@ async def run_case(case: dict[str, Any], engine: Any, settings: Any, *, model: A
         if model is None:
             raise RuntimeError(f"no smolagents model adapter for {type(engine).__name__}")
     calls: list[dict[str, Any]] = []
-    agent = ToolCallingAgent(tools=tool_calls.stub_tools(list(AVAILABLE_TOOLS), calls),
+    agent = agent_class()(tools=tool_calls.stub_tools(list(AVAILABLE_TOOLS), calls),
                              model=model, verbosity_level=0)
     steps = _max_steps(case.get("event_type", ""))
     await asyncio.to_thread(lambda: agent.run(case["prompt"], max_steps=steps))
