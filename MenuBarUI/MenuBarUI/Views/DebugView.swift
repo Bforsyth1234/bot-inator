@@ -39,7 +39,7 @@ struct DebugView: View {
             }
             if let status = delivery.status {
                 if let line = status.debugLine { row("Held by reason", line, mono: true) }
-                row("Cards today", "\(status.cardsToday) of \(status.dailyCap)")
+                row("Cards today", "\(status.cardsToday) (ideas wait after \(status.dailyCap))")
                 ForEach(status.checks.keys.sorted(), id: \.self) { key in
                     row("Check: \(key)", status.checks[key] ?? "", mono: true)
                 }

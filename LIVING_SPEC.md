@@ -410,7 +410,10 @@ Approval flow:
    last 3 s) or Pause, and released one at a time when free; a held offer
    expires after its shelf life (recorded as `expired` in #79, never
    `timed_out`). Past the daily cap (default 8 cards) an idea goes to the
-   Inbox instead of a window. Chat and quick-ask always run.
+   Inbox instead of a window. The cap is an idea limit: ambient cards (mail,
+   messages, files) count toward it but are never held by it, so the count
+   can pass the cap, and the UI labels it "ideas wait after N", never
+   "N of N". Chat and quick-ask always run.
 10. Watches (#88): a watch idea (source `watch`, trigger `watch:<id>`)
    carries a one-action prepared offer with its exact arguments, so the card
    is filled in and no model runs. Every watch action still needs its card.

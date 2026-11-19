@@ -268,9 +268,10 @@ struct OfferInboxView: View {
             Image(systemName: "tray.full").foregroundStyle(.secondary)
             Text("Suggestions").appFont(.headline)
             if let s = viewModel.status {
-                Text("\(s.cardsToday) of \(s.dailyCap) today")
+                Text("\(s.cardsToday) cards today · ideas wait after \(s.dailyCap)")
                     .appFont(.secondary)
                     .foregroundStyle(.secondary)
+                    .help("Every card counts. Past the limit only new ideas go to the Inbox; cards about your mail, messages and files still show.")
             }
             Spacer()
             Button {
@@ -329,13 +330,13 @@ struct OfferInboxView: View {
         case "screen_sharing": return "held: sharing your screen"
         case "typing": return "held: you were typing"
         case "paused": return "held: paused"
-        case "daily_cap": return "over today's limit"
+        case "daily_cap": return "over today's idea limit"
         default: return reason
         }
     }
 }
 
-/// Settings section: the daily suggestion limit and the never-watch apps.
+/// Settings section: the daily idea limit and the never-watch apps.
 struct DeliverySettingsView: View {
     @ObservedObject var viewModel: DeliveryViewModel
     @State private var draftCap: Int = 8
@@ -345,14 +346,14 @@ struct DeliverySettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Suggestions").appFont(.headline)
             Stepper(value: $draftCap, in: 0...100) {
-                Text("At most \(draftCap) suggestions a day").appFont(.body)
+                Text("After \(draftCap) cards a day, new ideas wait in the Inbox").appFont(.body)
             }
             .onChange(of: draftCap) { _, value in
                 guard var s = viewModel.settings, s.dailyCap != value else { return }
                 s.dailyCap = value
                 Task { await viewModel.saveSettings(s) }
             }
-            Text("Suggestions over the limit wait in the Inbox. Things you ask for are never limited.")
+            Text("Cards about your mail, messages and files count toward this but still show past it, since they can't wait. Things you ask for are never limited or counted.")
                 .appFont(.fine).foregroundStyle(.secondary)
 
             Text("Never watch these apps").appFont(.label)
