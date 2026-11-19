@@ -33,7 +33,10 @@ def main(root: str) -> None:
             if not os.path.islink(path) and is_macho(path):
                 found.append(path)
     found.sort(key=lambda p: (-p.count(os.sep), p))
-    sys.stdout.write("\0".join(found))
+    # A NUL after every path, the last one included: `read -d ''` in
+    # build-release.sh drops a final path with no terminator (that left
+    # libpython ad-hoc signed and failed notarization).
+    sys.stdout.write("".join(path + "\0" for path in found))
 
 
 if __name__ == "__main__":
