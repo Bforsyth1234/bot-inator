@@ -3,6 +3,10 @@
 A local-first macOS agent that watches what you do and offers to help.
 Nothing runs without your approval.
 
+**[Download for macOS](https://github.com/Bforsyth1234/bot-inator/releases/latest)**
+(Apple Silicon, macOS 14 or later, signed and notarized) or
+[build from source](#build-from-source).
+
 ![A PDF lands in Downloads, bot-inator offers to file it, and it is moved after approval](docs/demo.gif)
 
 It notices activity on your Mac (new files in Downloads, incoming mail and
@@ -62,12 +66,28 @@ The two talk over a WebSocket (`/ws/stream`) plus a small HTTP API. See
 ## Requirements
 
 - macOS 14+ on Apple Silicon (local models use MLX)
-- Python 3 (developed and tested on 3.14)
-- Xcode command line tools (`xcode-select --install`) to build the app
+- To build from source only: Python 3.11+ (developed and tested on 3.14)
+  and the Xcode command line tools (`xcode-select --install`). The
+  download needs neither.
 - Optional: a [Groq API key](https://console.groq.com/keys) to run models
   in the cloud instead of on your Mac
 
 ## Quick start
+
+### Download the app
+
+1. Download `bot-inator-<version>.zip` (about 540 MB) from the
+   [latest release](https://github.com/Bforsyth1234/bot-inator/releases/latest).
+2. Unzip it and move `bot-inator.app` to Applications.
+3. Open it. A brain icon appears in the menu bar and **Set up bot-inator**
+   opens.
+
+The app is signed and notarized and carries its own daemon and Python, so
+it needs no terminal, Python or Xcode. It starts the daemon when it opens
+and stops it when it quits. Models are not in the download: with the local
+provider they download from the setup screen (about 12.7 GB).
+
+### Build from source
 
 ```bash
 git clone https://github.com/Bforsyth1234/bot-inator.git
