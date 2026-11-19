@@ -72,6 +72,8 @@ DATA_DIR = Path.home() / ".bot-inator"
 
 AGENT_INITIATED: frozenset[str] = frozenset({
     "pattern_detected", "mail_received", "imessage_received", "file",
+    # #125: a saved question's answer waits for a good moment like an offer.
+    "scheduled_ask",
 })
 NEVER_HELD: frozenset[str] = frozenset({"user_message", "notice"})
 BYPASS_KEY = "delivery_bypass"

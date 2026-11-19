@@ -342,6 +342,13 @@ Wave 16 frames:
   started_at?, ended_at?, audio_path?, system_audio_path?, transcript_path?,
   error?, stop_reason?}` (processed in a task; anything but a card is told
   as a notification).
+- Contacts (#127): server → client **`contacts_request`** `{request_id,
+  op: find | request_access, name, limit, timeout_seconds}` to one
+  connection; client → server **`contacts_response`** `{request_id, ok,
+  contacts?: [{name, emails, phones, organization}], truncated, error?,
+  authorization?}` and **`contacts_status`** `{authorization}` (on connect,
+  on change, every 30 s). The app fetches only those four fields; the
+  daemon's parser drops anything else. There is no list-all op.
 - Front window (#89): server → client **`screen_text_request`**
   `{request_id, max_chars, never_watch, timeout_seconds}` to ONE connection
   (the one that last sent `screen_text_status`); client → server
@@ -410,10 +417,23 @@ Approval flow:
    last 3 s) or Pause, and released one at a time when free; a held offer
    expires after its shelf life (recorded as `expired` in #79, never
    `timed_out`). Past the daily cap (default 8 cards) an idea goes to the
-   Inbox instead of a window. Chat and quick-ask always run.
+   Inbox instead of a window. The cap is an idea limit: ambient cards (mail,
+   messages, files) count toward it but are never held by it, so the count
+   can pass the cap, and the UI labels it "ideas wait after N", never
+   "N of N". Chat and quick-ask always run.
 10. Watches (#88): a watch idea (source `watch`, trigger `watch:<id>`)
    carries a one-action prepared offer with its exact arguments, so the card
    is filled in and no model runs. Every watch action still needs its card.
+   One exception to "a watch raises a card" (#125): on a `time` trigger only,
+   the action may be `ask` (`{"question": "..."}`, literal text, `{date}`
+   only, ≤ 300 chars). A due `ask` watch publishes a `scheduled_ask` event,
+   never an idea. The orchestrator answers it in a background turn
+   (`_turn_kind = "scheduled"`) through the normal approval gate: read-only
+   tools run, any other tool raises its card, `read_front_window` refuses,
+   the web tools ask first (#124), and `generate_custom_tool` /
+   `repair_generated_tool` are refused before any card. The answer is one
+   thought plus one notification. Delivery holds it like an offer
+   (`AGENT_INITIATED`). Its backtest lists the next three run times.
 
 Calendar flow (#60): the menu bar app owns EventKit (the daemon's Python
 is silently denied it), and the daemon asks it over this WebSocket.
@@ -542,6 +562,18 @@ saves `{enabled, time "HH:MM", locked_fields}`; it applies live, no
 restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 `trigger: "manual"`.
 
+`GET` / `PUT /api/weekly-report` (`routes/weekly_report.py`, #128) reads and
+saves `{enabled, day "mon".."sun", time "HH:MM", locked_fields}`, live.
+`GET /api/weekly-report/week?weeks_ago=0..3` and `/weeks` (the last four)
+return the deterministic report; `POST /api/weekly-report/run` returns
+`{status, sent, report}` and publishes a `weekly_report` event unless the
+week is empty.
+
+`GET` / `PUT /api/web-search` (`routes/web_search.py`, #124) reads
+`{enabled, provider, has_brave_key, no_key_provider, locked_fields}` and
+saves `{enabled?, brave_key?}` (empty removes the key). The key is
+write-only; a save is mirrored into `os.environ` so it applies at once.
+
 ## 4. Daemon modules (`agent-daemon/`)
 
 | Path                          | Responsibility                                     |
@@ -572,6 +604,17 @@ restart. `POST /api/daily-brief/run` publishes a `daily_brief` event with
 |                               | `attendees` when known, #80; personal field).      |
 | `events/clipboard_watcher.py` | Clipboard changes → clipboard_changed (app + kind, |
 |                               | never content).                                    |
+| `events/weekly_report.py`     | #128: one `weekly_report` event a week             |
+|                               | (AGENT_WEEKLY_REPORT_DAY fri, _TIME 16:00, unless  |
+|                               | AGENT_WEEKLY_REPORT=0; same-day catch-up; state in |
+|                               | `~/.bot-inator/weekly_report.json`). Counts only,  |
+|                               | built from the action journal, outcome store,      |
+|                               | decision log, watch store and tool provenance with |
+|                               | NO model call and no "time saved" number; a source |
+|                               | it can't read is named. A "week" is the 7 days     |
+|                               | ending at the report moment. An empty week sends   |
+|                               | nothing. The orchestrator shows the text as a      |
+|                               | thought + notification, never runs the agent.      |
 | `events/daily_brief.py`       | One `daily_brief` event a day at                   |
 |                               | AGENT_DAILY_BRIEF_TIME (08:00) unless              |
 |                               | AGENT_DAILY_BRIEF=0; same-day catch-up; state in   |
@@ -831,6 +874,28 @@ bypass the approval gate and run inline; all other tools still emit an
 |                    |           | truncated; sensitive sites refused; cloud         |
 |                    |           | placeholder per #31.                              |
 | `open_url`         |           | Opens a URL with `open`.                          |
+| `web_search`       | ✅*        | #124. Off until `AGENT_WEB_SEARCH=1` (7c). Brave  |
+|                    |           | Search API with the user's key                    |
+|                    |           | (`AGENT_BRAVE_API_KEY`); with no key it answers   |
+|                    |           | "add a Brave key" and sends nothing (no no-key    |
+|                    |           | provider ships: none had terms that allow it).    |
+|                    |           | Query ≤ 200 chars, 1-10 results. One ledger row   |
+|                    |           | per request (kind `web_search`).                  |
+| `fetch_page`       | ✅*        | #124. http(s) only; every resolved address must   |
+|                    |           | be public, the connection is pinned to it, ≤ 3    |
+|                    |           | redirects each re-checked; readable text ≤ 20,000 |
+|                    |           | chars; no cookies, no JavaScript. Needs no key.   |
+| `recall_activity`  | ✅         | #126. Timeline for a day or ≤ 14 days from        |
+|                    |           | `activity.db` (kinds and times, never names) and  |
+|                    |           | `actions.db` (what the agent did, undone or not); |
+|                    |           | ≤ 100 lines. Journal paths are shortened to       |
+|                    |           | folder + extension for a cloud engine.            |
+| `find_contact`     | ✅         | #127. Name → name, emails, phones, organisation   |
+|                    |           | through the menu bar app (`ContactsBridge`); name |
+|                    |           | ≥ 2 chars, ≤ 10 results, no list-all, no write.   |
+|                    |           | Several matches: the model must ask which. Result |
+|                    |           | is the placeholder for a cloud engine (#52).      |
+| `weekly_report`    | ✅         | #128. The week's counts (`weeks_ago` 0-3).        |
 | `show_notification`|           | Posts a macOS notification via `osascript`.       |
 | `read_clipboard`   | ✅         | `pbpaste` → string.                              |
 | `write_clipboard`  |           | `pbcopy` ← string.                                |
@@ -899,6 +964,30 @@ bypass the approval gate and run inline; all other tools still emit an
 selected text through Accessibility (`AXIsProcessTrusted`, never the
 prompting variant) only when the user chose to include it;
 `ai/permissions.py` lists it as the `accessibility` row.
+
+**Web tools' card rule (#124).** ✅* above: `web_search` and `fetch_page`
+are in `READ_ONLY_TOOL_NAMES`, and the orchestrator takes the bypass away
+per `tools.web_search.needs_card` (`_web_call_needs_card`; it can only add
+a card, and an error in the rule means a card): (a) any turn the user did
+not start gets a card; (b) any turn that has read anything other than
+these tools' own results (an email, the open tab, a file, the clipboard, a
+window, contacts, an MCP result, a marked event; `TurnTaint.read_kinds`)
+gets a card showing the exact query or URL; (c) otherwise `web_search`
+runs with no card; (d) `fetch_page` runs with no card in a turn that read
+nothing, and after a search only for a URL that search returned
+(`Orchestrator._turn_web_urls`, reset each turn) or one the user typed.
+Both results mark the turn as outside text (kind `web_result`, apart from
+`web_page`, the user's open tab).
+
+**Contacts origin (#127).** A `find_contact` result is recorded with
+`TurnTaint.note_own_read` and does not mark the turn (it is the user's own
+data). A later card's target argument found in it gets the origin line
+"from your contacts", also in an otherwise unmarked turn. A contacts read
+does count as private text for the web tools' rule above.
+
+`find_files` (#126) takes `since` / `until` (ISO dates, "today",
+"yesterday"); an empty query is legal with a date or folder. Dated results
+use date added where present, else creation date (`date_used`).
 
 `tool_result` thoughts emitted for read-only invocations are prefixed
 with ``"<name> (read-only)"`` so the MenuBar stream still reflects

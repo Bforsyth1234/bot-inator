@@ -45,6 +45,12 @@ OUTSIDE_TEXT_EVENTS: frozenset[str] = frozenset({"imessage_received", "mail_rece
 # Built-in tools that return outside text (decision 1b), with the kind of
 # text each returns. Every MCP tool marks too (#69 decision 5); callers
 # say so with ``is_mcp=True``. ``read_front_window`` is #89's.
+WEB_RESULT_KIND = "web_result"
+# #127: the user's own address book. A read of it is recorded (so a card can
+# say where an address came from) but never marks the turn.
+CONTACTS_KIND = "contacts"
+FROM_CONTACTS = "from your contacts"
+
 OUTSIDE_TEXT_TOOLS: Mapping[str, str] = {
     "read_email": "email",
     # #103: subjects and senders of received mail are outside text too.
@@ -56,10 +62,19 @@ OUTSIDE_TEXT_TOOLS: Mapping[str, str] = {
     "read_front_window": "window",
     # #107: a screenshot's answer can carry text an attacker put on screen.
     "look_at_screen": "window",
+    # #124: search results and a fetched page are text someone else wrote.
+    # Their own kind, apart from ``web_page`` (the user's open tab, which can
+    # be a signed-in page): the #124 card rule treats a turn that read only
+    # public web results differently from one that read private text.
+    "web_search": WEB_RESULT_KIND,
+    "fetch_page": WEB_RESULT_KIND,
 }
 
 # Read-only tools that WRITE state: in a marked turn they get a card
 # (decision 2). User-marked MCP tools are added per call.
+# #124's web tools are NOT here: their card rule depends on what was read
+# and on the URL (``tools.web_search.needs_card``, called by the
+# orchestrator with :meth:`TurnTaint.read_kinds`).
 WRITING_READ_ONLY_TOOLS: frozenset[str] = frozenset({"remember_preference"})
 
 # ``pattern_detected`` triggers that come from an iMessage's text
@@ -84,6 +99,8 @@ KIND_PHRASES: Mapping[str, str] = {
     "email": "the email",
     "message": "the message",
     "web_page": "the web page",
+    WEB_RESULT_KIND: "the web page",
+    CONTACTS_KIND: "your contacts",
     "file": "the file",
     "clipboard": "the clipboard",
     "calendar": "the calendar",
@@ -254,6 +271,7 @@ class TurnTaint:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._reads: list[_Read] = []
+        self._kinds: set[str] = set()
         self._marked = False
         self._kind = ""
         self._user_text = ""
@@ -279,6 +297,7 @@ class TurnTaint:
         that carries outside text marks the turn here."""
         with self._lock:
             self._reads = []
+            self._kinds = set()
             self._marked = False
             self._kind = kind
             self._user_text = _norm(user_text)[: MAX_TEXT_CHARS] if user_text else ""
@@ -361,10 +380,18 @@ class TurnTaint:
         self._add(kind, label, [result])
         return True
 
-    def _add(self, kind: str, label: str, parts: Iterable[Any]) -> None:
+    def note_own_read(self, kind: str, result: Any) -> None:
+        """#127: record a read of the user's OWN data (their contacts) so a
+        later card can say an address came from it. Does not mark the turn:
+        nothing here is text someone else wrote."""
+        self._add(kind, KIND_PHRASES.get(kind, kind), [result], mark=False)
+
+    def _add(self, kind: str, label: str, parts: Iterable[Any], *, mark: bool = True) -> None:
         text = _norm("\n".join(t for t in (_text_of(p) for p in parts) if t))
         with self._lock:
-            self._marked = True
+            self._kinds.add(kind)  # kept even past MAX_READS
+            if mark:
+                self._marked = True
             if len(self._reads) < MAX_READS:
                 self._reads.append(_Read(kind, label, text[:MAX_TEXT_CHARS]))
 
@@ -377,6 +404,16 @@ class TurnTaint:
     def is_tainted(self) -> bool:
         with self._lock:
             return self._marked
+
+    def read_kinds(self) -> frozenset[str]:
+        """Kinds of everything read this turn (outside text and the user's
+        own contacts), plus ``"event"`` when the turn was marked by its
+        event or context with no read recorded. #124's card rule uses it."""
+        with self._lock:
+            kinds = set(self._kinds)
+            if self._marked and not kinds:
+                kinds.add("event")
+            return frozenset(kinds)
 
     def sources(self) -> list[str]:
         """Labels of what was read this turn, in order, without repeats."""
@@ -449,7 +486,10 @@ class TurnTaint:
         """The card's origin lines (decision 3). Empty in an unmarked turn,
         so unmarked cards are unchanged. In a marked turn: one line naming
         what was read, then one line per target-naming argument."""
-        if not self.is_tainted():
+        marked = self.is_tainted()
+        with self._lock:
+            own = any(r.kind == CONTACTS_KIND for r in self._reads)
+        if not marked and not own:
             return []
         named: dict[str, Any] = {}
         for i, value in enumerate(args or ()):
@@ -458,7 +498,7 @@ class TurnTaint:
         named.update({k: v for k, v in (kwargs or {}).items() if v is not None})
         targets = TARGET_ARGS | TOOL_TARGET_ARGS.get(tool_name, frozenset())
         lines: list[str] = []
-        sources = self.sources()
+        sources = self.sources() if marked else []
         if sources:
             lines.append("Read this turn: " + "; ".join(sources))
         for arg, value in named.items():
@@ -471,9 +511,16 @@ class TurnTaint:
             parts = [p for p in parts if p]
             for part in parts:
                 head = f"{arg} {_short(part)}" if len(parts) > 1 else arg
-                lines.append(f"{head}: {_say(self.origin_of(part))}")
+                origin = self.origin_of(part)
+                if not marked and origin != FROM_CONTACTS:
+                    # #127: an unmarked turn's card only gains the one line
+                    # that says an address was looked up, nothing else.
+                    continue
+                lines.append(f"{head}: {_say(origin)}")
         return lines
 
 
 def _say(origin: str) -> str:
-    return origin if origin == FROM_YOU else f"{origin}, not from you"
+    if origin in (FROM_YOU, FROM_CONTACTS):
+        return origin
+    return f"{origin}, not from you"

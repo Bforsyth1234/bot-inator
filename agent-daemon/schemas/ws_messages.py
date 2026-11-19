@@ -353,6 +353,57 @@ class ScreenTextStatusPayload(BaseModel):
     accessibility_trusted: bool
 
 
+# ---- Contacts through the menu bar app (#127) ---------------------------------
+# The app owns Contacts (CNContactStore); the daemon's ``find_contact`` asks it
+# over this WebSocket, as Calendar does (#60).
+# CNAuthorizationStatus names, as ``tools.contacts`` uses them.
+ContactsAuthorization = Literal[
+    "not_determined", "restricted", "denied", "authorized", "limited"
+]
+ContactsOp = Literal["find", "request_access"]
+
+
+class ContactsRequestPayload(BaseModel):
+    """Server→client: look a name up in Contacts, or show the macOS prompt.
+
+    ``find``: contacts whose name matches ``name`` (at least 2 characters),
+    at most ``limit`` (1-10). There is no "list everything" op.
+    ``request_access`` (a Permissions "Request" click) ignores both. Sent to
+    ONE connection (the app that most recently sent ``contacts_status``).
+    """
+
+    request_id: str
+    op: ContactsOp = "find"
+    name: str = ""
+    limit: int = 5
+    timeout_seconds: int = 10
+
+
+class ContactsResponsePayload(BaseModel):
+    """Client→server answer to a :class:`ContactsRequestPayload`.
+
+    ``contacts`` are ``{name, emails, phones, organization}`` dicts; the
+    daemon keeps only those four keys whatever arrives. ``truncated`` says
+    more contacts matched than ``limit``. ``authorization`` is the app's
+    status after the operation.
+    """
+
+    request_id: str
+    ok: bool
+    contacts: list[dict[str, Any]] | None = None
+    truncated: bool = False
+    error: str | None = None
+    authorization: ContactsAuthorization | None = None
+
+
+class ContactsStatusPayload(BaseModel):
+    """Client→server: the app can serve contact lookups, and its Contacts
+    authorization (read without prompting). Sent on connect and whenever it
+    changes."""
+
+    authorization: ContactsAuthorization
+
+
 CommandAction = Literal[
     "pause_listeners",
     "resume_listeners",
@@ -616,6 +667,21 @@ class ScreenTextStatus(_BaseMessage):
     payload: ScreenTextStatusPayload
 
 
+class ContactsRequest(_BaseMessage):
+    type: Literal["contacts_request"] = "contacts_request"
+    payload: ContactsRequestPayload
+
+
+class ContactsResponse(_BaseMessage):
+    type: Literal["contacts_response"] = "contacts_response"
+    payload: ContactsResponsePayload
+
+
+class ContactsStatus(_BaseMessage):
+    type: Literal["contacts_status"] = "contacts_status"
+    payload: ContactsStatusPayload
+
+
 class DemonstrationTrace(_BaseMessage):
     type: Literal["demonstration_trace"] = "demonstration_trace"
     payload: DemonstrationTracePayload
@@ -664,6 +730,9 @@ WSMessage = Annotated[
         ScreenTextRequest,
         ScreenTextResponse,
         ScreenTextStatus,
+        ContactsRequest,
+        ContactsResponse,
+        ContactsStatus,
         ApprovalResolved,
         DemonstrationTrace,
         DemonstrationDraft,

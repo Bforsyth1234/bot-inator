@@ -255,6 +255,37 @@ def _delete_idea_refusal(
     return {"status": "error", "error": "delete_not_recoverable", "message": problem}
 
 
+def _web_call_needs_card(
+    orchestrator: Any, shield: Any, tool_name: str,
+    param_names: list[str], call_args: list[Any], call_kwargs: dict[str, Any],
+) -> bool:
+    """#124: whether a ``web_search`` / ``fetch_page`` call loses its no-card
+    bypass (``tools.web_search.needs_card``): any turn the user did not
+    start, any turn that read private or outside text, and a ``fetch_page``
+    after web results for a URL that neither this turn's search returned nor
+    the user typed. Fails closed: an error here means a card."""
+    if tool_name not in ("web_search", "fetch_page"):
+        return False
+    try:
+        from tools.web_search import needs_card
+
+        named: dict[str, Any] = dict(zip(param_names, call_args))
+        named.update(call_kwargs)
+        url = str(named.get("url") or "")
+        return needs_card(
+            tool_name,
+            turn_kind=getattr(orchestrator, "_turn_kind", ""),
+            # no shield: nothing can vouch that the turn is clean
+            read_kinds=shield.read_kinds() if shield is not None else {"unknown"},
+            url=url,
+            known_urls=getattr(orchestrator, "_turn_web_urls", ()),
+            user_typed=bool(shield is not None and url and shield.user_typed(url)),
+        )
+    except Exception:
+        logger.exception("web card rule failed; asking for a card")
+        return True
+
+
 def _outside_text_refusal(
     shield: Any, tool_name: str, turn_kind: str,
     param_names: list[str], call_args: list[Any], call_kwargs: dict[str, Any],
@@ -460,6 +491,7 @@ class Orchestrator:
         # that already tried ``generate_custom_tool`` and a second
         # ``generate_custom_tool`` call in one turn is refused (#38).
         self._turn_tool_calls: set[str] = set()
+        self._turn_web_urls: set[str] = set()  # #124
         # What started the current agent turn: "chat", "pattern" or
         # "event". generate_custom_tool is only allowed for chat and
         # pattern turns (a background event must not open a build card).
@@ -1145,6 +1177,7 @@ class Orchestrator:
                 await self._after_rule_run(event_id, runs[0])
                 return
         self._turn_tool_calls = set()
+        self._turn_web_urls = set()  # #124: URLs this turn's searches returned
         self._turn_done = {}
         self._turn_from_phone = False
         # #81: a new turn; an event carrying outside text marks it now.
@@ -1231,6 +1264,14 @@ class Orchestrator:
 
         if event.event_type == "meeting_prep":
             await self._handle_meeting_prep(event, event_id)
+            return
+
+        if event.event_type == "weekly_report":
+            await self._handle_weekly_report(event, event_id)
+            return
+
+        if event.event_type == "scheduled_ask":
+            await self._handle_scheduled_ask(event, event_id)
             return
 
         # Signal-only events (e.g. ``app_activated``) feed pattern detection
@@ -1344,6 +1385,7 @@ class Orchestrator:
         # allow a moderate budget without leaving the loop unbounded.
         self._pending_rerun_tool = None
         self._turn_tool_calls = set()
+        self._turn_web_urls = set()  # #124: URLs this turn's searches returned
         self._turn_done = {}
         # #81: a chat turn starts unmarked; what the user typed is "from
         # you". Quick-ask's selected / clipboard text is not typed by the
@@ -1522,6 +1564,63 @@ class Orchestrator:
         except Exception:
             logger.exception("daily brief notification failed")
 
+    async def _handle_scheduled_ask(self, event: ContextEvent, event_id: str) -> None:
+        """#125: answer a question the user saved on a ``time`` watch.
+
+        A background turn (``_turn_kind = "scheduled"``), so the approval
+        gate is the normal one: read-only tools run, anything else raises a
+        card, ``read_front_window`` refuses (not a user turn) and the web
+        tools ask first (#124). Building or repairing a tool is refused
+        before any card. The answer is one thought plus one notification.
+        """
+        from ai import watches as watches_mod
+
+        self._turn_kind = "scheduled"
+        meta = event.metadata or {}
+        prompt = watches_mod.ask_prompt(event)
+        await self._emit_thought(event_id, "reasoning", f"Prompt: {prompt[:200]}")
+        try:
+            result = await self._run_agent(event_id, prompt, max_steps=4)
+        except Exception:
+            logger.exception("scheduled ask turn failed")
+            result = ""
+        answer = str(result or "").strip() or "No answer this time (the model returned nothing)."
+        await self._emit_thought(event_id, "complete", answer[:1500])
+        question = str(meta.get("question") or "Your question")
+        try:
+            await asyncio.to_thread(self._notify_scheduled_ask, question, answer)
+        except Exception:
+            logger.exception("scheduled ask notification failed")
+
+    @staticmethod
+    def _notify_scheduled_ask(question: str, answer: str) -> None:
+        """The user saved this question on a watch; the answer needs no
+        approval (it only shows text)."""
+        from tools.show_notification import show_notification
+
+        show_notification(question[:80], answer[:240])
+
+    async def _handle_weekly_report(self, event: ContextEvent, event_id: str) -> None:
+        """#128: show the week's counts. The text was built deterministically
+        by ``events.weekly_report``; no model call (decision 1)."""
+        from events import weekly_report
+
+        text = str((event.metadata or {}).get("text") or "")
+        await self._emit_thought(event_id, "complete", text[:1500])
+        try:
+            title, body = weekly_report.notification_text(event)
+            await asyncio.to_thread(self._notify_weekly_report, title, body)
+        except Exception:
+            logger.exception("weekly report notification failed")
+
+    @staticmethod
+    def _notify_weekly_report(title: str, body: str) -> None:
+        """The weekly report is a Settings switch (``AGENT_WEEKLY_REPORT``),
+        so the read-only notification needs no approval."""
+        from tools.show_notification import show_notification
+
+        show_notification(title, body[:240])
+
     async def _handle_meeting_prep(self, event: ContextEvent, event_id: str) -> None:
         """#71: word the gathered meeting prep in a few lines.
 
@@ -1687,6 +1786,12 @@ class Orchestrator:
             call_kwargs: dict[str, Any] = {
                 k: v for k, v in kwargs.items() if v is not None
             }
+            if bypass and _web_call_needs_card(
+                orchestrator, shield, tool_name, param_names, call_args, call_kwargs,
+            ):
+                # #124: the query / URL leaves the Mac. Outside a clean
+                # user-started turn it gets a card. This can only ADD a card.
+                bypass = False
             reply_email: Optional[dict[str, Any]] = None
             if tool_name == "draft_email" and not bypass:
                 # #113: before any card, batch or dedupe key.
@@ -1743,6 +1848,19 @@ class Orchestrator:
                     shield, tool_name, getattr(orchestrator, "_turn_kind", ""),
                     param_names, call_args, call_kwargs,
                 )
+            if (
+                refusal is None
+                and tool_name in ("generate_custom_tool", "repair_generated_tool")
+                and getattr(orchestrator, "_turn_kind", "") == "scheduled"
+            ):
+                # #125: a saved question answers; it never starts a build.
+                refusal = {
+                    "status": "error",
+                    "error": "not_in_a_scheduled_question",
+                    "message": "A scheduled question can't build or repair a "
+                    "tool. Answer with what you found, or say the user can "
+                    "ask for the tool in Chat.",
+                }
             if refusal is None and tool_name == "generate_custom_tool":
                 # #123 (user: option B): reminders/events have no Trash, and
                 # nothing is deleted for good: refuse such ideas before the card.
@@ -1945,6 +2063,20 @@ class Orchestrator:
                     )
                 except Exception:
                     logger.exception("taint.mark_read failed")
+            if tool_name == "web_search":
+                # #124: a result's own URL may be fetched without a card.
+                try:
+                    from tools.web_search import result_urls
+                    orchestrator._turn_web_urls.update(result_urls(result))
+                except Exception:
+                    logger.exception("web_search: result urls not kept")
+            elif tool_name == "find_contact" and shield is not None:
+                # #127: so a card can say "from your contacts". The user's
+                # own data: recorded, never marks the turn. Before redaction.
+                try:
+                    shield.note_own_read("contacts", result)
+                except Exception:
+                    logger.exception("taint.note_own_read failed")
             if tool_name == "generate_custom_tool":
                 result = orchestrator._flag_quarantined_install(result)
                 Orchestrator._link_installed_tool(orchestrator, result)
@@ -1976,6 +2108,14 @@ class Orchestrator:
                 # #103: the same redaction, per listed email.
                 from tools.list_recent_emails import redact_result
                 result = redact_result(result, "main")
+            elif tool_name == "recall_activity":
+                # #126: journal paths shortened to folder + extension.
+                from tools.recall_activity import redact_result as redact_recall
+                result = redact_recall(result, "main")
+            elif tool_name == "find_contact":
+                # #127: names, addresses and numbers stay on this Mac.
+                from tools.contacts import redact_result as redact_contacts
+                result = redact_contacts(result, "main")
             label = f"{tool_name} (read-only)" if bypass else tool_name
             asyncio.run_coroutine_threadsafe(
                 orchestrator._emit_thought(event_id, "tool_result", f"{label}: {result}"),
@@ -2088,6 +2228,7 @@ class Orchestrator:
         if not offer.actions:
             return
         self._turn_tool_calls = set()
+        self._turn_web_urls = set()  # #124: URLs this turn's searches returned
         self._turn_done = {}
         self._turn_from_phone = False
         self._turn_kind = "event"
@@ -2995,6 +3136,14 @@ class Orchestrator:
             from events import meeting_prep
 
             return meeting_prep.describe(event)
+        if event.event_type == "weekly_report":
+            from events import weekly_report
+
+            return weekly_report.describe(event)
+        if event.event_type == "scheduled_ask":
+            from ai import watches as watches_mod
+
+            return watches_mod.describe_ask(event)
         if event.event_type == "mail_received":
             return (
                 f"Email from {meta.get('sender', 'unknown')}: "

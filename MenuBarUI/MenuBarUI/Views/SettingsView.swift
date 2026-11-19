@@ -395,6 +395,7 @@ struct SettingsView: View {
             }
 
             DailyBriefSettingsView()
+            WeeklyReportView()
             MeetingPrepSettingsView()
             // Wave 16: meeting notes (#86), "Watch me" shortcut (#84),
             // iPhone remote (#85).
@@ -405,6 +406,7 @@ struct SettingsView: View {
             ActivityHistorySettingsView()
             // #107: which model look_at_screen asks.
             VisionSettingsView()
+            WebSearchSettingsView()
             PermissionsView()
 
             // #78: "always do this" rules the user turned on.

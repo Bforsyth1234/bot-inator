@@ -74,6 +74,16 @@ ALLOWED_KEYS = frozenset({
     # and AGENT_CLOUD_PERSONAL_TEXT=1. Read live by ai.vision_engine.
     "AGENT_VISION_PROVIDER",
     "MLX_VISION_MODEL",
+    # Web search (#124): "1"/"0" (default off, 7c) and the user's own Brave
+    # Search API key (secret). Read live by tools.web_search.
+    "AGENT_WEB_SEARCH",
+    "AGENT_BRAVE_API_KEY",
+    # Weekly report (#128): "1"/"0" (default on), "HH:MM" (default "16:00")
+    # and the weekday "mon".."sun" (default "fri"). Read live by
+    # events.weekly_report.
+    "AGENT_WEEKLY_REPORT",
+    "AGENT_WEEKLY_REPORT_TIME",
+    "AGENT_WEEKLY_REPORT_DAY",
 }) | providers.vision_env_keys() | providers.preset_env_keys()  # <PRESET>_API_KEY / _API_BASE / _<ROLE>_MODEL (#97)
 PROVIDERS = providers.PROVIDERS
 

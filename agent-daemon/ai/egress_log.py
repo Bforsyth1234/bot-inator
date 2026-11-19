@@ -100,6 +100,11 @@ PERSONAL_REPLACED = "replaced"
 KIND_IMESSAGE_IMAGE = "imessage_image"
 KINDS = KINDS | {KIND_IMESSAGE_IMAGE}
 
+# #124: one request ``web_search`` or ``fetch_page`` made (the search
+# provider, or the page's host; each redirect hop is its own row).
+KIND_WEB_SEARCH = "web_search"
+KINDS = KINDS | {KIND_WEB_SEARCH}
+
 NOTHING_TODAY = "Nothing left this Mac today"
 LIMIT_NOTE = (
     "MCP servers and tools with network access run as their own processes: "
@@ -718,6 +723,27 @@ def record_open_url(url: str, *, log: Optional[EgressLog] = None) -> bool:
         return False
 
 
+def record_web_search(
+    url: str, *, tool: str = "web_search", bytes_out: int = 0, bytes_in: int = 0,
+    text: Optional[str] = None, note: Optional[str] = None,
+    log: Optional[EgressLog] = None,
+) -> bool:
+    """One request ``web_search`` or ``fetch_page`` sent (#124 decision 6).
+
+    Only the host of ``url`` is stored. ``text`` (the query, or the page's
+    URL) is kept only while keep-text is on. Request headers, where an API
+    key travels, are never passed here. Never raises.
+    """
+    try:
+        return (log or default_log()).record(
+            KIND_WEB_SEARCH, host_of(url), None, None, bytes_out, bytes_in,
+            None, text, tool=tool, note=note,
+        )
+    except Exception:
+        logger.exception("egress record failed")
+        return False
+
+
 def _hf_cache_dir() -> Path:
     explicit = os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
     if explicit:
@@ -1012,11 +1038,12 @@ def trusted_tool_run(
 __all__ = [
     "COLUMNS", "DB_PATH_ENV", "DEFAULT_MAX_ROWS", "EgressLog", "KEEP_TEXT_KEY",
     "KINDS", "KIND_IMESSAGE", "KIND_INFERENCE", "KIND_MCP_TOOL", "KIND_MODEL_DOWNLOAD",
-    "KIND_OPEN_URL", "KIND_SANDBOXED_TOOL", "KIND_TRUSTED_TOOL", "LIMIT_NOTE",
+    "KIND_OPEN_URL", "KIND_SANDBOXED_TOOL", "KIND_TRUSTED_TOOL", "KIND_WEB_SEARCH", "LIMIT_NOTE",
     "NOTHING_TODAY",
     "PERSONAL_REPLACED", "PERSONAL_SENT", "RETENTION_DAYS", "TEXT_RETENTION_DAYS",
     "clear", "default_db_path", "default_log", "host_of", "keep_text_enabled",
     "model_download", "payload_size", "personal_text_flag", "record", "record_image",
-    "record_completion", "record_open_url", "record_tool_run", "rows",
+    "record_completion", "record_open_url", "record_tool_run",
+    "record_web_search", "rows",
     "set_default_log", "stats", "trusted_tool_run", "wrap_openai_client",
 ]

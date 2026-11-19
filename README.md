@@ -178,6 +178,9 @@ and reconnects if the daemon restarts.
   needs it. An ad-hoc signed rebuild may ask again.
   `AGENT_CALENDAR_BACKEND=applescript` (or `eventkit`) pins the old
   in-daemon paths.
+- **Contacts** also belong to the menu bar app. It asks the first time you
+  ask the agent to write to someone by name, and reads names, email
+  addresses, phone numbers and organisations only.
 - Notification and Automation prompts may appear the first time a tool
   that needs them runs.
 
@@ -189,6 +192,12 @@ and reconnects if the daemon restarts.
 - **Code review**: when the agent writes a new tool, you see the full
   source and approve it before it's installed.
 - **Chat…** (⇧⌘C): ask for things directly.
+- **Web search** is off until you turn it on in Settings. Searching needs
+  your own [Brave Search API](https://brave.com/search/api) key; reading a
+  page you name does not. Every request is listed in the Privacy ledger,
+  and once a turn has read your mail or files a search asks first.
+- **Weekly report**: Fridays at 16:00 by default, a count of what the
+  agent did for you that week. Settings → Weekly report.
 - **Manage Tools…** (⇧⌘T): see built-in and generated tools; delete
   generated ones.
 

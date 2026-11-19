@@ -582,6 +582,70 @@ struct ScreenTextStatusPayload: Codable, Hashable {
     }
 }
 
+// MARK: - Contacts through the app (#127)
+
+/// CNAuthorizationStatus names, matching the daemon's `tools.contacts`.
+enum ContactsAuthorization: String, Codable, Hashable {
+    case notDetermined = "not_determined"
+    case restricted
+    case denied
+    case authorized
+    case limited
+}
+
+enum ContactsOp: String, Codable, Hashable {
+    case find
+    case requestAccess = "request_access"
+}
+
+/// Server→client: look `name` up in Contacts (at most `limit` matches), or
+/// show the macOS prompt (`request_access`). There is no "list all" op.
+struct ContactsRequestPayload: Codable, Hashable {
+    let requestId: String
+    var op: ContactsOp? = nil
+    var name: String? = nil
+    var limit: Int? = nil
+    var timeoutSeconds: Int? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case op, name, limit
+        case timeoutSeconds = "timeout_seconds"
+    }
+}
+
+/// One match. These four fields are everything the app ever reads from a
+/// contact: no notes, birthdays, postal addresses or photos.
+struct ContactDTO: Codable, Hashable {
+    let name: String
+    let emails: [String]
+    let phones: [String]
+    let organization: String
+}
+
+/// Client→server answer to a `contacts_request`.
+struct ContactsResponsePayload: Codable, Hashable {
+    let requestId: String
+    let ok: Bool
+    var contacts: [ContactDTO]? = nil
+    /// More contacts matched than `limit`.
+    var truncated: Bool = false
+    var error: String? = nil
+    var authorization: ContactsAuthorization? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case requestId = "request_id"
+        case ok, contacts, truncated, error, authorization
+    }
+}
+
+/// Client→server: this app serves contact lookups, with its current
+/// Contacts authorization (read without prompting). Sent on connect and on
+/// change.
+struct ContactsStatusPayload: Codable, Hashable {
+    let authorization: ContactsAuthorization
+}
+
 // MARK: - Discriminated Union
 
 enum WSMessage: Codable, Hashable {
@@ -601,6 +665,10 @@ enum WSMessage: Codable, Hashable {
     case screenTextRequest(seq: Int, timestamp: Date, payload: ScreenTextRequestPayload)
     case screenTextResponse(seq: Int, timestamp: Date, payload: ScreenTextResponsePayload)
     case screenTextStatus(seq: Int, timestamp: Date, payload: ScreenTextStatusPayload)
+    /// #127: Contacts lookups for the daemon's `find_contact`.
+    case contactsRequest(seq: Int, timestamp: Date, payload: ContactsRequestPayload)
+    case contactsResponse(seq: Int, timestamp: Date, payload: ContactsResponsePayload)
+    case contactsStatus(seq: Int, timestamp: Date, payload: ContactsStatusPayload)
     /// #85: a card was answered anywhere (incl. the phone) or timed out.
     case approvalResolved(seq: Int, timestamp: Date, payload: ApprovalResolvedPayload)
     /// #84 "Watch me" (payload structs live in DemonstrationPanel.swift).
@@ -625,6 +693,8 @@ enum WSMessage: Codable, Hashable {
              .calendarStatus(let seq, _, _),
              .screenTextRequest(let seq, _, _), .screenTextResponse(let seq, _, _),
              .screenTextStatus(let seq, _, _),
+             .contactsRequest(let seq, _, _), .contactsResponse(let seq, _, _),
+             .contactsStatus(let seq, _, _),
              .approvalResolved(let seq, _, _),
              .demonstrationTrace(let seq, _, _), .demonstrationDraft(let seq, _, _),
              .meetingRecordOffer(let seq, _, _), .meetingRecordStop(let seq, _, _),
@@ -646,6 +716,8 @@ enum WSMessage: Codable, Hashable {
              .calendarStatus(_, let ts, _),
              .screenTextRequest(_, let ts, _), .screenTextResponse(_, let ts, _),
              .screenTextStatus(_, let ts, _),
+             .contactsRequest(_, let ts, _), .contactsResponse(_, let ts, _),
+             .contactsStatus(_, let ts, _),
              .approvalResolved(_, let ts, _),
              .demonstrationTrace(_, let ts, _), .demonstrationDraft(_, let ts, _),
              .meetingRecordOffer(_, let ts, _), .meetingRecordStop(_, let ts, _),
@@ -675,6 +747,9 @@ enum WSMessage: Codable, Hashable {
         case screenTextRequest = "screen_text_request"
         case screenTextResponse = "screen_text_response"
         case screenTextStatus = "screen_text_status"
+        case contactsRequest = "contacts_request"
+        case contactsResponse = "contacts_response"
+        case contactsStatus = "contacts_status"
         case approvalResolved = "approval_resolved"
         case demonstrationTrace = "demonstration_trace"
         case demonstrationDraft = "demonstration_draft"
@@ -739,6 +814,15 @@ enum WSMessage: Codable, Hashable {
         case .screenTextStatus:
             self = .screenTextStatus(seq: seq, timestamp: timestamp,
                                      payload: try container.decode(ScreenTextStatusPayload.self, forKey: .payload))
+        case .contactsRequest:
+            self = .contactsRequest(seq: seq, timestamp: timestamp,
+                                    payload: try container.decode(ContactsRequestPayload.self, forKey: .payload))
+        case .contactsResponse:
+            self = .contactsResponse(seq: seq, timestamp: timestamp,
+                                     payload: try container.decode(ContactsResponsePayload.self, forKey: .payload))
+        case .contactsStatus:
+            self = .contactsStatus(seq: seq, timestamp: timestamp,
+                                   payload: try container.decode(ContactsStatusPayload.self, forKey: .payload))
         case .approvalResolved:
             self = .approvalResolved(seq: seq, timestamp: timestamp,
                         payload: try container.decode(ApprovalResolvedPayload.self, forKey: .payload))
@@ -815,6 +899,15 @@ enum WSMessage: Codable, Hashable {
             try container.encode(payload, forKey: .payload)
         case .screenTextStatus(_, _, let payload):
             try container.encode(MessageType.screenTextStatus, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .contactsRequest(_, _, let payload):
+            try container.encode(MessageType.contactsRequest, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .contactsResponse(_, _, let payload):
+            try container.encode(MessageType.contactsResponse, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case .contactsStatus(_, _, let payload):
+            try container.encode(MessageType.contactsStatus, forKey: .type)
             try container.encode(payload, forKey: .payload)
         case .approvalResolved(_, _, let payload):
             try container.encode(MessageType.approvalResolved, forKey: .type)
