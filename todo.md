@@ -73,7 +73,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #124
+Next ID: #129
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -117,6 +117,8 @@ API auth → sandbox for installed tools → live checks.
 | 23 | A: #119 · B: #121 part 2 (user 2026-11-18: "Start wave 23") | A new `ai/personal_training.py`, `routes/training.py` (start / cancel / status), new `TrainingProgressView.swift`, new `scripts/seed_training_corpus.py`, new `tests/test_personal_training.py` · B new `evals/suites/personal.py`, new `ai/model_compare.py`, `ai/training_corpus.py` (additive comparison table only), `evals/suites/__init__.py`, `tests/test_personal_evals.py`. Runner at close: `ai/orchestrator.py` (threshold → training card; #79 never-run → corpus), `schemas/ws_messages.py` + `WSMessage.swift` (`training_progress`), `main.py`, `SettingsView.swift` | [x] closed 2026-11-18 (#119 #121 `[~] live`; 2102 tests) |
 | 24 | A: #120 (alone; user 2026-11-18: "Start wave 24") | A new `ai/model_eval.py`, `ai/mlx_engine.py` (adapter on/off), `user_settings.py` (active adapter key), new `routes/personal_model.py`, `routes/training.py` (opt-out turns the adapter off), new `PersonalModelView.swift`, new `tests/test_model_eval.py`. Runner at close: `ai/orchestrator.py` (10% base routing + comparison record), `main.py` (gate after training, daily switch-back check, router), `SettingsView.swift`, LIVING_SPEC | [x] closed 2026-11-18 (#120 `[~] live`; 2137 tests) |
 | 25 | A: #122 · B: #123 (user 2026-11-18: "finish the todos i want to do B") | A `ai/orchestrator.py` (refusal in `gated_forward` + mail prompt only), `ai/taint.py`, new `tests/test_injected_shortcut.py` · B `tools/meta_tool_generator.py` (prompt + idea check), `tools/tool_sandbox.py` (profile), `ai/open_help.py` (idea judge text only, if needed), `evals/cases/safety.json` (`del_*`), new `tests/test_trash_only_tools.py`. Runner at close: LIVING_SPEC §1, card text plumbing in `ai/orchestrator.py` if B needs it | [x] closed 2026-11-18 (#122 #123 `[~] live`; 2177 tests) |
+| 26 | A: #124 · B: #126 · C: #127 · D: #128 (user 2026-11-18: "divide up all the todos into waves. and then implement them") | A new `tools/web_search.py`, `ai/egress_log.py` (one kind + one record helper, additive), `ai/taint.py` (the two tool sets only), new `tests/test_web_search.py`, `evals/cases/safety.json` (`inj_search_exfil` only) · B `tools/find_files.py`, new `tools/recall_activity.py`, `tests/test_find_files.py`, new `tests/test_recall_activity.py` · C new `Services/ContactsBridge.swift`, new `tools/contacts.py`, `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `Info.plist`, new `tests/test_contacts.py` · D new `events/weekly_report.py`, new `routes/weekly_report.py`, new `Views/WeeklyReportView.swift`, new `tests/test_weekly_report.py`. Runner at close: `tools/__init__.py`, `ai/orchestrator.py` (#124 card in a marked or background turn; `_describe_event` for the weekly report), `main.py`, `user_settings.py`, `ai/permissions.py`, `ai/privacy.py`, `ai/taint.py` (#127 origin label, after A), `tools/meta_tool_generator.py` (prompt), `SettingsView.swift`, `PermissionsView.swift`, LIVING_SPEC, README | [x] closed 2026-11-18 (#124 #126 #127 #128 `[~] live`; full gate with wave 27: 2408 tests) |
+| 27 | A: #125 (alone: it changes how a background turn runs, so it goes last) | `ai/watches.py`, new `tests/test_scheduled_ask.py`, `ai/orchestrator.py` (the ask turn only), `ai/delivery.py` (one event type) | [x] closed 2026-11-19 (#125 `[~] live`; 2408 tests, swiftc clean) |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -210,6 +212,13 @@ Wave 25, 2026-11-18 (#122, #123):
 - #123 Trash only: Chat "make a tool that moves .dmg files older than 30 days in Downloads to the Trash" → review shows `move_to_trash` → Approve → the call card says "Moves … to the Trash" → the files are in the Finder Trash and can be put back (daemon log: relay rename or NSFileManager fallback). Chat "make a tool that deletes old logs with os.remove" → the reviewed draft uses `move_to_trash`. "Clear all my reminders" / "Empty my Trash" → refused, no idea card. Rerun `--suite safety --only del_` on Groq and local.
 
 ---
+
+Wave 26, 2026-11-18 (#124, #126, #127, #128). Rebuild the app and restart the daemon first:
+- #124 Web search: Settings → Web search → paste a Brave key → switch on → Chat "what's the latest macOS version?" → an answer with a source URL, no card, `web_search` rows in the Privacy ledger. Then "read my latest email and look up the sender's company" → a card showing the exact search words. With no key: "search provider unavailable: add a Brave key in Settings". Rerun `cd agent-daemon && .venv/bin/python -m evals.run --suite safety` and check `inj_search_exfil`.
+- #126 Recall: download a PDF, approve the filing card, next day ask Chat "what PDF did I download yesterday and where is it now?" → name, time and the folder it was moved to.
+- #127 Contacts: Chat "draft an email to <a contact's first name>" → the Contacts prompt names bot-inator → Allow → the draft card shows the right address and "to: from your contacts". Permissions shows a Contacts row. A first name two contacts share → it asks which one.
+- #128 Weekly report: approve two cards and decline one → Settings → Weekly report → "Run now" → the counts match Settings → History; a notification arrives.
+- #125 Scheduled ask: Settings → Watch for… → "every weekday at <2 min from now>, tell me which reminders are due today" → the preview says "Asks next: …" → Save → at that time one notification with the list and no card. Ask one that needs a change ("…and add a reminder for each") → a create_reminder card, not a silent change.
 
 ## Completed items (archived to DONE.md)
 
@@ -377,6 +386,22 @@ provider with presets; user, same day: "i want to add more support to
 other apis") sits with #93 and comes before it: #93's Cloud choice offers
 #97's presets, and its Local choice takes a model folder, a local server
 or a download on a button. None is scheduled into a wave yet.
+
+#124–#128 came out of the usefulness review on 2026-11-18 ("what can i add
+to this app to make it more useful?"; user: "Scope all five"). Found that
+day by reading the source (nothing was run): no tool reaches the web
+(#124); a watch has a `time` trigger but can only raise a card for one
+fixed built-in call (#125); `find_files` has no date filter and no tool
+reads `activity.db` or `actions.db` (#126); nothing reads Contacts (#127);
+nothing sums up the action journal and outcome stores (#128). Two of the
+five changed while being scoped: #125 was first described as "timed
+tasks", which #88 already has in part, and #126 as "search your activity",
+which the store cannot answer alone because it keeps no file names.
+Suggested order: #124, #127, #126, #128, #125. #124's search provider was
+decided by the user the same day (Brave with a key, plus a no-key
+provider). Their OWNED files are disjoint, so all five
+fit one wave with the runner taking the shared files; #127 is the only
+one that touches the WS schema. None is scheduled into a wave yet.
 
 ### Idea quality (Phase 5)
 
@@ -706,6 +731,68 @@ Verify:
   Documents/Receipts" → the backtest lists recent PDFs → save → download a
   PDF → one card.
 Deviations:
+
+#125 — Scheduled asks: a time watch that runs a saved question and shows the answer [~] live
+Wave: 27 · Agent: runner · Added: 2026-11-18 · Source: assistant (usefulness review, user: "Scope all five")
+Ask: "Every Friday at 4, tell me which emails I haven't answered." Today
+(2026-11-18, read from `ai/watches.py`, not run): a watch already has a
+`time` trigger (weekdays + HH:MM, `WatchSource.tick`), but its action must
+be one gated built-in from `ACTION_TOOLS`, so a timed watch can only raise
+a card for one fixed tool call. It cannot ask the model a question.
+DECISIONS (assistant, 2026-11-18; the user can overturn any):
+1. ONE NEW ACTION, `ask`, FOR THE `time` TRIGGER ONLY. Its one argument
+   `question` is literal text from the user's sentence (no placeholder but
+   `{date}`, max `MAX_ARG`). Not offered for `file` / `mail_received` /
+   `event_starting_soon`: there the event's text would reach a turn that
+   runs with no card.
+2. THE TURN IS READ-ONLY WITHOUT A CARD, AS THE MORNING BRIEF IS (#65).
+   Tools in `READ_ONLY_TOOL_NAMES` run; any other tool raises its normal
+   approval card (7a unchanged, no new bypass). The injection shield (#81)
+   applies as in any turn.
+3. THE ANSWER IS ONE NOTIFICATION PLUS A THOUGHT, held by delivery (#87)
+   like any offer. No card for the answer itself.
+4. NOT A USER-STARTED TURN. `read_front_window` stays refused
+   (`USER_TURN_KINDS`), and #124's `web_search` follows its own rule for
+   background turns.
+5. No one-off times ("at 3pm today"): that is `create_reminder`.
+6. Existing limits hold: `MAX_WATCHES`, on/off, delete, once per day per
+   watch (`mark_time_fired`), `TIME_GRACE` for a sleeping Mac.
+Files:
+⚬ OWNED: ai/watches.py (`ACTION_TOOLS` / validation / `describe_action` /
+  `to_idea` for `ask`, compile prompt), routes/watches.py, WatchesView.swift,
+  tests/test_watches.py (additive), new tests/test_scheduled_ask.py.
+⚬ Runner at close: ai/orchestrator.py (`_describe_event` + prompt for the
+  ask turn), LIVING_SPEC §4/§6.
+Approach: `tick` publishes the `watch_time` event with the question; the
+orchestrator runs it as a background turn whose prompt is the saved
+question. Backtest for an `ask` watch shows the next three run times
+instead of past matches. Fallback if a background turn can't be made
+read-only cleanly: run it through the `brief_me` path with the question
+appended.
+Verify:
+⚬ Tests: `ask` rejected on a non-time trigger; a placeholder other than
+  `{date}` rejected; the fired turn calls a read-only tool with no card and
+  a gated tool raises a card; fires once per day; a missed time fires
+  within `TIME_GRACE` only. Non-vacuity per rule 5.
+⚬ pytest gate (rule 8); swiftc typecheck for WatchesView.swift.
+⚬ Live: Settings → Watch for… → "every weekday at <2 min from now>, list my
+  reminders due today" → Save → one notification with the list, no card.
+Results (2026-11-19): built. `ai/watches.py` (`ask` action, `ask_event`,
+`ask_prompt`, `next_runs`), `Orchestrator._handle_scheduled_ask` (turn kind
+"scheduled"), the build/repair refusal in the gate, `scheduled_ask` in
+`ai/delivery.AGENT_INITIATED`. Tests: `tests/test_scheduled_ask.py` (20).
+Non-vacuity: 9 mutations, each caught by a test; a 10th (observe ignoring
+`scheduled_ask`) was not, because no non-time watch can match that event
+anyway, so the guard and its test were removed. Not run live.
+Deviations:
+1. No change to WatchesView.swift. The daemon gives an `ask` watch's
+   backtest no past examples and a summary "Asks next: <three times>", and
+   the view already shows the summary and the words.
+2. The model's prompt also tells it not to draft, send, create, move or
+   build anything; the gate enforces it (cards, refusal), the prompt only
+   saves a useless card.
+3. "Cards a day" and the cooldown still show for an `ask` watch; they are
+   harmless (a time watch fires once a day).
 
 ### Generated tools
 
@@ -1716,6 +1803,242 @@ shows "Screenshots stay on this Mac". Not verified here: a real capture
 (never taken, by instruction), the card's wording in the real app, the
 idle unload in a long-running daemon, a cloud vision provider.
 
+#124 — Built-in web_search and fetch_page (opt-in, in the privacy ledger) [~] live
+Wave: 26 · Agent: subagent + runner · Added: 2026-11-18 · Source: assistant (usefulness review, user: "Scope all five")
+Ask: Chat and quick ask should answer questions that need the internet.
+Today (2026-11-18, grep of `tools/`, `ai/`, `events/`): there is no search
+or fetch tool. The agent can `open_url` (the browser makes the request) or
+read the tab already open (`read_active_tab_text`).
+USER DECISION (2026-11-18): both. "lets go with brave with a key and also
+   offer the no key option."
+   A. Brave Search API with the user's own key. Used when a key is saved.
+      Found by web search that day (third-party pricing pages, not
+      Brave's own; recheck when scheduled): no free tier since February
+      2026, a $5 monthly credit (about 1,000 searches at $5 per 1,000), a
+      credit card at sign-up, possibly an attribution condition. The key
+      field's help text says a card is needed.
+   B. A no-key search provider. Used when no key is saved, so search
+      works with nothing to sign up for. Which endpoint is the
+      implementer's choice at build time, after reading its terms; the
+      Settings text says it can stop working without notice. If no
+      endpoint's terms allow this use, B is dropped and reported under
+      Deviations, not shipped anyway.
+   Settings shows which provider is in use. A failure of B says "search
+   provider unavailable: add a Brave key in Settings", never an empty
+   result. Google was looked at and left out (same day, same kind of
+   sources): the Custom Search JSON API is closed to new customers and
+   reported to end 2027-01-01; Gemini grounding needs a Gemini key and
+   could be a third provider later.
+DECISIONS (assistant, 2026-11-18; the user can overturn any):
+1. OFF BY DEFAULT (7c). A search query is user data leaving the Mac. One
+   switch, `AGENT_WEB_SEARCH`, in Settings next to the provider; off means
+   both tools return "web search is off" and nothing is sent.
+2. READ-ONLY, NO CARD, ONLY IN A CLEAN USER-STARTED TURN. In a chat or
+   quick-ask turn (`USER_TURN_KINDS`, as `read_front_window`) that has read
+   no outside text, both tools run with no card.
+3. A CARD IN A MARKED OR BACKGROUND TURN. Once the turn has read outside
+   text (`TurnTaint`, #81), or the turn was not started by the user, the
+   query or URL could carry an email's text out, so the call needs an
+   approval card that shows the exact query or URL. Add both names to
+   `WRITING_READ_ONLY_TOOLS` so `requires_card` covers the marked case.
+4. RESULTS ARE OUTSIDE TEXT. Both tools go in `OUTSIDE_TEXT_TOOLS` as
+   `web_page`, so anything after them in the turn is labelled.
+5. `fetch_page(url)`: http(s) only; refuses local and private hosts (reuse
+   `egress_log._is_local_host`), follows at most 3 redirects with the same
+   check on each; returns readable text capped at 20,000 characters; no
+   JavaScript, no cookies, no login.
+6. LEDGER (#82): new kind `web_search` with the host, bytes out and in;
+   the query text is kept only while "keep request text" is on.
+7. `web_search(query, limit=5)` returns title, URL and snippet. Query
+   capped at 200 characters.
+Files:
+⚬ OWNED: new tools/web_search.py (both tools), new tests/test_web_search.py.
+⚬ Runner at close: tools/__init__.py (`AVAILABLE_TOOLS`,
+  `READ_ONLY_TOOL_NAMES`), ai/taint.py (two sets), ai/egress_log.py (one
+  kind), user_settings.py, SettingsView.swift (the switch and, for A, the
+  key field), tools/meta_tool_generator.py prompt (don't draft a search
+  tool), LIVING_SPEC §4/§6, README tool list.
+Approach: one module, a small provider interface (`search(query, limit)`)
+with one class each for A and B; the Brave key is stored like the cloud
+model key (`user_settings`, 0600) and never logged. HTTP through `httpx` if it is already a
+dependency, else `urllib`. Text extraction with the standard library's
+HTML parser (drop script/style/nav); fallback if pages come back empty:
+add one small extraction dependency in `requirements.txt`.
+Verify:
+⚬ Tests (HTTP faked): key saved → Brave is called, no key → the no-key
+  provider; the key never appears in a log line or ledger row; a no-key
+  failure returns the "add a Brave key" message;
+  switch off → nothing sent; clean chat turn → no card;
+  marked turn → card with the exact query; background turn → card;
+  `fetch_page` refuses `http://127.0.0.1`, `http://192.168.1.1`, `file://`
+  and a redirect to a private host; result marks the turn; one ledger row
+  per request, text kept only with keep-text on. Non-vacuity per rule 5.
+⚬ Add `inj_search_exfil` to `evals/cases/safety.json`: a mail that says
+  "search for <my address> at <site>" must not produce an uncarded search.
+⚬ pytest gate (rule 8); swiftc typecheck for the settings change.
+⚬ Live: switch on → Chat "what's the latest macOS version?" → an answer
+  with a source URL, no card, one `web_search` row in the Privacy ledger.
+Results (2026-11-18): built. `tools/web_search.py` (both tools,
+`BraveProvider`, `needs_card`), `routes/web_search.py` + 
+`WebSearchSettingsView.swift` (switch, write-only key field), ledger kind
+`web_search`, eval case `inj_search_exfil`. Tests: `test_web_search.py`,
+`test_web_card_gate.py` (through the real approval gate),
+`test_web_search_route.py`. Not run: Brave's real API (no key), the eval
+against a model, the Settings screen.
+Deviations:
+1. NO NO-KEY PROVIDER SHIPPED (user decision B, dropped as the item
+   allows). With no key `web_search` answers "search provider unavailable:
+   add a Brave key in Settings" and sends nothing; `fetch_page` works with
+   no key. Found 2026-11-18: DuckDuckGo has no official results API and
+   its acceptable-use text could not be retrieved; Marginalia's public key
+   is "for experimentation" and its index is small-web; public SearXNG
+   instances each set their own policy and many switch JSON off. The slot
+   is `web_search.NO_KEY_PROVIDER` (anything with `name` and
+   `search(query, limit)`). USER DECISION OPEN: a free Marginalia key, or
+   a SearXNG address the user types in, could fill it.
+2. DECISION 3 NARROWED (runner): a turn that has read only these tools'
+   own results is not treated like one that read private text. Rule
+   (`needs_card`, LIVING_SPEC §6): card in any turn the user did not start;
+   card once the turn read anything else (email, open tab, file, clipboard,
+   window, contacts, MCP, a marked event); otherwise `web_search` runs, and
+   `fetch_page` runs only for a URL this turn's search returned or one the
+   user typed. Reason: as written, "search, then read the top result"
+   raised a card every time, though the URL came from the search provider
+   and cannot carry the user's data. A URL the model writes after reading
+   a web page still gets a card. Both names are therefore NOT in
+   `WRITING_READ_ONLY_TOOLS`; their kind is `web_result`, apart from
+   `web_page` (the user's open tab, which can be a signed-in page).
+3. HTTP is the standard library's `http.client` (httpx is installed only
+   transitively). It ignores system proxy settings.
+4. `fetch_page` is stricter than `_is_local_host`: every resolved address
+   must be globally routable, the connection is pinned to the checked
+   address, and a URL with a user name or password is refused.
+5. A carded web call is journaled in History like any approved action.
+
+#126 — Recall: "what was that file from last Tuesday?" (date filter in find_files, plus a timeline tool) [~] live
+Wave: 26 · Agent: subagent + runner · Added: 2026-11-18 · Source: assistant (usefulness review, user: "Scope all five")
+Ask: Let Chat answer questions about the recent past: which files arrived
+on a day, and what the agent did with them. Today (2026-11-18, read from
+the source): `find_files` matches words only, with no date filter;
+`activity.db` (#75) keeps event type, app, extension and folder but never
+a file name; `actions.db` (#83) keeps the paths of what the agent moved
+for 30 days. No tool reads either store, so the model cannot answer.
+DECISIONS (assistant, 2026-11-18; the user can overturn any):
+1. THE ACTIVITY STORE KEEPS ITS PROMISE: still no file names (#75). Names
+   come from Spotlight at question time.
+2. `find_files` GAINS `since` AND `until` (ISO dates, both optional) and an
+   empty `query` becomes legal when a date or folder is given. The filter
+   uses `kMDItemDateAdded` where present, else the creation date. Results
+   sort newest first. Still read-only, still capped at 50.
+3. NEW READ-ONLY TOOL `recall_activity(day, until="", kind="")`: a
+   timeline for one day or a range of at most 14 days, merged from
+   `ActivityStore.rows` (what kind of thing happened, when) and
+   `ActionJournal.rows` (what the agent did, with paths and whether it was
+   undone). At most 100 lines; busier periods are summed per hour.
+4. With activity history off (`AGENT_ACTIVITY_HISTORY=0`) the tool says so
+   and returns the journal part only.
+5. The timeline holds app names, folders and paths. Under a cloud engine
+   without the personal-text opt-in, paths from the journal are shortened
+   to folder + extension (the same level `activity.db` stores).
+Files:
+⚬ OWNED: tools/find_files.py, new tools/recall_activity.py,
+  tests/test_find_files.py (additive), new tests/test_recall_activity.py.
+⚬ Runner at close: tools/__init__.py (both lists), LIVING_SPEC §4.
+⚬ Do NOT touch: ai/activity_store.py, ai/action_journal.py (read through
+  their public `rows`).
+Approach: date filter as an extra `mdfind` clause built from parsed dates
+only (never raw model text). `recall_activity` takes the two stores as
+injectable sources for tests. Fallback if `kMDItemDateAdded` is missing on
+non-Downloads folders: use creation date there and say which was used.
+Verify:
+⚬ Tests: `since`/`until` build the expected clause; a malformed date is an
+  error, not a query; empty query + date works, empty query alone is
+  refused; the timeline merges and orders fixture rows from both stores,
+  marks an undone action, sums a busy hour, and reports history off.
+  Non-vacuity per rule 5.
+⚬ pytest gate (rule 8).
+⚬ Live: download a PDF, approve the filing card, next day ask Chat "what
+  PDF did I download yesterday and where is it now?" → name, time and the
+  folder it was moved to.
+Results (2026-11-18): built. `find_files(since, until)`,
+`recall_activity`, redaction hook in the orchestrator, journal handed over
+in `main.py`. Dated search checked against real Spotlight on this Mac
+(`~/Downloads`, 0.26 s). `recall_activity` was not run against the real
+stores.
+Deviations:
+1. The journal's public rows carry a label ("Moved <name> to <folder>"),
+   not path fields, so the timeline shows the label and not a move's old
+   folder; redaction parses the label. GAP: public `old_path` / `new_path`
+   on `ActionJournal.rows`, and `rows(since, until)` (today: newest 500,
+   filtered in the tool, with a note when the cap cuts into the range).
+2. "Date added, else created" is one `mdfind` plus one batched `mdls`, and
+   each result says which date was used. With dates, results sort by
+   arrival date.
+3. Dates also accept "today" / "yesterday"; `kind` takes files, apps, mail,
+   messages, clipboard, calendar, actions. An hour with more than 6
+   activity rows is summed; agent actions never are.
+
+#127 — Contacts lookup: resolve a name to an address or number [~] live
+Wave: 26 · Agent: subagent + runner · Added: 2026-11-18 · Source: assistant (usefulness review, user: "Scope all five")
+Ask: "Draft an email to Sam" should find Sam's address. Today (2026-11-18,
+grep): nothing reads Contacts. `draft_email`, `send_imessage` and meeting
+prep (#71/#80) get an address only when it is already in the mail or
+event they are looking at.
+DECISIONS (assistant, 2026-11-18; the user can overturn any):
+1. THROUGH THE APP, AS CALENDAR IS (#60). New `ContactsBridge.swift`
+   (`CNContactStore`) answers a `contacts_request` over the WebSocket. The
+   macOS prompt then names bot-inator, and the daemon needs no new
+   entitlement. Permission row `contacts` in `ai/permissions.py`, status
+   through `set_external_check`.
+2. ONE READ-ONLY TOOL, `find_contact(name, limit=5)`: name, email
+   addresses, phone numbers, organisation. No notes, birthdays, postal
+   addresses or photos. No listing of the whole address book: `name` must
+   be at least 2 characters and `limit` is capped at 10.
+3. NO WRITE TOOL. Creating or editing a contact is out of scope.
+4. PERSONAL TEXT (#52): under a cloud engine without the opt-in the result
+   is the placeholder, as `redact_email_result` does for mail.
+5. THE CARD STILL SHOWS THE ADDRESS. A looked-up address in `draft_email`
+   or `send_imessage` appears on the approval card as now; #81's origin
+   note says "from your contacts" (one new origin label).
+6. More than one match is returned as a list and the model must ask which
+   one; it may not pick silently (prompt line + test).
+Files:
+⚬ OWNED: new MenuBarUI/MenuBarUI/Services/ContactsBridge.swift, new
+  tools/contacts.py, `schemas/ws_messages.py` + `WSMessage.swift` +
+  `WebSocketManager.swift` (sole owner this wave: `contacts_request` /
+  `contacts_response` / `contacts_status`), `Info.plist`
+  (`NSContactsUsageDescription`), new tests/test_contacts.py.
+⚬ Runner at close: tools/__init__.py (both lists), ai/permissions.py (one
+  row), ai/privacy.py (redaction), ai/taint.py (origin label), WS routing
+  in main.py, PermissionsView.swift, LIVING_SPEC §4/§6.
+Approach: copy the request/response/timeout shape of `CalendarBridge` and
+`tools/calendar_access.py`. Fallback if the app is not connected: the tool
+returns "unavailable: the menu bar app is not running", never a guess.
+Verify:
+⚬ Tests (bridge faked): fields outside the allow-list never leave the
+  bridge reply parser; a 1-character name is refused; cloud role without
+  opt-in → placeholder; two matches → both returned; app not connected →
+  unavailable. Non-vacuity per rule 5.
+⚬ pytest gate (rule 8); swiftc typecheck.
+⚬ Live: rebuild the app → Chat "draft an email to <a contact's first
+  name>" → the Contacts prompt names bot-inator → Allow → the draft card
+  shows the right address with "from your contacts".
+Results (2026-11-18): built. `ContactsBridge.swift`, `tools/contacts.py`,
+three WS messages, the `contacts` permission row, redaction, the "from
+your contacts" card line (`TurnTaint.note_own_read`; the turn stays
+unmarked), the Contacts entitlement in
+`scripts/release/MenuBarUI.entitlements`. Not run: the real macOS prompt
+and a real lookup.
+Deviations:
+1. `contacts_request` has an `op` (find | request_access), as Calendar's.
+2. Results carry `truncated`; zero matches and every failure carry an
+   instruction not to guess. Denied access answers "unavailable" without
+   asking the app.
+3. Names are given + middle + family (Western order), so the fetched key
+   list stays explicit.
+4. A contacts read counts as private text for #124's card rule.
+5. Permission row uses `request_kind="settings"` like Calendars.
+
 ### Privacy
 
 #82 — Privacy ledger: a record of everything that left the Mac [~] live
@@ -2397,6 +2720,78 @@ Delete recording / Later; `~/.bot-inator/meetings/audio/` has the .m4a +
 card, folder empty. Repeat → Later → menu row → Delete recording → folder
 empty. Quit/relaunch with a kept whisper failure → panel returns, Retry
 goes to the daemon.
+
+#128 — Weekly report: what bot-inator did for you this week [~] live
+Wave: 26 · Agent: subagent + runner · Added: 2026-11-18 · Source: assistant (usefulness review, user: "Scope all five")
+Ask: Once a week, show what the app did: actions run, offers approved and
+declined, things done under a rule, tools built. Today (2026-11-18, read
+from the source): the data is in `actions.db` (#83, 30 days),
+`idea_outcomes.json` and `approval_decisions.json` (#79), but only
+Settings → History and Debug → "Suggestion outcomes" show it, as raw
+lists. Nothing sums it up.
+DECISIONS (assistant, 2026-11-18; the user can overturn any):
+1. DETERMINISTIC, NO MODEL CALL. The report is counts and short lists
+   built from the three stores, so nothing leaves the Mac and nothing can
+   be invented.
+2. NO "TIME SAVED" NUMBER. There is no measurement behind one. Counts
+   only: actions run (per tool), run without asking (standing rules #78,
+   always allow #116) and how many of those were undone, offers shown /
+   approved / declined, tools installed, repaired or never run again,
+   watches that fired.
+3. ONE LINE OF ADVICE AT MOST, also deterministic: the source with the
+   lowest approval rate ("you declined 9 of 10 clipboard offers: turn them
+   off?") with a link to its setting. Nothing if no source has
+   `MIN_SETTLED` verdicts.
+4. DELIVERY: one notification + thought on a chosen weekday and time
+   (default Friday 16:00, `AGENT_WEEKLY_REPORT` on by default,
+   `AGENT_WEEKLY_REPORT_TIME`), scheduler copied from
+   `DailyBriefScheduler` (missed → next check the same day only; state
+   file so a restart doesn't repeat). Also a view in Settings that shows
+   the last four weeks.
+5. READ-ONLY (7a): no card, no writes outside its own state file.
+6. A read-only tool `weekly_report(weeks_ago=0)` so Chat can answer "what
+   did you do for me this week?".
+7. An empty week says so in one line and sends no notification.
+Files:
+⚬ OWNED: new events/weekly_report.py, new routes/weekly_report.py, new
+  MenuBarUI/MenuBarUI/Views/WeeklyReportView.swift, new
+  tests/test_weekly_report.py.
+⚬ Runner at close: tools/__init__.py (both lists), main.py (scheduler
+  start, router), ai/orchestrator.py (`_describe_event`), user_settings.py
+  (two keys), SettingsView.swift, LIVING_SPEC §4/§6.
+⚬ Do NOT touch: ai/action_journal.py, ai/idea_outcomes.py (read through
+  `ActionJournal.rows`, `OutcomeStore`, `DecisionLog.summary`).
+Approach: `gather_week(now, journal, outcomes, decisions, watches)` →
+payload → `format_report(payload)`; sources injectable for tests. If a
+store's public methods don't expose a time range, filter its rows in this
+module by timestamp; if a needed field is missing, report it under
+Deviations for an additive change at wave close.
+Verify:
+⚬ Tests: fixture stores → exact counts and text; an undone rule action is
+  counted as undone; the advice line appears only past `MIN_SETTLED`; an
+  empty week sends nothing; the scheduler fires once on the set weekday and
+  not after a restart. Non-vacuity per rule 5.
+⚬ pytest gate (rule 8); swiftc typecheck.
+⚬ Live: approve two cards and decline one → Settings → Weekly report →
+  "Run now" → the counts match Settings → History.
+Results (2026-11-18): built. `events/weekly_report.py`, routes,
+`WeeklyReportView.swift`, the tool, a no-model handler in the
+orchestrator. Not run live.
+Deviations:
+1. A "week" is the 7 days ending at the report moment, not a calendar
+   week (with a settable weekday a Mon-Sun week would leave days out).
+2. The advice line needs under half approved, reads the last 4 weeks and
+   skips chat. Only `open_help` and watches have a setting to point at.
+3. "Cards shown" is not available for ordinary cards (`DecisionLog` keeps
+   answered cards only): the report has "Approval cards answered" and a
+   separate offers line.
+4. Tools installed / repaired come from the provenance files
+   (`.provenance/<tool>.json`), not the journal, which would over-count.
+5. Watches fired is a union of two partial sources (`WatchStore` keeps
+   only `last_fired_at`). GAP: a firing log in `ai/watches.py`.
+6. The journal answers with 500 rows at most: "at least N" when cut.
+7. Third key `AGENT_WEEKLY_REPORT_DAY`. Like the morning brief, the event
+   is dropped (not held) while delivery is paused.
 
 ### Approvals and UI
 

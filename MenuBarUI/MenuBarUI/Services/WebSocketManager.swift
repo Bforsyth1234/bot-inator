@@ -28,6 +28,11 @@ final class WebSocketManager: ObservableObject {
     private var calendarStatusTask: Task<Void, Never>?
     private let calendarStatusInterval: TimeInterval = 30.0
 
+    /// Contacts for the daemon's `find_contact` (#127).
+    private let contactsBridge = ContactsBridge()
+    /// Last `contacts_status` sent on this connection (nil: none yet).
+    private var sentContactsStatus: ContactsAuthorization?
+
     /// Front-window text for the daemon's `read_front_window` (#89).
     let screenTextBridge = ScreenTextBridge()
     /// Last `screen_text_status` sent on this connection (nil: none yet).
@@ -114,6 +119,7 @@ final class WebSocketManager: ObservableObject {
         reconnectDelay = 1.0
         sentCalendarStatus = nil  // a new connection needs its own calendar_status
         sentScreenTextTrusted = nil  // and its own screen_text_status (#89)
+        sentContactsStatus = nil  // and its own contacts_status (#127)
         sentMeetingState = false  // and its own meeting_record_state (#86)
         wireMeetingRecorder()
         receiveTask = Task { [weak self] in await self?.receiveLoop() }
@@ -289,7 +295,31 @@ final class WebSocketManager: ObservableObject {
                 guard !Task.isCancelled else { return }
                 self?.sendCalendarStatusIfChanged()
                 self?.sendScreenTextStatusIfChanged()
+                self?.sendContactsStatusIfChanged()
             }
+        }
+    }
+
+    // MARK: - Contacts (#127)
+
+    /// Tell the daemon this app serves contact lookups, with the Contacts
+    /// status (read without prompting). Sent once per connection and on change.
+    private func sendContactsStatusIfChanged() {
+        guard task != nil else { return }
+        let status = ContactsBridge.authorization()
+        guard status != sentContactsStatus else { return }
+        sentContactsStatus = status
+        send(.contactsStatus(seq: nextSeq(), timestamp: Date(),
+                             payload: ContactsStatusPayload(authorization: status)))
+    }
+
+    private func handleContactsRequest(_ payload: ContactsRequestPayload) {
+        let bridge = contactsBridge
+        Task { [weak self] in
+            let response = await bridge.handle(payload)
+            guard let self else { return }
+            self.send(.contactsResponse(seq: self.nextSeq(), timestamp: Date(), payload: response))
+            self.sendContactsStatusIfChanged()
         }
     }
 
@@ -382,6 +412,11 @@ final class WebSocketManager: ObservableObject {
                 handleCalendarRequest(payload)
                 return
             }
+            if case .contactsRequest(_, _, let payload) = parsed {
+                // Plumbing, not UI; matches are not kept in `messages` (#127).
+                handleContactsRequest(payload)
+                return
+            }
             if case .screenTextRequest(_, _, let payload) = parsed {
                 // Plumbing, not UI; the text is not kept in `messages` (#89).
                 handleScreenTextRequest(payload)
@@ -407,6 +442,7 @@ final class WebSocketManager: ObservableObject {
                 lastStatus = payload
                 sendCalendarStatusIfChanged()
                 sendScreenTextStatusIfChanged()
+                sendContactsStatusIfChanged()
                 if !sentMeetingState {
                     sentMeetingState = true
                     MeetingRecorder.shared.reportIdle()
@@ -507,6 +543,9 @@ struct DebugStats {
         case .screenTextRequest: key = "screen_text_request"
         case .screenTextResponse: key = "screen_text_response"
         case .screenTextStatus: key = "screen_text_status"
+        case .contactsRequest: key = "contacts_request"
+        case .contactsResponse: key = "contacts_response"
+        case .contactsStatus: key = "contacts_status"
         case .approvalResolved: key = "approval_resolved"
         case .demonstrationTrace: key = "demonstration_trace"
         case .demonstrationDraft: key = "demonstration_draft"

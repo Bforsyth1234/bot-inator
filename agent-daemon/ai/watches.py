@@ -123,6 +123,14 @@ ARG_DEFAULTS: dict[str, dict[str, str]] = {
     "draft_email": {"subject": "", "body": ""},
     "create_note": {"body": ""},
 }
+# #125: the one action that is not a tool call. A ``time`` watch may ask a
+# saved question; the answer arrives as a notification. Only for ``time``:
+# on any other trigger the event's own text would reach a turn that runs
+# read-only tools with no card.
+ASK_ACTION = "ask"
+ASK_EVENT_TYPE = "scheduled_ask"
+MAX_QUESTION = 300
+
 TOOL_VERBS: dict[str, str] = {
     "move_file": "move the file",
     "create_reminder": "add a reminder",
@@ -271,6 +279,8 @@ def _validate_action(raw: Any, trigger_kind: str, problems: list[str]) -> dict[s
     if extra:
         problems.append(f"action does not take {extra}")
     tool = str(raw.get("tool") or "")
+    if tool == ASK_ACTION:
+        return _validate_ask(raw, trigger_kind, problems)
     if tool not in ACTION_TOOLS:
         problems.append(
             f"tool {tool!r} is not allowed; a watch may only offer one of {sorted(ACTION_TOOLS)}"
@@ -319,6 +329,37 @@ def _validate_action(raw: Any, trigger_kind: str, problems: list[str]) -> dict[s
     if tool == "open_url" and not re.match(r"^https?://\S+$", out.get("url", ""), re.IGNORECASE):
         problems.append("open_url url must be a plain http(s) address")
     return {"tool": tool, "arguments": out}
+
+
+def _validate_ask(raw: Mapping[str, Any], trigger_kind: str, problems: list[str]) -> dict[str, Any]:
+    """#125: ``{"tool": "ask", "arguments": {"question": "..."}}``."""
+    if trigger_kind != "time":
+        problems.append("ask only works with a time trigger (a question at a set time)")
+        return {}
+    args = raw.get("arguments") or {}
+    if not isinstance(args, Mapping):
+        problems.append("arguments must be an object")
+        return {}
+    extra = sorted(set(args) - {"question"})
+    if extra:
+        problems.append(f"ask has no argument {extra[0]!r}")
+    question = args.get("question")
+    if not isinstance(question, str) or not question.strip():
+        problems.append("ask needs 'question'")
+        return {}
+    text = " ".join(question.split())
+    if len(text) > MAX_QUESTION:
+        problems.append(f"the question is too long (at most {MAX_QUESTION} characters)")
+    bad = [p for p in placeholders_in(text) if p != "date"]
+    if bad:
+        problems.append(f"placeholder {{{bad[0]}}} is not allowed in a question (only {{date}})")
+    if _PLACEHOLDER_RE.sub("", text).count("{") or _PLACEHOLDER_RE.sub("", text).count("}"):
+        problems.append("the question has a stray brace")
+    return {"tool": ASK_ACTION, "arguments": {"question": text}}
+
+
+def is_ask(spec: Mapping[str, Any]) -> bool:
+    return str((spec.get("action") or {}).get("tool") or "") == ASK_ACTION
 
 
 def validate_spec(raw: Any) -> dict[str, Any]:
@@ -373,6 +414,8 @@ def describe_trigger(trigger: Mapping[str, Any]) -> str:
 def describe_action(action: Mapping[str, Any]) -> str:
     tool = str(action.get("tool") or "")
     args = action.get("arguments") or {}
+    if tool == ASK_ACTION:
+        return f'ask "{args.get("question", "")}" and show you the answer'
     shown = ", ".join(f"{k}: {v}" for k, v in args.items() if str(v).strip())
     verb = TOOL_VERBS.get(tool, tool)
     return f"offer to {verb} ({tool}{' with ' + shown if shown else ''})"
@@ -380,6 +423,13 @@ def describe_action(action: Mapping[str, Any]) -> str:
 
 def describe(spec: Mapping[str, Any]) -> str:
     """The spec in plain words, for the review step and the saved list."""
+    if is_ask(spec):
+        return (
+            f"{describe_trigger(spec.get('trigger') or {})}, "
+            f"{describe_action(spec.get('action') or {})}. "
+            "It may look things up without asking; anything that changes "
+            "something still needs your approval on a card."
+        )
     return (
         f"{describe_trigger(spec.get('trigger') or {})}, "
         f"{describe_action(spec.get('action') or {})}. "
@@ -403,7 +453,10 @@ COMPILE_SYSTEM_PROMPT = (
     "tool is one of: move_file(src, dst_dir, new_name), create_reminder(title, "
     "due, list_name, notes), create_event(title, start, end, calendar, location, "
     "notes), draft_email(to, subject, body, cc), create_note(title, body, folder), "
-    "open_app(name), open_url(url), run_shortcut(name, input_text).\n"
+    "open_app(name), open_url(url), run_shortcut(name, input_text), and, "
+    "for a time trigger only, ask(question): a question to answer at that "
+    "time, written out in the user's words (e.g. every Friday at 16:00, "
+    "\"which emails haven't I answered?\").\n"
     "Argument values are text and may use only these placeholders, from the "
     "trigger's own fields: file: {path} {date}; mail_received: {sender} "
     "{subject} {date}; event_starting_soon: {title} {date}; time: {date}. "
@@ -589,6 +642,43 @@ def fill_arguments(action: Mapping[str, Any], fields: Mapping[str, str]) -> dict
             value = os.path.expanduser(value)
         out[key] = value
     return out
+
+
+def ask_event(watch: Mapping[str, Any], fields: Mapping[str, str]) -> ContextEvent:
+    """#125: the event a due ``ask`` watch publishes (not an idea, no card)."""
+    question = _PLACEHOLDER_RE.sub(
+        lambda m: str(fields.get(m.group(1), "")),
+        str(watch["spec"]["action"]["arguments"]["question"]),
+    )
+    return ContextEvent(event_type=ASK_EVENT_TYPE, metadata={
+        "watch_id": watch["id"],
+        "question": question,
+        "date": fields.get("date", ""),
+        "words": describe(watch["spec"]),
+        "source": SOURCE_NAME,
+        "trigger": TRIGGER_PREFIX + str(watch["id"]),
+    })
+
+
+ASK_PROMPT = (
+    "It is {date}. The user saved this question to be answered now, at a "
+    "time they chose (Settings > Watch for...):\n\n{question}\n\n"
+    "Answer it in a few short lines, using the read-only tools you have "
+    "(mail, calendar, reminders, files, recall, the weekly report). Do not "
+    "draft, send, create, move or change anything, and do not build a tool; "
+    "if the question asks for that, say what you would do instead. Reply "
+    "with the answer only."
+)
+
+
+def ask_prompt(event: ContextEvent) -> str:
+    meta = event.metadata or {}
+    return ASK_PROMPT.format(date=meta.get("date") or "today",
+                             question=_text(meta.get("question"), MAX_QUESTION))
+
+
+def describe_ask(event: ContextEvent) -> str:
+    return f"Scheduled question: {_text((event.metadata or {}).get('question'), 120)}"
 
 
 def to_idea(watch: Mapping[str, Any], event: ContextEvent, fields: Mapping[str, str]) -> dict[str, Any]:
@@ -816,8 +906,32 @@ def backtest(spec: Mapping[str, Any], sources: Optional[BacktestSources] = None,
         summary = f"Would have matched {count} time{'s' if count != 1 else ''} in the last {days} days."
         if unavailable:
             summary += " Not checked: " + "; ".join(unavailable) + "."
-    return {"days": days, "matches": count, "examples": examples[:MAX_EXAMPLES],
-            "sources": rows, "unavailable": unavailable, "summary": summary}
+    out = {"days": days, "matches": count, "examples": examples[:MAX_EXAMPLES],
+           "sources": rows, "unavailable": unavailable, "summary": summary}
+    if kind == "time":
+        out["next_runs"] = next_runs(spec["trigger"], now)
+        if is_ask(spec):
+            # Past scheduled days are not "matches" of a question.
+            out["examples"] = []
+            if out["next_runs"]:
+                out["summary"] = "Asks next: " + ", ".join(out["next_runs"]) + "."
+    return out
+
+
+def next_runs(trigger: Mapping[str, Any], now: datetime, count: int = 3) -> list[str]:
+    """#125: the next ``count`` times a ``time`` trigger fires, as text."""
+    hh, mm = (int(x) for x in str(trigger.get("at") or "00:00").split(":"))
+    days = trigger.get("weekdays") or []
+    out: list[str] = []
+    day = now.date()
+    for _ in range(15):
+        moment = datetime.combine(day, dtime(hh, mm), tzinfo=now.tzinfo)
+        if day.weekday() in days and moment > now:
+            out.append(f"{WEEKDAYS[day.weekday()].title()} {day.isoformat()} {trigger.get('at')}")
+            if len(out) >= count:
+                break
+        day += timedelta(days=1)
+    return out
 
 
 # ---- store -------------------------------------------------------------------
@@ -1096,6 +1210,15 @@ class WatchSource:
         if why:
             logger.info("watch %s matched but no card: %s", watch["id"], why)
             return None
+        if is_ask(watch["spec"]):
+            # #125: a question, not an offer: no card, the answer is shown.
+            ask = ask_event(watch, fields)
+            try:
+                self._publish(ask)
+            except Exception:
+                logger.exception("watch %s publish failed", watch["id"])
+                return None
+            return dict(ask.metadata)
         idea = to_idea(watch, event, fields)
         try:
             self._publish(ContextEvent(event_type="pattern_detected", metadata=idea))
@@ -1167,6 +1290,7 @@ PATTERN_SOURCE_INTRO = (
 
 __all__ = [
     "ACTION_TOOLS", "BacktestSources", "COMPILE_SYSTEM_PROMPT", "Compiler", "DENIALS_TO_PAUSE",
+    "ASK_ACTION", "ASK_EVENT_TYPE", "ask_event", "ask_prompt", "describe_ask", "is_ask", "next_runs",
     "MAX_WATCHES", "PATTERN_SOURCE_INTRO", "PLACEHOLDERS", "SOURCE_NAME", "SpecError",
     "TRIGGER_PREFIX", "WatchLimitError", "WatchSource", "WatchStore", "backtest",
     "compile_prompt", "consecutive_denials", "describe", "event_fields", "fill_arguments",

@@ -6,6 +6,8 @@ Exports the list of available tools the orchestrator registers with smolagents.
 from __future__ import annotations
 
 from .brief import brief_me
+# #127: one contact by name, through the menu bar app (read-only).
+from .contacts import find_contact
 from .create_event import create_event
 from .email_draft import draft_email
 from .find_files import find_files
@@ -20,6 +22,8 @@ from .notes import append_note, create_note
 from .open_url import open_url
 # #102: built-ins a generated tool can't do in the sandbox (approval-gated).
 from .quit_app import quit_app
+# #126: a timeline of kinds and times from the activity and action stores.
+from .recall_activity import recall_activity
 from .read_active_tab import read_active_tab, read_active_tab_text
 from .read_clipboard import read_clipboard
 from .read_email import read_email
@@ -34,6 +38,10 @@ from .shortcuts import list_shortcuts, run_shortcut
 from .show_notification import show_notification
 from .summarize_file import summarize_file
 from .take_screenshot import take_screenshot
+# #124: opt-in; the card rule is tools.web_search.needs_card.
+from .web_search import fetch_page, web_search
+# #128: the week's counts, built with no model call (read-only).
+from .weekly_report import weekly_report
 from .windows import list_windows, open_app
 from .write_clipboard import write_clipboard
 
@@ -70,6 +78,14 @@ AVAILABLE_TOOLS = [
     create_event,
     list_reminders,
     create_reminder,
+    # #124: off until AGENT_WEB_SEARCH=1. No card only in a clean chat turn.
+    web_search,
+    fetch_page,
+    # #126 / #127: read-only.
+    recall_activity,
+    find_contact,
+    # #128: read-only.
+    weekly_report,
     generate_custom_tool,
     # #90: drafts a fix for a failing generated tool; NOT read-only (the
     # repair idea card, then the code-review diff card).
@@ -98,6 +114,16 @@ READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset({
     "list_events",
     "list_reminders",
     "brief_me",
+    # #124: read-only here, but the query / URL leaves the Mac: the
+    # orchestrator adds a card per tools.web_search.needs_card.
+    "web_search",
+    "fetch_page",
+    # #126: reads activity.db and actions.db rows only.
+    "recall_activity",
+    # #127: name, emails, phones, organisation of matching contacts only.
+    "find_contact",
+    # #128: counts from the journal and outcome stores.
+    "weekly_report",
 })
 
 __all__ = [
@@ -130,6 +156,11 @@ __all__ = [
     "create_reminder",
     "generate_custom_tool",
     "repair_generated_tool",
+    "web_search",
+    "fetch_page",
+    "recall_activity",
+    "find_contact",
+    "weekly_report",
     "AVAILABLE_TOOLS",
     "READ_ONLY_TOOL_NAMES",
 ]

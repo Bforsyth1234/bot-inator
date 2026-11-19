@@ -63,6 +63,7 @@ SETTINGS_URLS = {
     "screen_recording": _PANE + "Privacy_ScreenCapture",
     "automation": _PANE + "Privacy_Automation",
     "calendars": _PANE + "Privacy_Calendars",
+    "contacts": _PANE + "Privacy_Contacts",
     "accessibility": _PANE + "Privacy_Accessibility",
     "microphone": _PANE + "Privacy_Microphone",
     "speech_recognition": _PANE + "Privacy_SpeechRecognition",
@@ -311,6 +312,13 @@ def check_calendars() -> CheckResult:
     return fn()
 
 
+def check_contacts() -> CheckResult:
+    fn = _external_checks.get("contacts")
+    if fn is None:
+        return _result(UNKNOWN, "provided by the menu bar app (Contacts, #127)")
+    return fn()
+
+
 def check_accessibility() -> CheckResult:
     """Accessibility for quick-ask's selected text (#74). The menu bar app
     reads the selection, so its own report wins when it supplies one."""
@@ -392,6 +400,14 @@ def request_calendars() -> dict[str, Any]:
                    "Calendar access moves to the menu bar app (#60)")
 
 
+def request_contacts() -> dict[str, Any]:
+    fn = _external_requests.get("contacts")
+    if fn is not None:
+        return fn()
+    return _opened(SETTINGS_URLS["contacts"],
+                   "Contacts access belongs to the menu bar app (#127)")
+
+
 def request_accessibility() -> dict[str, Any]:
     fn = _external_requests.get("accessibility")
     if fn is not None:
@@ -467,6 +483,15 @@ PERMISSIONS: list[Permission] = [
                  "tools/create_event.py", "events/calendar_watcher.py"),
         check=lambda: check_calendars(),
         request=lambda: request_calendars(), request_kind="settings",
+    ),
+    Permission(
+        id="contacts", name="Contacts",
+        why="Look up a person's email address or phone number by name when "
+            "you ask to write to them (provided by the menu bar app; reads "
+            "names, addresses, numbers and organisations only).",
+        used_by=("tools/contacts.py", "MenuBarUI/Services/ContactsBridge.swift"),
+        check=lambda: check_contacts(),
+        request=lambda: request_contacts(), request_kind="settings",
     ),
     Permission(
         id="accessibility", name="Accessibility",

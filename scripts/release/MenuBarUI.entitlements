@@ -14,5 +14,8 @@
     <!-- CalendarBridge (#60): EventKit for the daemon's calendar tools. -->
     <key>com.apple.security.personal-information.calendars</key>
     <true/>
+    <!-- ContactsBridge (#127): Contacts for the daemon's find_contact tool. -->
+    <key>com.apple.security.personal-information.addressbook</key>
+    <true/>
 </dict>
 </plist>

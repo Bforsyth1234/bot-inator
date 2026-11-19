@@ -76,6 +76,9 @@ from ai.setup_scan import (
 from events.calendar_watcher import CalendarWatcher
 from events.clipboard_watcher import ClipboardWatcher
 from events.daily_brief import DailyBriefScheduler
+# #128: imported as the module on purpose (``weekly_report`` is also its tool).
+from events import weekly_report as weekly_report_mod
+from events.weekly_report import WeeklyReportScheduler
 from events.event_bus import ContextEvent, EventBus
 from events.file_watcher import FileWatcher
 from events.imessage_watcher import IMessageWatcher
@@ -90,6 +93,10 @@ from schemas.ws_messages import (
     CalendarStatus,
     CodeApprovalResponse,
     Command,
+    ContactsRequest,
+    ContactsRequestPayload,
+    ContactsResponse,
+    ContactsStatus,
     DemonstrationDraft,
     DemonstrationTrace,
     DemonstrationTracePayload,
@@ -110,6 +117,8 @@ from schemas.ws_messages import (
 )
 from tools import AVAILABLE_TOOLS
 from tools import calendar_access
+# #127: Contacts through the menu bar app (the module; the tool is find_contact).
+from tools import contacts as contacts_tool
 # #89: the module (``tools.read_front_window`` stays the module, see
 # tools/__init__.py), for its WS bridge to the menu bar app.
 from tools import read_front_window as screen_text
@@ -277,6 +286,7 @@ async def lifespan(app: FastAPI):
             ("calendar_watcher", CalendarWatcher),
             ("clipboard_watcher", ClipboardWatcher),
             ("daily_brief", DailyBriefScheduler),
+            ("weekly_report", WeeklyReportScheduler),
         ):
             try:
                 listener = factory(bus)
@@ -446,6 +456,16 @@ async def lifespan(app: FastAPI):
         _store_path("AGENT_ACTIONS_DB", action_journal.default_path()), outcomes=idea_outcomes,
     )
     orchestrator.action_journal = app.state.action_journal
+    # #126: the timeline tool reads the journal the daemon already has open.
+    from tools.recall_activity import set_sources as set_recall_sources  # noqa: WPS433
+
+    set_recall_sources(journal=app.state.action_journal)
+    # #128: the weekly report counts from the stores the daemon holds.
+    weekly_report_mod.configure(
+        journal=app.state.action_journal, outcomes=idea_outcomes,
+        decisions=approval_decisions, watches=watch_store,
+        generated_dir=settings.generated_tools_dir,
+    )
     # #118: opt-in training corpus (records nothing while the opt-in is off).
     from ai import training_corpus  # noqa: WPS433
 
@@ -696,6 +716,9 @@ async def lifespan(app: FastAPI):
     # and the declined-idea store.
     if app.state.daily_brief is not None:
         app.state.daily_brief.attach_ideas(idea_state, idea_feedback)
+    app.state.weekly_report = next(
+        (l for l in listeners if isinstance(l, WeeklyReportScheduler)), None,
+    )
     app.state.listener_names = listener_names
 
     try:
@@ -769,6 +792,8 @@ app.add_middleware(AuthMiddleware)
 # tool detail (#61). The app-wide AuthMiddleware covers them.
 from routes import activity as activity_routes  # noqa: E402
 from routes import daily_brief as daily_brief_routes  # noqa: E402
+from routes import weekly_report as weekly_report_routes  # noqa: E402
+from routes import web_search as web_search_routes  # noqa: E402
 from routes import ideas as ideas_routes  # noqa: E402
 from routes import mcp as mcp_routes  # noqa: E402
 from routes import meeting_prep as meeting_prep_routes  # noqa: E402
@@ -779,6 +804,8 @@ from routes import providers as providers_routes  # noqa: E402
 from routes.tool_detail import router as tool_detail_router  # noqa: E402
 
 app.include_router(daily_brief_routes.router)
+app.include_router(weekly_report_routes.router)
+app.include_router(web_search_routes.router)
 app.include_router(ideas_routes.router)
 app.include_router(permissions_routes.router)
 app.include_router(tool_detail_router)
@@ -1657,6 +1684,8 @@ async def _push_listener_health(
 # The Permissions checklist's ``calendars`` row reads what the menu bar app
 # reported over the WS, and its Request click asks the app to prompt (#60).
 calendar_access.register_permission_hooks()
+# #127: the ``contacts`` row, the same way.
+contacts_tool.register_permission_hooks()
 
 
 def _calendar_sender(websocket: WebSocket):
@@ -1668,6 +1697,24 @@ def _calendar_sender(websocket: WebSocket):
             timestamp=_now_iso(),
             payload=CalendarRequestPayload(
                 request_id=request_id, op=op, args=args,
+                timeout_seconds=timeout_seconds,
+            ),
+        )
+        await websocket.send_text(frame.model_dump_json())
+
+    return send
+
+
+def _contacts_sender(websocket: WebSocket):
+    """``contacts_request`` frames go to this one connection only (#127)."""
+
+    async def send(request_id: str, op: str, name: str, limit: int,
+                   timeout_seconds: int) -> None:
+        frame = ContactsRequest(
+            seq=_next_seq(),
+            timestamp=_now_iso(),
+            payload=ContactsRequestPayload(
+                request_id=request_id, op=op, name=name, limit=limit,
                 timeout_seconds=timeout_seconds,
             ),
         )
@@ -1770,6 +1817,10 @@ async def ws_stream(websocket: WebSocket) -> None:
     screen_text.bridge.connect(
         conn_id, _screen_text_sender(websocket), asyncio.get_running_loop(),
     )
+    # #127: this connection may serve find_contact.
+    contacts_tool.on_connect(
+        conn_id, _contacts_sender(websocket), asyncio.get_running_loop(),
+    )
     # #86: the meeting recorder lives in the app.
     meeting_notes = getattr(app.state, "meeting_notes", None)
     if meeting_notes is not None:
@@ -1801,6 +1852,10 @@ async def ws_stream(websocket: WebSocket) -> None:
                 screen_text.bridge.submit_response(conn_id, msg.payload.model_dump())
             elif isinstance(msg, ScreenTextStatus):
                 screen_text.bridge.set_status(conn_id, msg.payload.accessibility_trusted)
+            elif isinstance(msg, ContactsResponse):
+                contacts_tool.on_response(conn_id, msg.payload.model_dump())
+            elif isinstance(msg, ContactsStatus):
+                contacts_tool.on_status(conn_id, msg.payload.authorization)
             elif isinstance(msg, DemonstrationDraft):
                 demo = getattr(app.state, "demonstration", None)
                 if demo is not None:
@@ -1840,5 +1895,6 @@ async def ws_stream(websocket: WebSocket) -> None:
         orchestrator.remove_subscriber(_ws_send)
         calendar_access.app_bridge.disconnect(conn_id)
         screen_text.bridge.disconnect(conn_id)
+        contacts_tool.on_disconnect(conn_id)
         if meeting_notes is not None:
             meeting_notes.link.disconnect(conn_id)
