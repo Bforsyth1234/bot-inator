@@ -30,7 +30,7 @@ import re
 import sqlite3
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
@@ -182,9 +182,20 @@ def is_own_mailbox(url: Optional[str]) -> bool:
     return bool(_OWN_MAILBOX_RE.match(last))
 
 
-def _iso_date(value: Any) -> str:
+def _iso_date(value: Any, tz: Optional[tzinfo] = None) -> str:
+    """Unix seconds (``date_received``) as ISO 8601 in LOCAL time with its
+    offset, e.g. ``2026-11-20T12:16:17-05:00`` (#144).
+
+    It used to be UTC (``…T17:16:17+00:00``) and the model compared that
+    against "12 pm" without converting. ``tz`` is for tests; None means
+    the system zone at call time (``TZ`` is honoured after ``time.tzset``).
+    Every caller parses the string with ``fromisoformat`` (an aware value,
+    so the same instant either way) or takes its date part, which should
+    be the user's day, not UTC's.
+    """
     try:
-        return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+        stamp = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        return stamp.astimezone(tz).isoformat()
     except (TypeError, ValueError, OverflowError, OSError):
         return ""
 

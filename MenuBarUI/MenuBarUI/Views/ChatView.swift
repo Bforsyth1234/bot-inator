@@ -1,31 +1,44 @@
+import Combine
 import SwiftUI
 
-/// A single turn in the chat — either a historical pair loaded from
-/// `/api/chats` or a live turn assembled from the user's submission
-/// plus the `thought` frames streamed back over the WebSocket.
-struct ChatTurn: Identifiable, Hashable {
-    let id: String  // event_id shared by user message + all agent thoughts
-    var userText: String
-    var assistantText: String
-    var thoughts: [ThoughtPayload]
-    var isPending: Bool  // true until a `complete` thought arrives
-}
-
-/// Derives the ordered list of `ChatTurn`s from:
-///   1. Prior transcript fetched from `GET /api/chats`
-///   2. The local `WebSocketManager.messages` stream (live thoughts)
-/// The former provides historical continuity across daemon restarts;
-/// the latter provides the live reasoning stream for the current turn.
+/// The Chat page's state. #142: owned by `AppDelegate` for the app's
+/// lifetime (not by the view), so a turn keeps collecting its thoughts and
+/// reply while the Chat page is off screen, and the draft survives too.
+/// The bookkeeping itself is ``ChatTranscript`` (Services/ChatTranscript.swift);
+/// this class feeds it:
+///   1. live `thought` frames from `WebSocketManager.messages`, each once,
+///      by index (append-only, #132),
+///   2. `GET /api/chats` rows: when the page appears, after each reconnect,
+///      shortly after a turn's `complete` (the full reply; the thought is cut
+///      at 500 characters), and every ``pendingPollInterval`` while a turn is
+///      pending (catches a `complete` frame lost to a dropped socket or a
+///      daemon restart).
 @MainActor
 final class ChatViewModel: ObservableObject {
     @Published private(set) var turns: [ChatTurn] = []
     @Published var draft: String = ""
     @Published var errorMessage: String?
 
-    private var orderedIds: [String] = []
-    private var byId: [String: ChatTurn] = [:]
+    /// While a turn is pending: how often history is re-read and stale
+    /// turns are expired.
+    static let pendingPollInterval: TimeInterval = 15
+    /// After a `complete`: when to re-read history for the logged reply
+    /// (the daemon writes the assistant row a moment after the thought).
+    static let replyRefetchDelays: [TimeInterval] = [1, 4]
+
+    private var transcript = ChatTranscript()
     private let baseURL: URL
     private let session: URLSession
+    private var scanned = 0
+    private var cancellables: Set<AnyCancellable> = []
+    private var fetchInFlight = false
+    private var fetchAgain = false
+    private var pollTask: Task<Void, Never>?
+    /// #143: where Stop sends `chat_cancel` (set by ``attach(to:)``).
+    private weak var ws: WebSocketManager?
+
+    /// #143: a turn is still running; the send button is Stop.
+    var hasPending: Bool { turns.contains { $0.isPending } }
 
     init(baseURL: URL = URL(string: "http://127.0.0.1:8000")!,
          session: URLSession = .shared) {
@@ -33,96 +46,140 @@ final class ChatViewModel: ObservableObject {
         self.session = session
     }
 
-    /// Load the persisted transcript from the daemon. Called once when
-    /// the chat window appears.
-    func loadHistory() async {
-        do {
-            let request = try DaemonAuth.request(baseURL.appendingPathComponent("api/chats"))
-            let (data, response) = try await session.data(for: request)
-            try DaemonAuth.checkAuth(response)
-            let rows = try JSONDecoder().decode([ChatLogRow].self, from: data)
-            for row in rows { upsert(row: row) }
-            errorMessage = nil
-        } catch {
-            errorMessage = "Failed to load history: \(error.localizedDescription)"
-        }
+    /// Follow the socket for the app's lifetime. Called once at launch.
+    func attach(to ws: WebSocketManager) {
+        guard cancellables.isEmpty else { return }
+        self.ws = ws
+        ws.$messages
+            .receive(on: RunLoop.main)
+            .sink { [weak self] messages in
+                MainActor.assumeIsolated { self?.ingest(messages: messages) }
+            }
+            .store(in: &cancellables)
+        // A (re)connect may have missed frames: re-read what was logged.
+        ws.$isConnected
+            .removeDuplicates()
+            .filter { $0 }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    Task { await self.refreshHistory() }
+                }
+            }
+            .store(in: &cancellables)
     }
 
-    /// Fold any new thoughts from the WS stream into the matching turn.
-    /// Safe to call on every `messages` change — upserts are idempotent.
+    /// Re-read the persisted transcript and merge it (idempotent). Called
+    /// when the Chat page appears and by the triggers above; concurrent
+    /// calls collapse into one more fetch.
+    func refreshHistory() async {
+        if fetchInFlight { fetchAgain = true; return }
+        fetchInFlight = true
+        defer { fetchInFlight = false }
+        repeat {
+            fetchAgain = false
+            do {
+                let request = try DaemonAuth.request(baseURL.appendingPathComponent("api/chats"))
+                let (data, response) = try await session.data(for: request)
+                try DaemonAuth.checkAuth(response)
+                let rows = try JSONDecoder().decode([ChatHistoryRow].self, from: data)
+                transcript.merge(history: rows, now: Date())
+                errorMessage = nil
+                publish()
+            } catch {
+                // Keep what is shown; the next trigger tries again.
+                errorMessage = "Failed to load history: \(error.localizedDescription)"
+            }
+        } while fetchAgain
+    }
+
+    /// Fold new frames in. Only frames past ``scanned`` are read: each
+    /// frame is ingested once, whatever the page is doing.
     func ingest(messages: [WSMessage]) {
-        for msg in messages {
-            guard case let .thought(_, _, payload) = msg else { continue }
-            appendThought(payload)
+        if messages.count < scanned { scanned = 0 }
+        guard scanned < messages.count else { return }
+        var completed: [String] = []
+        var sawThought = false
+        for index in scanned..<messages.count {
+            guard case let .thought(_, timestamp, payload) = messages[index] else { continue }
+            sawThought = true
+            if transcript.ingest(payload, key: index, at: timestamp) {
+                completed.append(payload.eventId)
+            }
         }
+        scanned = messages.count
+        if sawThought { publish() }
+        if !completed.isEmpty { refetchForReply(completed) }
     }
 
-    /// Record a locally-typed user message. Returns the generated
-    /// `event_id` (== `message_id`) so the caller can forward it to
-    /// ``WebSocketManager.sendUserMessage``.
+    /// Record a locally-typed user message under the `message_id` that
+    /// ``WebSocketManager/sendUserMessage(_:context:)`` returned.
     func submit(text: String, messageId: String) {
-        var turn = byId[messageId] ?? ChatTurn(
-            id: messageId, userText: "", assistantText: "",
-            thoughts: [], isPending: true
-        )
-        turn.userText = text
-        turn.isPending = true
-        byId[messageId] = turn
-        if !orderedIds.contains(messageId) { orderedIds.append(messageId) }
-        rebuild()
+        transcript.submit(id: messageId, text: text, at: Date())
+        publish()
+    }
+
+    /// End a turn from the app side without waiting for the daemon.
+    func finish(id: String, text: String) {
+        transcript.finish(id: id, text: text)
+        publish()
+    }
+
+    /// #143: Stop. Every pending turn shows "Stopped." at once and the
+    /// daemon is told (`chat_cancel`); its `complete` and stopped history row
+    /// then confirm it. A second press finds nothing pending: no-op.
+    func stop() {
+        let ids = transcript.stopAll(at: Date())
+        guard !ids.isEmpty else { return }
+        for id in ids { ws?.sendChatCancel(id) }
+        publish()
+        // The daemon's stopped row (what happened, e.g. a withdrawn card).
+        refetchForReply(ids)
     }
 
     // MARK: - Private
 
-    private func appendThought(_ payload: ThoughtPayload) {
-        // Only fold thoughts into turns that already exist: either the
-        // user seeded one via ``submit`` (pending chat turn) or a
-        // historical transcript row created one via ``upsert``. Thoughts
-        // for unknown event ids belong to ambient events (``app_activated``
-        // etc.) and don't belong in the chat surface.
-        guard var turn = byId[payload.eventId] else { return }
-        // Ignore duplicates (e.g. a reconnect re-delivers the same frame).
-        if !turn.thoughts.contains(payload) {
-            turn.thoughts.append(payload)
-        }
-        if payload.stage == .complete {
-            turn.assistantText = payload.content
-            turn.isPending = false
-        }
-        byId[payload.eventId] = turn
-        rebuild()
+    private func publish() {
+        let next = transcript.turns
+        if next != turns { turns = next }
+        updatePolling()
     }
 
-    private func upsert(row: ChatLogRow) {
-        var turn = byId[row.eventId] ?? ChatTurn(
-            id: row.eventId, userText: "", assistantText: "",
-            thoughts: [], isPending: false
-        )
-        switch row.role {
-        case "user": turn.userText = row.text
-        case "assistant": turn.assistantText = row.text
-        default: break
+    /// Re-read history until each just-completed turn has its logged row.
+    private func refetchForReply(_ ids: [String]) {
+        Task { [weak self] in
+            for delay in Self.replyRefetchDelays {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self else { return }
+                await self.refreshHistory()
+                let logged = ids.allSatisfy { self.transcript.byId[$0]?.replyFromHistory ?? true }
+                if logged { return }
+            }
         }
-        byId[row.eventId] = turn
-        if !orderedIds.contains(row.eventId) { orderedIds.append(row.eventId) }
-        rebuild()
     }
 
-    private func rebuild() {
-        turns = orderedIds.compactMap { byId[$0] }
-    }
-}
-
-/// Row returned by `GET /api/chats`. Only the fields the UI needs.
-private struct ChatLogRow: Codable {
-    let eventId: String
-    let role: String
-    let text: String
-
-    enum CodingKeys: String, CodingKey {
-        case eventId = "event_id"
-        case role
-        case text
+    /// Poll only while something is pending.
+    private func updatePolling() {
+        if transcript.hasPending {
+            guard pollTask == nil else { return }
+            let interval = Self.pendingPollInterval
+            pollTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    guard !Task.isCancelled, let self else { return }
+                    if self.transcript.expireStale(now: Date()) { self.publish() }
+                    await self.refreshHistory()
+                    if !self.transcript.hasPending { break }
+                }
+                // A cancelled loop was already replaced (or cleared) by
+                // whoever cancelled it.
+                if !Task.isCancelled { self?.pollTask = nil }
+            }
+        } else {
+            pollTask?.cancel()
+            pollTask = nil
+        }
     }
 }
 
@@ -130,7 +187,8 @@ private struct ChatLogRow: Codable {
 
 struct ChatView: View {
     @EnvironmentObject private var ws: WebSocketManager
-    @StateObject private var viewModel = ChatViewModel()
+    /// #142: app-lifetime state (``AppDelegate/chat``), not view state.
+    @EnvironmentObject private var viewModel: ChatViewModel
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -143,12 +201,10 @@ struct ChatView: View {
         }
         .frame(minWidth: 480, minHeight: 520)
         .task {
-            await viewModel.loadHistory()
-            viewModel.ingest(messages: ws.messages)
             inputFocused = true
-        }
-        .onChange(of: ws.messages.count) { _, _ in
-            viewModel.ingest(messages: ws.messages)
+            // Frames are ingested app-wide; this picks up anything only
+            // chat_log has (a reply logged while the socket was down).
+            await viewModel.refreshHistory()
         }
     }
 
@@ -200,6 +256,17 @@ struct ChatView: View {
                     proxy.scrollTo(last.id, anchor: .bottom)
                 }
             }
+            .onChange(of: viewModel.turns.last?.assistantText) { _, _ in
+                if let last = viewModel.turns.last {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+            .onAppear {
+                // #142: the turns outlive the page; open at the latest one.
+                if let last = viewModel.turns.last {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
         }
     }
 
@@ -210,12 +277,23 @@ struct ChatView: View {
                 .lineLimit(1...5)
                 .focused($inputFocused)
                 .onSubmit(send)
-            Button(action: send) {
-                Image(systemName: "paperplane.fill")
+            if viewModel.hasPending {
+                // #143: while a turn runs the button is Stop (and Esc stops).
+                Button(action: viewModel.stop) {
+                    Image(systemName: "stop.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .keyboardShortcut(.escape, modifiers: [])
+                .help("Stop (Esc)")
+            } else {
+                Button(action: send) {
+                    Image(systemName: "paperplane.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: [])
+                .disabled(viewModel.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut(.return, modifiers: [])
-            .disabled(viewModel.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(12)
     }
@@ -261,7 +339,15 @@ private struct TurnRow: View {
                 .frame(width: 18)
                 .padding(.top, 4)
             VStack(alignment: .leading, spacing: 4) {
-                if !turn.assistantText.isEmpty {
+                if !turn.assistantText.isEmpty && turn.stopped {
+                    // #143: a stopped turn reads as a status line, not an answer.
+                    Label(turn.assistantText, systemImage: "stop.circle")
+                        .textSelection(.enabled)
+                        .appFont(.secondary)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                } else if !turn.assistantText.isEmpty {
                     Text(turn.assistantText)
                         .textSelection(.enabled)
                         .padding(.horizontal, 10)
@@ -276,6 +362,12 @@ private struct TurnRow: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
+                } else if turn.noReply {
+                    Text("No reply was recorded for this message.")
+                        .appFont(.secondary)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
                 }
                 reasoningDisclosure
             }
@@ -285,11 +377,13 @@ private struct TurnRow: View {
 
     @ViewBuilder
     private var reasoningDisclosure: some View {
-        let inner = turn.thoughts.filter { $0.stage != .complete }
+        let inner = turn.thoughts.filter { $0.payload.stage != .complete }
         if !inner.isEmpty {
             DisclosureGroup(isExpanded: $reasoningExpanded) {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(inner, id: \.self) { t in
+                    // Keyed by frame index (unique, #132), not by content.
+                    ForEach(inner) { thought in
+                        let t = thought.payload
                         HStack(alignment: .top, spacing: 6) {
                             Text(t.stage.rawValue)
                                 .appFont(.fine, weight: .semibold)

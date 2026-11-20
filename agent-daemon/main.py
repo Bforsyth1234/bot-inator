@@ -59,7 +59,7 @@ from ai.open_help import (
 # GroqEngine is imported lazily inside ``lifespan`` so the daemon still
 # boots cleanly when ``settings.provider == "local"`` and the optional
 # Groq dependency tree is missing.
-from config import GROQ_DEFAULT_MODELS, settings
+from config import GROQ_DEFAULT_MODELS, default_mlx_models, settings
 import providers
 from ai.idea_match import DeclinedIdeaMatcher, make_sync_judge
 from ai.friction import (
@@ -177,7 +177,12 @@ def _build_engines() -> tuple[Any, Any, Any]:
             from ai.groq_engine import build_engine  # noqa: WPS433
             engines.append(build_engine(settings, provider, role))
         else:
-            engines.append(MLXEngine(local_models[role]))
+            # #136: a model id that fails to load falls back to this
+            # role's default (only if that is already on this Mac).
+            engines.append(MLXEngine(
+                local_models[role],
+                fallback_model=default_mlx_models()[_MLX_MODEL_KEYS[role]],
+            ))
     return engines[0], engines[1], engines[2]
 
 
@@ -1086,6 +1091,12 @@ class SettingsUpdate(BaseModel):
     # #97: per-preset key, base URL and models, keyed by preset id. Groq's
     # entries are the same settings as the ``groq_*`` fields above.
     preset_settings: Optional[dict[str, "PresetUpdate"]] = None
+    # #136: the local MLX model per engine (a Hugging Face repo id or a
+    # folder). ``""`` removes the saved value (back to the .env value or
+    # the default); ignored while ``MLX_<ROLE>_MODEL`` is a shell export.
+    mlx_main_model: Optional[str] = None
+    mlx_analysis_model: Optional[str] = None
+    mlx_drafting_model: Optional[str] = None
 
 
 class PresetUpdate(BaseModel):
@@ -1116,6 +1127,21 @@ _MODEL_FIELDS = (
     ("groq_analysis_model", "GROQ_ANALYSIS_MODEL"),
     ("groq_drafting_model", "GROQ_DRAFTING_MODEL"),
 )
+
+
+# #136: the local MLX model key, the ``settings`` field this process runs,
+# and the ``app.state`` engine, per role.
+_MLX_MODEL_KEYS = {role: f"MLX_{role.upper()}_MODEL" for role in _ENGINE_ROLES}
+_MLX_RUNNING_ATTRS = {
+    "main": "model_path",
+    "analysis": "analysis_model_path",
+    "drafting": "drafting_model_path",
+}
+_MLX_ENGINE_ATTRS = {
+    "main": "engine",
+    "analysis": "analysis_engine",
+    "drafting": "drafting_engine",
+}
 
 
 def _running_value(field_name: str) -> str:
@@ -1232,6 +1258,112 @@ def _presets_view(saved_engines: dict[str, str]) -> list[dict[str, Any]]:
     return out
 
 
+def _dotenv_file_values() -> dict[str, str]:
+    """The ``.env`` file as written. Not ``os.environ``: that also holds
+    values copied from the settings file at start, which a save may have
+    removed since (#136)."""
+    import config as config_module  # noqa: WPS433
+    from dotenv import dotenv_values  # noqa: WPS433
+
+    try:
+        values = dotenv_values(config_module.dotenv_path())
+    except Exception:
+        return {}
+    return {k: (v or "").strip() for k, v in values.items()}
+
+
+def _mlx_next_model(
+    role: str, saved_file: dict[str, str], dotenv: dict[str, str]
+) -> tuple[str, str]:
+    """``(value, source)`` for ``role``'s MLX model on the next start, in the
+    order a start applies them: shell export, settings file, ``.env``.
+    ``value`` is ``""`` (source ``"default"``) when none is set."""
+    key = _MLX_MODEL_KEYS[role]
+    if key in user_settings.shell_exported:
+        return os.environ.get(key, "").strip(), "shell"
+    if saved_file.get(key, "").strip():
+        return saved_file[key].strip(), "settings"
+    if dotenv.get(key):
+        return dotenv[key], "env_file"
+    return "", "default"
+
+
+# Metal lets the GPU wire about three quarters of unified memory, and the
+# OS and apps need the rest, so weights above that will not all stay loaded.
+_MLX_MEMORY_SHARE = 0.75
+
+
+def mlx_memory_note(
+    models: list[str], memory_gb: Optional[float], *,
+    cache_dir: Optional[Path] = None,
+) -> str:
+    """One line when ``models`` together likely exceed this Mac's memory,
+    else ``""``. Sizes come from the local Hugging Face cache or the model
+    folder only (no network); any unknown size, or unknown memory, gives
+    ``""``. Informational: it never blocks a save (#136 decision 2)."""
+    from ai.mlx_engine import local_model_bytes  # noqa: WPS433
+
+    if not models or not memory_gb:
+        return ""
+    total = 0
+    for model in models:
+        size = local_model_bytes(model, cache_dir)
+        if size is None:
+            return ""
+        total += size
+    need_gb = total / 1024**3
+    if need_gb <= memory_gb * _MLX_MEMORY_SHARE:
+        return ""
+    return (
+        f"These local models take about {need_gb:.1f} GB together and this Mac "
+        f"has {memory_gb:.0f} GB of memory, so they may not all fit: expect slow "
+        "or failed loads, or pick smaller models."
+    )
+
+
+_physical_memory_cache: list[Optional[float]] = []
+
+
+def _physical_memory_gb() -> Optional[float]:
+    if not _physical_memory_cache:
+        from ai.first_run import physical_memory_gb  # noqa: WPS433
+        _physical_memory_cache.append(physical_memory_gb())
+    return _physical_memory_cache[0]
+
+
+def _mlx_models_view(
+    saved_file: dict[str, str], saved_engines: dict[str, str]
+) -> dict[str, dict[str, Any]]:
+    """Per role: the local model as Settings shows it (#136)."""
+    dotenv = _dotenv_file_values()
+    defaults = default_mlx_models()
+    out: dict[str, dict[str, Any]] = {}
+    for role in _ENGINE_ROLES:
+        key = _MLX_MODEL_KEYS[role]
+        value, source = _mlx_next_model(role, saved_file, dotenv)
+        engine = getattr(app.state, _MLX_ENGINE_ATTRS[role], None)
+        loaded = getattr(engine, "model_name", "") if isinstance(engine, MLXEngine) else ""
+        error = getattr(engine, "load_error", "") if isinstance(engine, MLXEngine) else ""
+        out[role] = {
+            "key": key,
+            # What the next start uses; "" means the default below.
+            "value": value,
+            "default": defaults[key],
+            # "shell" | "settings" | "env_file" | "default"
+            "source": source,
+            "locked": source == "shell",
+            # The role runs on MLX after the next start / in this process.
+            "local": saved_engines[role] == "local",
+            "running_local": settings.engine_provider(role) == "local",
+            # Configured in this process, and actually loaded (differs
+            # after a fallback; "" while nothing is loaded).
+            "running": str(getattr(settings, _MLX_RUNNING_ATTRS[role]) or ""),
+            "loaded": loaded if getattr(engine, "loaded", False) else "",
+            "load_error": error if isinstance(error, str) else "",
+        }
+    return out
+
+
 def _settings_view() -> dict[str, Any]:
     """What the Settings window shows. Never returns the full API key.
 
@@ -1257,6 +1389,11 @@ def _settings_view() -> dict[str, Any]:
         else:
             saved[field_name] = saved_file.get(env_key) or running[field_name]
     saved_engines = _effective_providers(saved)
+    mlx_models = _mlx_models_view(saved_file, saved_engines)
+    mlx_changed = any(
+        m["local"] and (m["value"] or m["default"]) != m["running"]
+        for m in mlx_models.values()
+    )
     return {
         "provider": saved["provider"].lower(),
         "running_provider": running["provider"].lower(),
@@ -1272,7 +1409,13 @@ def _settings_view() -> dict[str, Any]:
         "presets": _presets_view(saved_engines),
         # Read live by ai.privacy, so it is not part of restart_required.
         "cloud_personal_text": personal_text_allowed(),
-        "restart_required": saved != running,
+        # #136: per-role local MLX model and the memory note ("" = none).
+        "mlx_models": mlx_models,
+        "mlx_memory_note": mlx_memory_note(
+            [m["value"] or m["default"] for m in mlx_models.values() if m["local"]],
+            _physical_memory_gb(),
+        ),
+        "restart_required": saved != running or mlx_changed,
         "can_restart": _can_self_restart(),
         # Fields the UI can't change because they're exported in the shell.
         "locked_fields": [
@@ -1281,7 +1424,9 @@ def _settings_view() -> dict[str, Any]:
         ] + (
             ["cloud_personal_text"]
             if _PERSONAL_TEXT_KEY in user_settings.shell_exported else []
-        ),
+        ) + [
+            f"mlx_{role}_model" for role, m in mlx_models.items() if m["locked"]
+        ],
     }
 
 
@@ -1330,6 +1475,16 @@ async def put_settings(body: SettingsUpdate) -> dict[str, Any]:
             if value == GROQ_DEFAULT_MODELS[env_key]:
                 value = ""
             updates[env_key] = value
+    for role in _ENGINE_ROLES:
+        value = getattr(body, f"mlx_{role}_model")
+        key = _MLX_MODEL_KEYS[role]
+        if value is None or key in user_settings.shell_exported:
+            continue  # unchanged, or locked by a shell export (#136)
+        value = value.strip()
+        # Don't pin the default (as for Groq), unless it overrides .env.
+        if value == default_mlx_models()[key] and not _dotenv_file_values().get(key):
+            value = ""
+        updates[key] = value  # "" removes the key from settings.json
     if body.cloud_personal_text is not None:
         # Stored as "1"/"0" (never removed) so an explicit "off" beats a
         # ``=1`` left in .env. A shell export still wins (locked in the UI).
@@ -1619,6 +1774,13 @@ async def _handle_command(app: FastAPI, msg: Command) -> None:
             app.state.orchestrator.load_dynamic_tools()
         except Exception:
             logger.exception("Failed to reload dynamic tools")
+    elif action == "chat_cancel":
+        # #143: Stop on a chat turn. An unknown or finished id is a no-op;
+        # open cards are withdrawn, never approved.
+        try:
+            app.state.orchestrator.cancel_chat_turn(getattr(msg.payload, "message_id", None))
+        except Exception:
+            logger.exception("Failed to stop chat turn")
     elif action in ("demonstration_start", "demonstration_stop", "demonstration_cancel"):
         # #84 "Watch me": the user's own menu item / hotkey.
         demo = getattr(app.state, "demonstration", None)

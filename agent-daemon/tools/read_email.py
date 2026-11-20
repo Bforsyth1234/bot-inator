@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import email
 import email.policy
+import email.utils
 import os
 import re
+from datetime import timezone, tzinfo
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -134,7 +136,31 @@ def message_body(msg: email.message.EmailMessage) -> str:
     return ""
 
 
-def read_email_from(message_id: Any, root: Path) -> dict[str, Any]:
+def local_header_date(raw: Any, tz: Optional[tzinfo] = None) -> str:
+    """An RFC 2822 ``Date`` header as ISO 8601 in LOCAL time with its
+    offset (#144), e.g. ``Mon, 09 Nov 2026 10:00:00 -0800`` ->
+    ``2026-11-09T13:00:00-05:00`` in New York. The header carries the
+    sender's zone, so the model would otherwise compare times across zones.
+    A header without a zone (``-0000``) is UTC; one that does not parse is
+    returned unchanged. ``tz`` is for tests (None = system zone now)."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    try:
+        stamp = email.utils.parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return text
+    if stamp is None:
+        return text
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    try:
+        return stamp.astimezone(tz).isoformat()
+    except (ValueError, OverflowError, OSError):
+        return text
+
+
+def read_email_from(message_id: Any, root: Path, tz: Optional[tzinfo] = None) -> dict[str, Any]:
     try:
         mid = int(message_id)
     except (TypeError, ValueError):
@@ -155,7 +181,7 @@ def read_email_from(message_id: Any, root: Path) -> dict[str, Any]:
         "message_id": mid,
         "sender": str(msg.get("From", "") or ""),
         "subject": str(msg.get("Subject", "") or ""),
-        "date": str(msg.get("Date", "") or ""),
+        "date": local_header_date(msg.get("Date", ""), tz),
         "body": body[:MAX_BODY_CHARS] + ("…" if truncated else ""),
         "truncated": truncated,
         "partial": path.name.endswith(".partial.emlx"),
@@ -173,7 +199,8 @@ def read_email(message_id: int) -> dict[str, Any]:
 
     Returns:
         A dict with ``status`` ("ok" or "error"), and on success ``sender``,
-        ``subject``, ``date``, ``body`` (plain text, at most ~4,000
+        ``subject``, ``date`` (local time with offset, e.g.
+        ``2026-11-20T12:16:17-05:00``), ``body`` (plain text, at most ~4,000
         characters) and ``truncated``; on failure ``error``.
     """
     return read_email_from(message_id, mail_root())

@@ -13,6 +13,7 @@ Phase 1 design:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import json
 import re
@@ -54,6 +55,7 @@ from . import standing_rules
 from . import always_allow as always_allow_mod
 from . import card_batch
 from . import card_chat as card_chat_mod  # #130
+from . import chat_turns  # #143
 from . import knowledge_retrieval  # #134 part 2
 from .delivery import BYPASS_KEY as DELIVERY_BYPASS_KEY
 from . import needs_reply as reply_checks
@@ -375,6 +377,21 @@ def _sender_label(sender: str) -> str:
     return name or addr or sender or "the sender"
 
 
+def _local_now() -> datetime:
+    """The user's local time (#143 / #144: the chat prompt's "It is now"
+    line). Patched in tests."""
+    return datetime.now().astimezone()
+
+
+def _now_line(now: Optional[datetime] = None) -> str:
+    """``It is now Friday 2026-11-20T13:05-05:00 (the user's local time).``"""
+    now = now or _local_now()
+    if now.tzinfo is None:
+        now = now.astimezone()
+    return (f"It is now {now.strftime('%A')} {now.isoformat(timespec='minutes')} "
+            "(the user's local time).")
+
+
 def _now_iso() -> str:
     return (
         datetime.now(timezone.utc)
@@ -572,6 +589,11 @@ class Orchestrator:
         self.remote_channel: Optional[Any] = None
         self._turn_from_phone: bool = False
         self._agent: Any = None
+        # #143: running Chat turns by event id (Stop cancels them), the turn
+        # each open card belongs to, and Stops for turns not started yet.
+        self._chat_turns: dict[str, chat_turns.ChatTurn] = {}
+        self._card_turn: dict[str, str] = {}
+        self._early_stops = chat_turns.EarlyStops()
 
     def mark_tool_ready_for_rerun(self, tool_name: str) -> None:
         """Flag the current user turn for an auto-rerun with ``tool_name``.
@@ -732,11 +754,17 @@ class Orchestrator:
         """
         request_id = f"code_{uuid.uuid4().hex[:12]}"
         ev_id = event_id or getattr(self, "_current_event_id", "evt_meta")
+        if self._turn_stopping(ev_id):
+            # #143: the chat turn was stopped; no card, nothing installed.
+            return CodeApprovalResponsePayload(
+                request_id=request_id, approved=False, user_note=chat_turns.WITHDRAWN_NOTE,
+            )
         # Use asyncio.get_running_loop() for Python 3.10+ compatibility;
         # get_event_loop() is deprecated when called from coroutines.
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[CodeApprovalResponsePayload] = loop.create_future()
         self._pending_code[request_id] = fut
+        self._card_owners()[request_id] = str(ev_id)  # #143: withdrawn on Stop
         # #130: the card's chat. ``chat_rewrite``: the caller re-drafts when
         # the chat asks for a change (the card is then resolved NOT approved
         # and its code goes back through the code gate).
@@ -785,6 +813,7 @@ class Orchestrator:
                 request_id=request_id, approved=False
             )
         finally:
+            self._card_owners().pop(request_id, None)
             if chat is not None:
                 chat.close(request_id)  # #130: the thread is not kept
 
@@ -1302,7 +1331,9 @@ class Orchestrator:
 
         if event.event_type == "user_message":
             try:
-                await self._handle_user_message(event, event_id)
+                # #143: its own task, so Stop can cancel it. Still awaited
+                # here: turns stay one at a time (see ``_run_chat_turn``).
+                await self._run_chat_turn(event, event_id)
             finally:
                 self._turn_from_phone = False
                 from events import remote_channel as remote_mod
@@ -1375,6 +1406,198 @@ class Orchestrator:
         except Exception:
             logger.exception("standing rule notification failed")
 
+    # ---- #143: Stop a chat turn ------------------------------------------
+
+    def cancel_chat_turn(self, event_id: Any) -> bool:
+        """Stop the Chat turn ``event_id`` (the app's ``message_id``). Call on
+        the event loop. True when a running turn was stopped; an unknown,
+        finished or already-stopping id is a no-op (False). An id that is not
+        running yet (queued behind another event) ends as stopped when its
+        turn comes up.
+
+        Consent (7a): open cards of the turn are withdrawn (resolved NOT
+        approved), the gate refuses every further call, and a call already
+        approved and running is left to finish (the turn waits for it).
+        """
+        eid = str(event_id or "").strip()
+        if not eid:
+            return False
+        turn = self._turns().get(eid)
+        if turn is None:
+            self._early().add(eid)
+            return False
+        if not turn.request_stop():
+            return False
+        logger.info("chat turn %s: stop requested", eid)
+        self._withdraw_cards(eid)
+        worker = turn.worker
+        agent = getattr(self, "_agent", None)
+        if worker is not None and not worker.done() and agent is not None:
+            interrupt = getattr(agent, "interrupt", None)
+            if callable(interrupt):
+                try:
+                    interrupt()  # smolagents: no further step starts
+                except Exception:
+                    logger.debug("agent.interrupt failed", exc_info=True)
+        if turn.task is not None and not turn.task.done():
+            turn.task.cancel()
+        return True
+
+    # Kept in ``__dict__`` and created on first use: some tests build an
+    # Orchestrator without ``__init__``.
+    def _turns(self) -> dict[str, chat_turns.ChatTurn]:
+        return self.__dict__.setdefault("_chat_turns", {})
+
+    def _card_owners(self) -> dict[str, str]:
+        return self.__dict__.setdefault("_card_turn", {})
+
+    def _early(self) -> chat_turns.EarlyStops:
+        early = self.__dict__.get("_early_stops")
+        if early is None:
+            early = self.__dict__["_early_stops"] = chat_turns.EarlyStops()
+        return early
+
+    def _turn_stopping(self, event_id: Any) -> bool:
+        turn = self._turns().get(str(event_id or ""))
+        return turn is not None and turn.stop_requested()
+
+    def _withdraw_cards(self, event_id: str) -> int:
+        """#143: resolve every open card of turn ``event_id`` as withdrawn
+        (NOT approved). Approval cards get :class:`chat_turns.CardWithdrawn`
+        (``_request_approval`` records and closes them); code cards are
+        answered not-approved here and closed with ``approval_resolved``."""
+        turn = self._turns().get(event_id)
+        count = 0
+        for request_id, owner in list(self._card_owners().items()):
+            if owner != event_id:
+                continue
+            fut = self._pending.get(request_id)
+            if fut is not None and not fut.done():
+                fut.set_exception(chat_turns.CardWithdrawn(request_id))
+                count += 1
+                continue
+            code_fut = self._pending_code.pop(request_id, None)
+            if code_fut is not None and not code_fut.done():
+                code_fut.set_result(CodeApprovalResponsePayload(
+                    request_id=request_id, approved=False,
+                    user_note=chat_turns.WITHDRAWN_NOTE,
+                ))
+                if turn is not None:
+                    turn.note_withdrawn("code review")
+                self._schedule(self._send_approval_resolved(
+                    request_id, chat_turns.WITHDRAWN, chat_turns.WITHDRAWN_NOTE,
+                ))
+                count += 1
+        return count
+
+    async def _run_chat_turn(self, event: ContextEvent, event_id: str) -> None:
+        """#143: run one Chat turn as a cancellable task and wait for it.
+
+        Turns stay serialised (the agent object, its memory and the per-turn
+        fields such as ``_turn_kind`` and the taint shield are shared), so
+        the event loop awaits the task as it awaited the turn before; only
+        Stop (:meth:`cancel_chat_turn`) cancels it.
+        """
+        if self._early().take(event_id):
+            turn = chat_turns.ChatTurn(event_id)
+            turn.request_stop()
+            await self._end_stopped_turn(event, event_id, turn)
+            return
+        turn = chat_turns.ChatTurn(event_id)
+        self._turns()[event_id] = turn
+        task = asyncio.create_task(
+            self._chat_turn_body(event, event_id, turn), name=f"chat-{event_id}",
+        )
+        turn.task = task
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError:
+            # The daemon is stopping: stop the turn too (cards withdrawn).
+            self.cancel_chat_turn(event_id)
+            raise
+        finally:
+            self._turns().pop(event_id, None)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("chat turn %s failed", event_id, exc_info=task.exception())
+
+    async def _chat_turn_body(
+        self, event: ContextEvent, event_id: str, turn: chat_turns.ChatTurn,
+    ) -> None:
+        chat_turns.bind(turn)  # this task's context only (and its threads)
+        try:
+            await self._handle_user_message(event, event_id)
+        except asyncio.CancelledError:
+            if not turn.stop_requested():
+                raise
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()  # handled here: the clean-up below may await
+            await self._end_stopped_turn(event, event_id, turn)
+
+    async def _end_stopped_turn(
+        self, event: ContextEvent, event_id: str, turn: chat_turns.ChatTurn,
+    ) -> None:
+        """#143: finish a stopped turn: wait for its worker (an approved call
+        that was running finishes; nothing new starts), then a ``complete``
+        "Stopped." thought, the phone's answer, and the stopped row in
+        ``chat_log``. The turn's index entry keeps the question only."""
+        worker = turn.worker
+        while worker is not None and not worker.done():
+            self._withdraw_cards(event_id)
+            await asyncio.wait({worker}, timeout=0.5)
+        if worker is not None and not worker.cancelled():
+            exc = worker.exception()  # retrieved: the result is dropped
+            if exc is not None and not isinstance(exc, chat_turns.TurnStopped):
+                logger.info("chat turn %s: worker ended after stop: %r", event_id, exc)
+        self._withdraw_cards(event_id)
+        text = (event.metadata.get("text") or "").strip()
+        reply = chat_turns.stopped_text(turn)
+        logger.info("chat turn %s stopped: %s", event_id, reply)
+        await self._emit_thought(event_id, "complete", reply[:500])
+        from events import remote_channel as remote_mod
+
+        remote = getattr(self, "remote_channel", None)
+        from_phone = (event.metadata or {}).get("source") == remote_mod.REMOTE_SOURCE
+        if from_phone and remote is not None:
+            try:
+                await asyncio.to_thread(remote.send_reply, event_id, reply)
+            except Exception:
+                logger.exception("remote channel: stopped reply not sent")
+        if self.memory is not None and text and not turn.user_logged:
+            # Stopped before the turn logged the question (queued turn).
+            try:
+                await asyncio.to_thread(self.memory.log_chat, event_id, "user", text)
+            except Exception:
+                logger.exception("memory.log_chat (user) failed")
+        if turn.user_log is not None:
+            await asyncio.wait({turn.user_log})
+            if not turn.user_log.cancelled() and turn.user_log.exception() is not None:
+                logger.error("memory.log_chat (user) failed", exc_info=turn.user_log.exception())
+        # #134: "Stopped." is not a reply: the index keeps the question only,
+        # now and in later passes (before the row is logged, as below).
+        await knowledge_retrieval.index_turn(self, event_id, text, "", used_retrieval=True)
+        if self.memory is not None:
+            try:
+                await asyncio.to_thread(self.memory.log_chat, event_id, "assistant", reply)
+            except Exception:
+                logger.exception("memory.log_chat (stopped) failed")
+
+    async def _in_worker(self, fn: Callable[[], Any]) -> Any:
+        """Run the agent ``fn`` in a worker thread. In a Chat turn the thread
+        is kept on the turn (#143): a Stop stops waiting at once, and the
+        turn then waits for the thread to exit before anything else runs."""
+        turn = chat_turns.current()
+        if turn is None:
+            return await asyncio.to_thread(fn)
+        loop = asyncio.get_running_loop()
+        ctx = contextvars.copy_context()
+        fut = loop.run_in_executor(None, ctx.run, fn)
+        turn.worker = fut
+        # Not ``shield``: a Stop cancels this wait only; the thread's future
+        # is left alone and ``_end_stopped_turn`` waits for it.
+        await asyncio.wait({fut})
+        return fut.result()
+
     async def _handle_user_message(
         self, event: ContextEvent, event_id: str
     ) -> None:
@@ -1397,10 +1620,21 @@ class Orchestrator:
             # the reply (``RemoteChannel.send_reply``).
             remote_mod.begin_phone_turn(event_id)
         if self.memory is not None and text:
+            turn = chat_turns.current()
             try:
-                await asyncio.to_thread(
-                    self.memory.log_chat, event_id, "user", text
-                )
+                if turn is None:
+                    await asyncio.to_thread(self.memory.log_chat, event_id, "user", text)
+                else:
+                    # #143: the insert finishes even on a Stop; the stopped
+                    # row waits for it so the two rows stay in order.
+                    turn.user_logged = True
+                    turn.user_log = asyncio.get_running_loop().run_in_executor(
+                        None, self.memory.log_chat, event_id, "user", text,
+                    )
+                    await asyncio.wait({turn.user_log})
+                    turn.user_log.result()
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("memory.log_chat (user) failed")
 
@@ -1482,6 +1716,11 @@ class Orchestrator:
             reply = str(result) if result is not None else reply
 
         reply = unwrap_answer_blob(reply)  # #110: never a tool-call blob
+        turn = chat_turns.current()
+        if turn is not None and not turn.mark_answered():
+            # #143: stopped as the answer came back: the Stop wins, and the
+            # cancellation lands on the next await.
+            raise asyncio.CancelledError()
         await self._emit_thought(event_id, "complete", reply[:500])
         remote = getattr(self, "remote_channel", None)
         if self._turn_from_phone and remote is not None:
@@ -1766,10 +2005,11 @@ class Orchestrator:
         if self._agent is None:
             return await self._fallback_run(event_id, prompt)
         self._current_event_id = event_id
+        agent = self._agent
         if max_steps is None:
-            return await asyncio.to_thread(self._agent.run, prompt)
-        return await asyncio.to_thread(
-            lambda: self._agent.run(prompt, max_steps=max_steps)
+            return await self._in_worker(lambda: agent.run(prompt))
+        return await self._in_worker(
+            lambda: agent.run(prompt, max_steps=max_steps)
         )
 
     async def _fallback_run(self, event_id: str, prompt: str) -> str:
@@ -1835,6 +2075,10 @@ class Orchestrator:
         param_names = list(getattr(tool, "inputs", None) or {})
 
         def gated_forward(*args: Any, **kwargs: Any) -> Any:
+            if chat_turns.stop_requested():
+                # #143: the user stopped this chat turn. Nothing more runs,
+                # read-only or not, and no card is raised.
+                return dict(chat_turns.REFUSAL)
             loop = orchestrator.event_bus.loop or asyncio.get_event_loop()
             event_id = getattr(orchestrator, "_current_event_id", "evt_unknown")
             # #81: in a turn that read outside text, a read-only tool that
@@ -2065,6 +2309,9 @@ class Orchestrator:
                 ).result(timeout=wait_s)
                 if not approved:
                     return {"skipped": True, "reason": "user_denied"}
+                if chat_turns.stop_requested():
+                    # #143: Stop came before the tool started: it never runs.
+                    return dict(chat_turns.REFUSAL)
                 call_args, call_kwargs = orchestrator._apply_edits(
                     edited, call_args, call_kwargs
                 )
@@ -2101,6 +2348,14 @@ class Orchestrator:
                         _t, n, a, allowed=_al
                     )
                 )
+            if chat_turns.stop_requested():
+                return dict(chat_turns.REFUSAL)  # #143: last check before it runs
+            turn = chat_turns.current()
+            if turn is not None and not bypass:
+                # #143: from here the call is not interrupted; a Stop waits
+                # for it and the stopped reply says it completed.
+                turn.tool_started(tool_name)
+            result = None
             try:
                 with ledger_run, mcp_run:
                     result = (
@@ -2109,6 +2364,9 @@ class Orchestrator:
                         else None
                     )
             except Exception as exc:
+                if turn is not None and not bypass:
+                    turn.tool_finished(tool_name, ok=False)
+                    turn = None
                 if is_dynamic:
                     # #90: a generated tool that raised counts toward repair.
                     tool_health.record_call(
@@ -2168,6 +2426,8 @@ class Orchestrator:
             done_store = getattr(orchestrator, "_turn_done", None)
             if done_key and done_store is not None:
                 done_store[done_key] = result
+            if turn is not None and not bypass:
+                turn.tool_finished(tool_name, ok=chat_turns.tool_ok(result))
             if tool_name == "read_email":
                 # The result goes back into the main engine's prompt (#31).
                 result = privacy.redact_email_result(result, "main")
@@ -2449,10 +2709,37 @@ class Orchestrator:
         in place of the original arguments proposed by the agent.
         """
         request_id = f"req_{uuid.uuid4().hex[:12]}"
+        if self._turn_stopping(event_id):
+            # #143: the chat turn was stopped: no card, nothing runs.
+            return False, None
         # Use asyncio.get_running_loop() for Python 3.10+ compatibility
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[ApprovalResponsePayload] = loop.create_future()
         self._pending[request_id] = fut
+        self._card_owners()[request_id] = str(event_id)  # #143: withdrawn on Stop
+        try:
+            return await self._await_approval(
+                request_id, fut, event_id, tool_name, tool_args, reasoning,
+                summary=summary, actions=actions, origin_notes=origin_notes,
+            )
+        finally:
+            self._card_owners().pop(request_id, None)
+            self._pending.pop(request_id, None)  # resolved one way or another
+
+    async def _await_approval(
+        self,
+        request_id: str,
+        fut: "asyncio.Future[ApprovalResponsePayload]",
+        event_id: str,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        reasoning: str,
+        summary: Optional[str] = None,
+        actions: Optional[list[dict[str, Any]]] = None,
+        origin_notes: Optional[list[str]] = None,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """The body of :meth:`_request_approval` once the card's future is
+        registered (#143 split it so the card's owner turn is always forgotten)."""
         # #85: while the Mac is idle (or the turn came from the phone) an
         # eligible card is also sent to the own Messages thread with a code;
         # "yes <code>" resolves this same future. Never code review,
@@ -2460,7 +2747,7 @@ class Orchestrator:
         # (``RemoteChannel.eligible``). A mirrored card waits longer.
         remote = getattr(self, "remote_channel", None)
         timeout = float(self.approval_timeout)
-        if remote is not None:
+        if remote is not None and not fut.done():
             try:
                 code = await asyncio.to_thread(
                     remote.mirror_approval, request_id, tool_name, tool_args,
@@ -2538,7 +2825,8 @@ class Orchestrator:
                 delivery.note_ambient_card()
             except Exception:
                 logger.exception("delivery.note_ambient_card failed")
-        await self._send(msg)
+        if not fut.done():  # #143: a card withdrawn meanwhile is not shown
+            await self._send(msg)
 
         chat_plan: Optional[dict[str, str]] = None
         try:
@@ -2547,6 +2835,28 @@ class Orchestrator:
                 # #130: Approve builds the plan the chat changed (shown on the
                 # card) and hands the thread to the build once.
                 chat_plan = chat.finish_idea(request_id, approved=bool(resp.approved))
+        except (chat_turns.CardWithdrawn, asyncio.CancelledError) as exc:
+            # #143: the chat turn was stopped (or the daemon is stopping).
+            # Not the user's decision: no decision-log row, no preference
+            # learning, no idea feedback; recorded as "withdrawn".
+            self._pending.pop(request_id, None)
+            logger.info("Approval %s withdrawn", request_id)
+            turn = self._turns().get(str(event_id))
+            if turn is not None:
+                turn.note_withdrawn(tool_name)
+            self._record_offer_verdict(offer_id, chat_turns.WITHDRAWN)
+            self._record_training_row(
+                chat_turns.WITHDRAWN, tool_name, tool_args, None, offer_id=offer_id,
+                request_id=request_id, event_id=event_id, trigger=trigger,
+                reasoning=reasoning, summary=summary, actions=actions,
+                origin_notes=origin_notes,
+            )
+            await self._send_approval_resolved(
+                request_id, chat_turns.WITHDRAWN, chat_turns.WITHDRAWN_NOTE,
+            )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return False, None
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
             logger.info("Approval %s timed out", request_id)
@@ -3098,7 +3408,9 @@ class Orchestrator:
         return (
             "You are an on-device macOS assistant in a direct chat with "
             "the user. They just sent this message:\n\n"
-            f"\"{text}\"\n\n"
+            f"\"{text}\"\n"
+            # #143 / #144: so "since 12 pm" or "this morning" can be resolved.
+            f"{_now_line()}\n\n"
             "Decide how to respond, in this order:\n"
             "1. Look at your available tools first. If one of them can "
             "accomplish the request, call it — do not generate a "
@@ -3545,6 +3857,7 @@ def _make_groq_model_class(base: type) -> type:
             # Groq validates tool calls server-side and fails the whole turn
             # with a 400 when the model emits bad JSON or a wrong tool name.
             # The model is stochastic, so one retry usually succeeds.
+            chat_turns.raise_if_stopped()  # #143: no model call after a Stop
             for attempt in range(2):
                 try:
                     message = super().generate(
@@ -3560,6 +3873,9 @@ def _make_groq_model_class(base: type) -> type:
                         logger.info("Groq rejected a tool call (%s); retrying once", exc)
                         continue
                     raise
+            # #143: the HTTP call can't be interrupted; a reply that comes
+            # back after a Stop is dropped (it can't call a tool).
+            chat_turns.raise_if_stopped()
             schemas = {
                 getattr(t, "name", None): getattr(t, "inputs", None)
                 for t in tools_to_call_from or []
@@ -3621,6 +3937,7 @@ def _make_groq_model_class(base: type) -> type:
                         name="final_answer", arguments={"answer": content},
                     ),
                 )]
+            chat_turns.raise_if_stopped()  # #143: after the re-asks too
             return message
 
     return _GroqServerModel
@@ -3803,6 +4120,7 @@ def _make_mlx_model_class() -> type:
                             text = text[:idx]
                     return text
 
+            chat_turns.raise_if_stopped()  # #143: no generation after a Stop
             self._ensure_loaded()
 
             import mlx_lm as _mlx_lm  # type: ignore
@@ -3854,6 +4172,8 @@ def _make_mlx_model_class() -> type:
                     prompt=prompt_ids,
                     **completion_kwargs,
                 ):
+                    if chat_turns.stop_requested():
+                        break  # #143: Stop ends the generation between tokens
                     output_tokens += 1
                     text += response.text
                     if stops and any(
@@ -3862,6 +4182,9 @@ def _make_mlx_model_class() -> type:
                         text = text[:stop_index]
                         break
                 self.engine._maybe_clear_metal_cache_locked()
+            # #143: a generation cut by Stop (or one that finished after it)
+            # is dropped: nothing it says can call a tool.
+            chat_turns.raise_if_stopped()
 
             if stop_sequences is not None and not getattr(self, "supports_stop_parameter", False):
                 text = remove_content_after_stop_sequences(text, stop_sequences)

@@ -133,5 +133,14 @@
   "memories": ["User preference: move every new PDF in Downloads into /Users/me/Documents/Invoices"],
   "expect": [{"tool": "move_file",
               "args": {"src": {"equals": "/Users/me/Downloads/invoice_1001.pdf"},
-                       "dst_dir": {"contains": "/Users/me/Documents/Invoices"}}}]}
+                       "dst_dir": {"contains": "/Users/me/Documents/Invoices"}}}]},
+
+ {"id": "chat_count_emails_since_noon", "kind": "chat",
+  "text": "How many emails have I received since 12 pm?",
+  "tool_results": {"list_recent_emails": {"status": "ok", "count": 5, "listed": 5, "truncated": false,
+                                          "since": "2026-11-20T12:00:00-05:00", "until": "",
+                                          "emails": [{"message_id": 4401, "sender": "Costco <news@example.com>",
+                                                      "subject": "Weekly deals", "date": "2026-11-20T12:21:00-05:00",
+                                                      "mailbox": "INBOX"}]}},
+  "expect": [{"tool": "list_recent_emails", "args": {"since": {"contains": "12:00"}}}]}
 ]

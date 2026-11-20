@@ -124,6 +124,8 @@ API auth → sandbox for installed tools → live checks.
 | 30 | A: #130 (alone: approval path of both gates, goes last) | new `ai/card_chat.py`, new `routes/card_chat.py`, new `Views/CardChatView.swift`, `ApprovalAlert.swift`, `CodeReviewAlert.swift`, `ai/orchestrator.py` (idea/code gate only), `tools/meta_tool_generator.py` (chat context only), `schemas/ws_messages.py` + `WSMessage.swift` if needed, `main.py` (router), `ApprovalPresenter.swift`, LIVING_SPEC, new tests | [x] closed 2026-11-20 (#130 `[~] live`; 2523 tests, swiftc clean) |
 | 31 | A: #137 · B: #138 · C: #139 · D: #140 · E: #141 (readers only; user 2026-11-20: "Build them") | each slot owns one new reader module and its test: A `ai/knowledge_sources/imessage.py` · B `ai/knowledge_sources/calendar.py` · C `ai/knowledge_sources/notes.py` · D `ai/knowledge_sources/browser.py` · E `ai/knowledge_sources/ai_exports.py` (+ `tests/test_knowledge_source_<name>.py`, fixtures under `tests/fixtures/knowledge/<name>/`). Nobody edits `ai/knowledge_index.py`, routes, Swift or `ai/taint.py` | [x] closed 2026-11-20 (readers built: 167 tests) |
 | 32 | A: #137–#141 wiring (alone: shared files) | new `ai/knowledge_sources/__init__.py`, `ai/knowledge_index.py` (`SOURCES`, per-source options, readers), `routes/knowledge.py`, `Views/KnowledgeIndexSettingsView.swift`, `ai/taint.py`, `ai/egress_log.py` (if #140 needs a kind), `ai/knowledge_retrieval.py` (labels), `evals/cases/safety.json`, `tests/test_knowledge_index.py`, LIVING_SPEC §3/§4, new tests. Runner at close: batch embedding in `ai/knowledge_index.py` + `ai/memory.py` | [x] closed 2026-11-20 (#137–#141 `[~] live`; 2727 tests at wave close, swiftc clean) |
+| 33 | A: #144 · B: #142 · C: #135 · D: #136 (all but the embed) (user 2026-11-20: "Start building the 5 items with subagents that are not yet built") | A `tools/list_recent_emails.py`, `events/mail_watcher.py`, `tools/read_email.py`, `evals/cases/` (one case), own tests · B `Views/ChatView.swift`, `Services/WebSocketManager.swift`, the main window container (daemon only if the cause is there: report, don't edit `ai/orchestrator.py`) · C `Views/SettingsView.swift`, new `Views/SettingsSearch.swift` · D new `Views/LocalModelsSection.swift`, `main.py` (`_settings_view()` only), own test. Runner at close: embed D's section in C's table (done: 7 edits in `SettingsView.swift`, 2 in `SettingsSearch.swift`) | [x] closed 2026-11-20 (#135 #136 #142 #144 `[~] live`) |
+| 34 | A: #143 (alone: overlaps #142's Swift files and owns the chat turn) | `Views/ChatView.swift`, `Views/QuickAskPanel.swift`, `Services/WebSocketManager.swift`, `Models/WSMessage.swift`, `ai/orchestrator.py` (chat turn task + cancel), `main.py` (`chat_cancel` command), new `ai/chat_turns.py`, `ai/idea_outcomes.py` + `ai/training_corpus.py` (`withdrawn` verdict), `tools/meta_tool_generator.py` (one prompt line), LIVING_SPEC, new tests; plus #144's chat-prompt time line | [x] closed 2026-11-20 (#143 `[~] live`; 2789 tests, swiftc clean) |
 | — | #96 | needs the user's signing run; not schedulable | open |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
@@ -160,7 +162,7 @@ pass-rate measurement is a live check · #38 a second
 
 ## Live checks
 
-Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #137–#141; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
+Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #135, #136, #137–#141, #142, #143, #144; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
 
 ## Completed items (archived to DONE.md)
 
@@ -442,7 +444,33 @@ Shared DECISIONS for #43–#47 (user + assistant, 2026-11-09):
    (DONE.md #11: the wrong `show_notification` argument broke every
    notifying tool).
 
-#144 — BUG: "How many emails since 12 pm" is wrong (49 instead of 5): email times are in UTC and there is no time filter [ ]
+#144 — BUG: "How many emails since 12 pm" is wrong (49 instead of 5): email times are in UTC and there is no time filter [~] live
+Results (wave 33 slot A + wave 34, 2026-11-20):
+⚬ `events/mail_watcher.py` `_iso_date(value, tz=None)` now returns LOCAL time with offset (changed in place: no caller compares the strings as text; knowledge index, daily brief and lookahead parse to aware datetimes). Side fix: mail between 7 PM and midnight was dated tomorrow in meeting prep and in the watches dedupe key.
+⚬ `tools/read_email.py`: `local_header_date()`; the `Date` shown is local ISO.
+⚬ `tools/list_recent_emails.py`: `since` / `until` (ISO date-time, `YYYY-MM-DD`, or `HH:MM` = today; no offset = local), filtered in SQL. With a range: `count` = all matches (scan up to 50,000), `listed`, `truncated`, the resolved bounds, a `note` when truncated. A bad value returns a clear error. Still read-only.
+⚬ Wave 34: `_build_chat_prompt` now carries "It is now <weekday> <local ISO with offset>" (the prompt had no date or time); the drafting prompt names `since, until`.
+⚬ Eval: `chat_count_emails_since_noon` in `evals/cases/tool_calls.json`.
+⚬ Tests: `tests/test_list_recent_emails_since.py` (24); 391 passed over the 19 caller files, also under TZ=Asia/Tokyo, Pacific/Honolulu and UTC. Rule 5: 13 breaks, each fails a test.
+⚬ Live (user): "how many emails have I received since 12 pm" matches Mail; "what was my last email" shows a local time.
+⚬ UNVERIFIED: whether a real model picks `since`.
+Deviations: `tests/test_mail_watcher.py:100` asserted a UTC day prefix; it now checks the instant (it failed under TZ=Asia/Tokyo).
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user (screenshot)
+Ask: "why is the llm wrong about this" — asked "how many emails have i recieved since 12 pm", got "49 emails since 12 pm today"; Mail showed 5 (12:21 Costco, 12:16 Fandango, 12:04 CSA Events, 12:04 Connecticut Science Center, 12:03 EcoFlow).
+Cause (proven 2026-11-20 by running `list_recent_emails_from(mail_root(), 50)`):
+1. UTC times. `list_recent_emails` dates come from `events/mail_watcher.py` `_iso_date` (`tz=timezone.utc`), e.g. Fandango 12:16 PM local came back as `2026-11-20T17:16:17+00:00`. The model compared these against "12:00" without converting, so everything after 7 AM local (12:00 UTC) counted. `read_email` and anything else using `_iso_date` likely has the same problem.
+2. No time filter, 50 cap. The tool only takes `count` (`MAX_COUNT = 50`). The model asked for 50, got 50 (oldest `2026-11-20T12:00:47+00:00`) and counted 49 as "after 12:00". On a busy day the true count can exceed 50, so the tool cannot answer "how many since X" even with correct times.
+Fix (expected):
+1. Dates the model sees are local time with the offset (`2026-11-20T12:16:17-05:00`). Decide whether to change `_iso_date` itself (check the watcher's other users and tests) or add a local variant used by the tools.
+2. `list_recent_emails` gets `since` (and maybe `until`): ISO date-time or "YYYY-MM-DD", local time, filtered in SQL on `date_received`. With a time range the result reports the full `count` matching (not capped at 50) and lists at most `MAX_COUNT`, saying when the list is truncated. Docstring tells the model to use `since` for "how many since …" questions.
+3. Optional: put the current local time with offset in the chat system prompt if not already there, so "12 pm today" resolves correctly.
+Files (expected): tools/list_recent_emails.py, events/mail_watcher.py (`_iso_date` or a new helper), maybe tools/read_email.py, tests/test_list_recent_emails*.py. No registration change (still read-only).
+Verify:
+⚬ New test: an Envelope Index fixture with mail at 11:55 and 12:16 local → `date` strings carry the local offset; non-vacuous: revert to UTC, test fails.
+⚬ New test: `since="<today>T12:00"` returns only the 12:16 mail and `count == 1`; with 60 matching mails `count == 60` and the list is capped and marked truncated.
+⚬ Eval case (evals/cases): "how many emails since 12 pm" uses `since`.
+⚬ Live: ask "how many emails have I received since 12 pm" → matches Mail.
+⚬ pytest gate (rule 8).
 Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user (screenshot)
 Ask: "why is the llm wrong about this" — asked "how many emails have i recieved since 12 pm", got "49 emails since 12 pm today"; Mail showed 5 (12:21 Costco, 12:16 Fandango, 12:04 CSA Events, 12:04 Connecticut Science Center, 12:03 EcoFlow).
 Cause (proven 2026-11-20 by running `list_recent_emails_from(mail_root(), 50)`):
@@ -573,7 +601,32 @@ Results (wave 28 slot B, 2026-11-20):
 ⚬ UNVERIFIED: SwiftUI rendering and scroll in the real app.
 Deviations: `WebSocketManager.swift` not changed (not needed).
 
-#142 — BUG: Chat answer never appears if you leave the Chat window while it is thinking [ ]
+#142 — BUG: Chat answer never appears if you leave the Chat window while it is thinking [~] live
+Results (wave 33 slot B, 2026-11-20):
+⚬ CAUSE (from the code; the user's own run not inspected): the daemon is cleared, a turn finishes with no window or WS client (`tests/test_chat_turn_without_client.py`, 3 tests pass on the old daemon code; 6 sabotage combinations fail them). The bug was in the app: `MainWindowView` builds only the selected section, `ChatView` kept its turns in a `@StateObject`, so leaving Chat destroyed them; on return the unfinished turn came back with `isPending: false`; `/api/chats` was read once per page build, so a reply missed during a socket drop was never recovered.
+⚬ New `Services/ChatTranscript.swift` (Foundation only): turns keyed by message id with an explicit `isPending`; thoughts keyed by their index in `ws.messages`; history merge; a held-thoughts buffer for turns not yet known.
+⚬ `Views/ChatView.swift` + `MenuBarUIApp.swift` (5 lines): `ChatViewModel` lives for the app's lifetime and reads `ws.$messages` with a cursor; `/api/chats` is re-read on appear, on reconnect, 1 s and 4 s after a `complete`, and every 15 s while a turn is pending.
+⚬ RULES: a history turn with a user row and no assistant row is pending for 10 minutes, then shows "No reply was recorded for this message."; the full `chat_log` reply replaces the 500-character thought (long answers were cut); the draft survives leaving the page.
+⚬ Harness (scratch, not committed): "send, leave, return before completion" shows nothing with the old logic and a spinner then the answer with the new one; 7 scenarios.
+⚬ Live (user): ask, switch section before the reply, come back → spinner, then the answer; stay away until done → answer is there; a long answer shows in full.
+⚬ UNVERIFIED: nothing ran in the real app. One early scratch run of the agent's sabotage script ran without the test isolation and may have opened files in `~/.bot-inator` (it believes nothing was written; not confirmed).
+Deviations: `Services/ChatTranscript.swift` is a new file not in the slot's list (needed so the logic compiles without SwiftUI).
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user (screenshot)
+Ask: "the chat stops working when i go away from the chat window while waiting for an answer. the answer never appears."
+Evidence (2026-11-20): user asked "how many emails have i gotten today", switched away while it was working, came back: Reasoning (4) showed event_received, two memory rows and the reasoning prompt, but no answer was ever shown.
+Code facts (not yet proven as the cause):
+⚬ `Views/ChatView.swift` holds the turns in a `@StateObject ChatViewModel`. Leaving the Chat section (`showMainWindow(section:)`) likely tears the view down; coming back builds a new model, runs `loadHistory()` (`GET /api/chats`) and replays `ws.messages`.
+⚬ The daemon writes the user row to `chat_log` at the start of the turn and the assistant row only at the end (`ai/orchestrator.py:1402`, `:1509`). On return the turn comes back from history with `isPending: false`, so no spinner, and nothing re-fetches history when the reply is logged.
+⚬ `appendThought` only fills the answer from a `thought` with `stage == .complete` for an event id already in `byId`. If the final reply arrives as a different frame, or while no ChatView is alive and later drops out of `ws.messages`, it is lost to the UI.
+⚬ Also check: whether the daemon turn itself stalls (no `complete` thought, no assistant row in `chat_log`) when the window loses focus, e.g. the turn is tied to the WS client or a busy/typing gate (#131's `TYPING_IDLE_S`).
+Confirm first: reproduce, then check (a) `chat_log` for the assistant row, (b) the daemon log for the turn finishing, (c) `ws.messages` for a `complete` thought with that event id. (a)+(b) present → UI bug; absent → daemon bug.
+Fix (expected): the chat state outlives the view (move `ChatViewModel` up to the app/`WebSocketManager` level, or keep the view alive), a turn restored from history with a user row and no assistant row shows as pending, and the reply is picked up on return (re-ingest or re-fetch `/api/chats` on appear and on `complete`).
+Files (expected): Swift: Views/ChatView.swift, maybe Services/WebSocketManager.swift and the main window container; daemon only if (b) fails.
+Verify:
+⚬ Live: send a chat message, switch to another section or app before the reply, come back → the answer is there (or the turn shows as pending and fills in when done).
+⚬ Live: same, but stay away until the turn finishes, then come back → answer shown.
+⚬ If daemon code changes: test that a chat turn completes and logs the assistant row with no WS client connected; non-vacuous per rule 5.
+⚬ pytest gate + Swift typecheck (rule 8).
 Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user (screenshot)
 Ask: "the chat stops working when i go away from the chat window while waiting for an answer. the answer never appears."
 Evidence (2026-11-20): user asked "how many emails have i gotten today", switched away while it was working, came back: Reasoning (4) showed event_received, two memory rows and the reasoning prompt, but no answer was ever shown.
@@ -591,7 +644,35 @@ Verify:
 ⚬ If daemon code changes: test that a chat turn completes and logs the assistant row with no WS client connected; non-vacuous per rule 5.
 ⚬ pytest gate + Swift typecheck (rule 8).
 
-#143 — Chat: a Stop button to cancel a request that is still running [ ]
+#143 — Chat: a Stop button to cancel a request that is still running [~] live
+Results (wave 34, 2026-11-20):
+⚬ DESIGN: turns stay ONE AT A TIME. Each chat turn is its own task (new `ai/chat_turns.py`, registered by event id) but the loop still awaits it, so a slow chat turn STILL holds up other events; it can now be stopped. Reason: every turn shares one agent object and the per-turn fields (`_taint`, `_turn_kind`, …). After a Stop the turn does not end until its worker thread has exited.
+⚬ `chat_cancel` command (`main.py`, `schemas/ws_messages.py`) with the message id; unknown or finished id does nothing; a Stop for a queued id is remembered (32 ids, 15 minutes).
+⚬ STOPPING TOOL CALLS: the turn handle rides a ContextVar into the agent's threads. `gated_forward` refuses every call once stopped (on entry, after an approval returns, and just before the tool runs); no card is raised for a stopped turn; `agent.interrupt()`; the MLX adapter breaks between tokens and drops the result; the provider adapter drops a late result. A tool already running is never interrupted.
+⚬ ON STOP: a `complete` thought and a `chat_log` assistant row starting "Stopped." plus what happened; the phone turn ends as before; the knowledge index gets the question only (the id is kept out so "Stopped." is never indexed as a reply).
+⚬ WITHDRAWN CARD (7a): the turn's open card is resolved as not approved, `approval_resolved` outcome `withdrawn`, the phone code is forgotten. Decision log: nothing (it was not the user's decision). Idea outcomes and training corpus: new verdict `withdrawn` (shown, not decided; excluded from training). Undo journal: nothing unless an approved call finished.
+⚬ Swift: Stop replaces Send while a turn is pending, Esc too, in `ChatView` and `QuickAskPanel`; `sendChatCancel`; `ChatTurn.stopped`. A real answer that beat the Stop wins.
+⚬ LIVING_SPEC §1 "Stop (#143)" paragraph and §3.1.
+⚬ Tests: `tests/test_chat_stop.py` (17). Rule 5: 16 breaks; 15 fail tests alone, the 16th is one of two redundant pre-run checks (removing both fails). Swift harness: 18 checks.
+⚬ Live (user): ask something slow, press Stop / Esc → "Stopped.", next question works; Stop with a card open → card closes; approve a slow tool then Stop → it completes and the reply says so.
+⚬ UNVERIFIED: no real MLX or cloud model run; no click-through. `tests/test_chat_context.py` builds the prompt twice without a pinned clock (could differ across a minute boundary).
+Deviations: the item wanted a slow turn to stop holding up other events; not done (see DESIGN). A card left open at daemon shutdown is now recorded as `withdrawn`.
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "add a cancel / stop button to a chat request."
+Today: no way to stop a chat turn. The WS `user_message` is pushed onto the event bus (`main.py` ~1911) and the orchestrator runs it inline, `await self._handle_user_message(...)` (`ai/orchestrator.py:1303`), so a slow turn also holds up every other event until it ends. `WebSocketManager.sendUserMessage` returns the `message_id` (= event id), which is the handle to cancel by. Existing pattern: `main.py` `_handle_command` (e.g. `demonstration_cancel`).
+Design:
+1. Swift: while a turn is pending, the send button in `ChatView` becomes Stop (and Esc stops it); same in `QuickAskPanel`. Stop sends a `chat_cancel` command with the `message_id`.
+2. Daemon: run each chat turn as its own `asyncio.Task` keyed by event id, so it can be cancelled; `chat_cancel` cancels that task. Unknown or finished id is a no-op.
+3. On cancel: emit a `complete` thought ("Stopped.") so the UI clears the spinner, log the assistant row as stopped in `chat_log` (so history and #142's reload agree), and end the phone turn the same as the `finally` block does today.
+4. Consent (7a): cancelling must never leave a half-done side effect. Any approval card the turn opened is withdrawn (its future cancelled, card removed); a tool call already approved and running is allowed to finish, and the turn stops after it. Say which in the stopped message.
+5. A model call that is mid-generation: cancel the await; if the local MLX / provider call can't be interrupted, drop its result when it returns.
+Files (expected): Swift: Views/ChatView.swift, Views/QuickAskPanel.swift, Services/WebSocketManager.swift (`sendChatCancel`), Models/WSMessage.swift (command payload if needed); daemon: ai/orchestrator.py (turn task registry + cancel), main.py `_handle_command` (`chat_cancel`). Overlaps #142 (ChatView.swift): not in the same wave.
+Verify:
+⚬ New test: start a chat turn with a slow fake model, send `chat_cancel` → the task is cancelled, a `complete` thought "Stopped." is emitted, `chat_log` gets the stopped row; non-vacuous: make cancel a no-op, test fails.
+⚬ New test: cancelling while an approval card is open resolves the card as withdrawn and runs no tool.
+⚬ New test: `chat_cancel` for an unknown id does nothing and raises nothing.
+⚬ Live: ask something slow, press Stop → spinner ends, "Stopped." shows, the next question works right away.
+⚬ pytest gate + Swift typecheck (rule 8).
 Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
 Ask: "add a cancel / stop button to a chat request."
 Today: no way to stop a chat turn. The WS `user_message` is pushed onto the event bus (`main.py` ~1911) and the orchestrator runs it inline, `await self._handle_user_message(...)` (`ai/orchestrator.py:1303`), so a slow turn also holds up every other event until it ends. `WebSocketManager.sendUserMessage` returns the `message_id` (= event id), which is the handle to cancel by. Existing pattern: `main.py` `_handle_command` (e.g. `demonstration_cancel`).
@@ -621,7 +702,40 @@ Verify:
 
 ---
 
-#135 — Settings: a search box, and sections grouped into categories [ ]
+#135 — Settings: a search box, and sections grouped into categories [~] live
+Results (wave 33 slot C, 2026-11-20):
+⚬ New `Views/SettingsSearch.swift` (Foundation only): 7 categories, `SettingsSectionID` (an enum, so the view's `switch` must handle every section), the entry table that sets order and search, and the pure `filter` (every word of the query must appear in the title or keywords; the category name is not searched).
+⚬ `Views/SettingsView.swift`: `NavigationSplitView`, search field at the top of the sidebar (a plain `TextField`, not `.searchable`, because Settings sits inside the main window's own split view), one Save bar outside every Form. All seven category Forms stay alive in a `ZStack` (only the selected one shows), so switching category drops nothing. Search shows second copies of the matching sections; provider edits are shared through `SettingsViewModel`.
+⚬ All 25 old sections appear exactly once (checklist in the wave-33 report; the harness checks the table against `SettingsSectionID.allCases`).
+⚬ `MainWindowController.swift`: minimum width 760 → 820.
+⚬ Harness (scratch): "groq", "iphone", "undo", "rules" each find only their sections; 5 breaks each fail.
+⚬ Live (user): the three Verify checks. NOT RENDERED YET: check the nested sidebar width, the empty box under a search-result category heading, and that hidden Forms take no clicks.
+Deviations: text typed into a child section's own field while a search is showing is not carried over when the search is cleared (provider and model fields are).
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "add a search feature to settings and re order them into categories that make sense"
+Today: `Views/SettingsView.swift` (544 lines) is one long `Form` with ~30 sections in the order they were built (Appearance, lifecycle, provider, presets, then every feature view, then rules / training / knowledge / watches / delivery / history / privacy ledger, then Save). No way to find a setting except scrolling.
+Want:
+1. A search field at the top. Typing filters to the sections whose title or keywords match; clearing it shows everything. No match → "No settings match "<text>"".
+2. Sections grouped under category headings, in this proposed order (assistant proposal, user to confirm):
+   ⚬ General: Appearance, app lifecycle (#96), main window.
+   ⚬ Models: inference provider + per-engine pickers, provider presets, vision model (#107), web search.
+   ⚬ Features: daily brief, weekly report, meeting prep, meeting notes (#86), Quick Ask, "Watch me" shortcut (#84), Watch for… (#88).
+   ⚬ Delivery & iPhone: delivery (#87), iPhone remote (#85).
+   ⚬ Permissions & consent: macOS permissions, standing rules (#78), Always allow (#116).
+   ⚬ Memory & data: knowledge index (#134), activity history, action history / Undo (#83), privacy ledger (#82).
+   ⚬ Personal model: training data (#118/#119), personal model (#120).
+DECISIONS (user, 2026-11-20):
+1. Layout: a sidebar of categories (`NavigationSplitView`), search field in the sidebar. Picking a category shows only its sections in the detail pane. While a search is typed, the detail pane shows matches from every category, each under its category name; clearing the search goes back to the selected category.
+2. Save stays one action for all categories (switching category must not drop unsaved edits: keep `SettingsViewModel` above the split view).
+Files (expected): Views/SettingsView.swift (owned); new Views/SettingsSearch.swift (rule 12: the category + keyword table and the filter); the `*SettingsView.swift` files only if a section needs a keyword hook.
+Approach: a static table `[SettingsEntry(category, title, keywords, view)]` drives both the order and the filter, so a new section is added in one place. Keywords cover words a user would type ("model", "Groq", "API key", "login", "iPhone", "undo", "privacy"). The Save row stays visible whatever the filter.
+Watch for: Save in `SettingsView` saves `SettingsViewModel` fields; a hidden section must keep its unsaved edits (filter hides views, it must not drop state). Locked-by-env notes (`lockedNote`) must still show.
+Verify:
+⚬ Typing "groq", "iphone", "undo", "rules" each shows only the matching section(s); clearing restores all.
+⚬ Edit a provider field, search something else, clear, Save → the edit is saved.
+⚬ Every section that exists today appears exactly once (test or a checked list in Results).
+⚬ Swift typecheck (rule 8); a unit test of the filter function, non-vacuous (rule 5).
+Deviations:
 Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
 Ask: "add a search feature to settings and re order them into categories that make sense"
 Today: `Views/SettingsView.swift` (544 lines) is one long `Form` with ~30 sections in the order they were built (Appearance, lifecycle, provider, presets, then every feature view, then rules / training / knowledge / watches / delivery / history / privacy ledger, then Save). No way to find a setting except scrolling.
@@ -650,7 +764,37 @@ Deviations:
 
 ---
 
-#136 — Settings: fields for the local MLX models (main, analysis, drafting) [ ]
+#136 — Settings: fields for the local MLX models (main, analysis, drafting) [~] live
+Results (wave 33 slot D + runner embed, 2026-11-20):
+⚬ BEFORE: a bad model id did not stop the daemon, but the engine was left with no model, retried the bad id (and Hugging Face) on every use, and the error was only in the log.
+⚬ `ai/mlx_engine.py`: `fallback_model` + `load_error`; on a failed load the engine falls back to the default ONLY if that default is already on this Mac (never a new download); `local_model_bytes()`.
+⚬ `main.py`: `/api/settings` gains `mlx_models` (per role: value, default, source, locked, local, running, loaded, load_error) and `mlx_memory_note`; saving "" removes the key; a shell-exported key is locked and never written; a model change sets restart-required. Next-start order: shell, settings.json, `.env`, default.
+⚬ New `Views/LocalModelsSection.swift`: a field + "Choose folder…" per local role, locked note, load error, memory note. Embedded by the runner in the Models category.
+⚬ Tests: `tests/test_local_mlx_models_settings.py` (15); 12 breaks each fail.
+⚬ Live (user): the Verify block. Note: `agent-daemon/.env` sets all three `MLX_*_MODEL` keys today, so clearing a field goes back to the `.env` value (the field says so).
+⚬ UNVERIFIED: no real `mlx_lm` load; the section's look in the new layout.
+Deviations: the memory note counts only roles that run locally, uses 75% of physical memory as the line, and updates after Save, not while typing.
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "add model fields to the settings window"
+Today: Settings → Inference provider picks the provider per engine, but the MLX model that runs for "Local (MLX on this Mac)" can only be set by `MLX_MAIN_MODEL` / `MLX_ANALYSIS_MODEL` / `MLX_DRAFTING_MODEL` in `agent-daemon/.env` or by hand in `~/.bot-inator/settings.json`. The keys are already in `user_settings.ALLOWED_KEYS`; no view writes them. Vision already has its own local-model picker (`VisionSettingsView.swift`, `routes/providers.py` `/vision`), so it is out of scope. Cloud presets already have per-role model fields (`ProviderPresetsSection.swift`).
+Want:
+1. Under Inference provider, when any engine resolves to `local`, a "Local models" block with one text field per local engine (Main, Analysis, Drafting), each showing the current value or the memory-based default (`config.default_mlx_models()`) as its placeholder.
+2. Empty field = use the default (key removed from settings.json, not saved as "").
+3. A shell export of the key locks the field with the existing `lockedNote` text, like the engine pickers.
+4. Saving a changed model shows the existing "restart required" state (`_settings_view()` `restart_required`) and the Restart button when `can_restart`.
+DECISIONS (user, 2026-11-20):
+1. Each field is free text (a Hugging Face repo id or a local folder path) plus a "Choose folder…" button that fills in the path. No picker of cached models in this item; that can be a later item.
+2. Memory warning: a one-line note when the three models together likely exceed this Mac's memory, using the summed download size when the HF metadata is in the local cache. It never blocks Save; no note when the sizes are unknown.
+Files (expected): new Views/LocalModelsSection.swift (rule 12); Views/SettingsView.swift (embed only, at wave close; #135 owns it, so do not run both in one wave); `main.py` `_settings_view()` to report the MLX keys, their defaults and lock state, if not already returned.
+Watch for: a typo'd repo id must not leave the daemon unable to start. On load failure the engine falls back to the default model and the Settings row shows the error (check the current MLX load path for how a failure surfaces today).
+Verify:
+⚬ Set Main to a different MLX model, Save, Restart → `Running now` / engine status shows the new model id; clearing the field and restarting goes back to the default.
+⚬ `MLX_MAIN_MODEL` exported in the daemon shell → the field is read-only with the locked note.
+⚬ A bad id → daemon still starts on the default; the error shows in Settings.
+⚬ "Choose folder…" fills the field with the picked folder's path, and that path loads after a restart.
+⚬ Three large cached models on a small-memory Mac → the memory note shows and Save still works; unknown sizes → no note.
+⚬ pytest gate and Swift typecheck (rule 8); a new test of `_settings_view()` reporting the MLX keys and defaults, non-vacuous (rule 5).
+Deviations:
 Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
 Ask: "add model fields to the settings window"
 Today: Settings → Inference provider picks the provider per engine, but the MLX model that runs for "Local (MLX on this Mac)" can only be set by `MLX_MAIN_MODEL` / `MLX_ANALYSIS_MODEL` / `MLX_DRAFTING_MODEL` in `agent-daemon/.env` or by hand in `~/.bot-inator/settings.json`. The keys are already in `user_settings.ALLOWED_KEYS`; no view writes them. Vision already has its own local-model picker (`VisionSettingsView.swift`, `routes/providers.py` `/vision`), so it is out of scope. Cloud presets already have per-role model fields (`ProviderPresetsSection.swift`).

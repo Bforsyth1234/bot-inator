@@ -256,7 +256,8 @@ struct NoticeAction: Codable, Hashable {
 /// window, or from the phone) or timed out. A card still open closes.
 struct ApprovalResolvedPayload: Codable, Hashable {
     let requestId: String
-    /// `approved`, `declined` or `timed_out`.
+    /// `approved`, `declined`, `timed_out` or `withdrawn` (#143: the chat
+    /// turn that opened the card was stopped; nothing on it ran).
     let outcome: String
     var note: String? = nil
 
@@ -290,10 +291,18 @@ struct CommandPayload: Codable, Hashable {
     /// Only for `pause_listeners` (#87); nil means "until I resume".
     /// `PauseDuration` lives in `OfferInboxView.swift`.
     let duration: PauseDuration?
+    /// Only for `chat_cancel` (#143): the `message_id` of the turn to stop.
+    let messageId: String?
 
-    init(action: CommandAction, duration: PauseDuration? = nil) {
+    init(action: CommandAction, duration: PauseDuration? = nil, messageId: String? = nil) {
         self.action = action
         self.duration = duration
+        self.messageId = messageId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case action, duration
+        case messageId = "message_id"
     }
 }
 
@@ -307,6 +316,8 @@ enum CommandAction: String, Codable, Hashable {
     case demonstrationStart = "demonstration_start"
     case demonstrationStop = "demonstration_stop"
     case demonstrationCancel = "demonstration_cancel"
+    /// #143: Stop a chat turn (`CommandPayload.messageId`).
+    case chatCancel = "chat_cancel"
 }
 
 /// Server→client request to review AI-generated Python tool source.
