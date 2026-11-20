@@ -327,9 +327,15 @@ def test_view_offers_cloud_presets_and_says_what_leaves(client):
 def test_ready_line_says_what_is_left_to_download(monkeypatch):
     from routes import first_run as route
 
+    monkeypatch.setattr(route.first_run, "is_downloaded", lambda m: False)
     monkeypatch.setattr(route.first_run, "local_download_bytes",
                         lambda models: {"total": 8_000_000_000, "done": 3_000_000_000, "unknown": []})
-    assert "5.0 GB download" in route._ready_line(["a/b"])
+    assert "downloading 5.0 GB." in route._ready_line(["a/b"])
+    # Only unknown-size models missing: no "0.0 GB".
     monkeypatch.setattr(route.first_run, "local_download_bytes",
-                        lambda models: {"total": 8_000_000_000, "done": 8_000_000_000, "unknown": []})
+                        lambda models: {"total": 0, "done": 0, "unknown": list(models)})
+    line = route._ready_line(["a/b"])
+    assert "0.0 GB" not in line and "downloading the models" in line
+    # Every model already on the Mac, sizes known or not: ready now.
+    monkeypatch.setattr(route.first_run, "is_downloaded", lambda m: True)
     assert route._ready_line(["a/b"]).startswith("Ready now")
