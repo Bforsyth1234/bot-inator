@@ -365,6 +365,9 @@ struct SettingsView: View {
     @State private var shownInSearch: Set<SettingsSectionID> = []
     /// Bumped for a section to rebuild its category copy after a search.
     @State private var generation: [SettingsSectionID: Int] = [:]
+    /// Categories shown at least once since Settings opened; only these are
+    /// built (and then kept, so their unsaved state survives switching).
+    @State private var visited: Set<SettingsCategory> = [.general]
 
     private var trimmedQuery: String { SettingsSearch.normalize(query) }
     private var isSearching: Bool { !trimmedQuery.isEmpty }
@@ -383,7 +386,9 @@ struct SettingsView: View {
                     // shown: a section's own unsaved state (typed text, a
                     // loaded list) survives switching category, as it did
                     // in the single Form.
-                    ForEach(SettingsCategory.allCases) { c in
+                    // A category is built the first time it is shown, not
+                    // all seven at once: opening Settings stays cheap.
+                    ForEach(SettingsCategory.allCases.filter(visited.contains)) { c in
                         let shown = !isSearching && c == selectedCategory
                         categoryForm(c)
                             .opacity(shown ? 1 : 0)
@@ -403,6 +408,9 @@ struct SettingsView: View {
         }
         .frame(minWidth: 610, minHeight: 360)
         .task { await viewModel.refresh() }
+        .onChange(of: selectedCategory, initial: true) { _, c in
+            visited.insert(c)
+        }
         .onChange(of: trimmedQuery) { _, newValue in
             if newValue.isEmpty {
                 // The search copies may have changed what their category

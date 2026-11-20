@@ -73,7 +73,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #145
+Next ID: #146
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -162,7 +162,7 @@ pass-rate measurement is a live check · #38 a second
 
 ## Live checks
 
-Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #135, #136, #137–#141, #142, #143, #144; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
+Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #135, #136, #137–#141, #142, #143, #144, #145; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
 
 ## Completed items (archived to DONE.md)
 
@@ -818,6 +818,22 @@ Verify:
 Deviations:
 
 ---
+
+#145 — BUG: UI lags when switching views and when switching back to the app [~] live
+Wave: — (direct fix) · Added: 2026-11-20 · Source: user
+Ask: "The ui feels laggy. Particularly when switching views or switching to the app in general from another app."
+Cause (measured, 2026-11-20): with Settings open the app used 1,063 MB and up to ~98% CPU on the main thread (SwiftUI layout); Thoughts used 118 MB, Tools 140 MB. A one-build bisect (env var picking one category / one section) put ~840 MB on Settings → Memory & data → Knowledge index: `IMessageOptionsView` drew every iMessage conversation (1,700 here) as a checkbox in a non-lazy `VStack`. `SettingsView` also built all seven categories up front (hidden at opacity 0, #135), so that list was built whenever Settings opened, and every window focus change redrew all 1,700 checkboxes.
+Results:
+⚬ `Views/KnowledgeSourceOptionsViews.swift`: the conversation list is a `LazyVStack`.
+⚬ `Views/SettingsView.swift`: a category is built the first time it is selected (`visited`), then kept, so #135's unsaved-state-survives-switching still holds.
+⚬ `Services/WebSocketManager.swift`: one `debug` publish per frame instead of four (local copy, written back in a `defer`; the handler has no `await`, so nothing else can write `debug` in between); `authHint = nil` only when it isn't nil already (a nil-to-nil assignment still notified every observer on every frame).
+⚬ `Views/ThoughtStreamView.swift`: the sorted thought list is computed once per redraw instead of three times.
+Verify (2026-11-20, release build, real daemon):
+⚬ Settings opened at launch: 1,063 MB → 140 MB; Memory & data opened at launch: 976 MB → 183 MB; focus switches to/from Finder ~2% CPU.
+⚬ Non-vacuous: the bisect build (old code, Knowledge section only) used 977 MB; the other sections 134–141 MB.
+⚬ Swift typecheck (rule 8) passes. No daemon code changed.
+⚬ Live (user): open Settings, click through every category, Cmd-Tab away and back several times → no stall; Memory & data → Knowledge index → iMessage list scrolls, filters and toggles as before.
+⚬ NOT DONE: `ws.messages` still grows for the whole session (QuickAskPanel, ChatViewModel and ApprovalPresenter rely on its indexes being append-only); a cap needs an index offset in those three readers.
 
 ### Memory
 

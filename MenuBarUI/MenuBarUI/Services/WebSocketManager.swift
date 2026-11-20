@@ -380,7 +380,9 @@ final class WebSocketManager: ObservableObject {
         while !Task.isCancelled {
             do {
                 let message = try await task.receive()
-                authHint = nil
+                // Assigning a @Published value always notifies, even nil to
+                // nil; once per frame that redrew every observer for nothing.
+                if authHint != nil { authHint = nil }
                 await handleIncoming(message)
             } catch {
                 NSLog("WebSocketManager receive error: \(error)")
@@ -413,12 +415,16 @@ final class WebSocketManager: ObservableObject {
             rawPreview = nil
         }
         guard let data else { return }
-        debug.framesReceived += 1
-        if let rawPreview { debug.lastRawFrame = rawPreview }
+        // One `debug` publish per frame, not four: each publish redraws
+        // every view observing this manager.
+        var stats = debug
+        defer { debug = stats }
+        stats.framesReceived += 1
+        if let rawPreview { stats.lastRawFrame = rawPreview }
         do {
             let parsed = try decoder.decode(WSMessage.self, from: data)
-            debug.framesDecoded += 1
-            debug.recordDecoded(parsed)
+            stats.framesDecoded += 1
+            stats.recordDecoded(parsed)
             if case .calendarRequest(_, _, let payload) = parsed {
                 // Plumbing, not UI: the watcher sends one a minute (#60).
                 handleCalendarRequest(payload)
@@ -483,7 +489,7 @@ final class WebSocketManager: ObservableObject {
             }
         } catch {
             NSLog("WebSocketManager decode error: \(error)")
-            debug.recordDecodeError(error, raw: rawPreview)
+            stats.recordDecodeError(error, raw: rawPreview)
         }
     }
 
