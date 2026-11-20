@@ -45,7 +45,7 @@ if missing:
     for m in missing:
         print("      " + m)
     print("    The stock set is about 12.7 GB on disk and in memory. To use a")
-    print("    cloud key instead, pick it in Settings (the brain icon, then ⌘,).")
+    print("    cloud key instead, pick it in Settings (the robot icon, then ⌘,).")
 PY
 fi
 

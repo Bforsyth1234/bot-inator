@@ -59,6 +59,7 @@ sed -e 's/$(DEVELOPMENT_LANGUAGE)/en/' -e 's/$(EXECUTABLE_NAME)/MenuBarUI/' \
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
+cp "$SRC/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 if [[ "$BUNDLE_DAEMON" == "1" ]]; then
   "$ROOT/scripts/release/bundle-daemon.sh" "$APP"
