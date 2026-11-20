@@ -5,7 +5,7 @@ import Combine
 /// Control-click) shows a short menu with Pause, Watch me, meeting notes and
 /// Quit.
 ///
-/// The icon is a pause glyph while paused, a record glyph while a "Watch me"
+/// The icon is the robot (RobotGlyph), a pause glyph while paused, a record glyph while a "Watch me"
 /// recording runs (#84), and shows the Inbox count (#87) beside it.
 @MainActor
 final class StatusItemController: NSObject, NSMenuDelegate {
@@ -43,15 +43,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     private func updateIcon() {
         guard let button = item.button else { return }
-        let glyph: String
+        let image: NSImage?
         if ws.lastStatus?.paused == true {
-            glyph = "pause.circle"
+            image = NSImage(systemSymbolName: "pause.circle", accessibilityDescription: "bot-inator")
         } else if demo.isRecording {
-            glyph = "record.circle.fill"
+            image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "bot-inator")
         } else {
-            glyph = "brain.head.profile"
+            image = RobotGlyph.image()
         }
-        let image = NSImage(systemSymbolName: glyph, accessibilityDescription: "bot-inator")
         image?.isTemplate = true
         button.image = image
         let inbox = ws.lastStatus?.inboxCount ?? 0

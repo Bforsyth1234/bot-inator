@@ -163,7 +163,7 @@ codesign --force --sign - build/MenuBarUI.app
 open build/MenuBarUI.app
 ```
 
-A brain icon appears in the menu bar. It connects to the daemon on its own
+A robot icon appears in the menu bar. It connects to the daemon on its own
 and reconnects if the daemon restarts.
 
 ## macOS permissions

@@ -260,8 +260,7 @@ struct QuickAskView: View {
 
     private var prompt: some View {
         HStack(spacing: 8) {
-            Image(systemName: "brain.head.profile")
-                .appFont(.title3)
+            RobotGlyphView(size: 22)
                 .foregroundStyle(Color.accentColor)
             TextField(model.screen.frontApp.map { "Ask about \($0)…" } ?? "Ask the agent…",
                       text: $model.draft, axis: .vertical)

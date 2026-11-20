@@ -74,6 +74,8 @@ sed -e 's/$(DEVELOPMENT_LANGUAGE)/en/' -e 's/$(EXECUTABLE_NAME)/MenuBarUI/' \
   -e 's/$(PRODUCT_BUNDLE_IDENTIFIER)/com.botinator.MenuBarUI/' \
   -e 's/$(PRODUCT_BUNDLE_PACKAGE_TYPE)/APPL/' -e 's/$(PRODUCT_NAME)/MenuBarUI/' \
   Info.plist > "$APP/Contents/Info.plist"
+mkdir -p "$APP/Contents/Resources"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --sign - "$APP" 2>/dev/null
 codesign --verify "$APP"
 
