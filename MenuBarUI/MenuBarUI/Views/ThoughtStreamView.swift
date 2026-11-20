@@ -40,9 +40,9 @@ struct ThoughtStreamView: View {
 
     private var thoughtList: some View {
         ScrollViewReader { proxy in
-            List(thoughts, id: \.seq) { entry in
+            List(thoughts) { entry in
                 ThoughtRow(seq: entry.seq, timestamp: entry.timestamp, payload: entry.payload)
-                    .id(entry.seq)
+                    .id(entry.id)
                     .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
             }
             .listStyle(.plain)
@@ -60,21 +60,22 @@ struct ThoughtStreamView: View {
         DispatchQueue.main.async {
             if animated {
                 withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo(last.seq, anchor: .bottom)
+                    proxy.scrollTo(last.id, anchor: .bottom)
                 }
             } else {
-                proxy.scrollTo(last.seq, anchor: .bottom)
+                proxy.scrollTo(last.id, anchor: .bottom)
             }
         }
     }
 
-    private var thoughts: [(seq: Int, timestamp: Date, payload: ThoughtPayload)] {
-        ws.messages.compactMap { msg in
-            if case let .thought(seq, ts, payload) = msg {
-                return (seq, ts, payload)
-            }
-            return nil
-        }
+    /// #132: rows are keyed by their position in `ws.messages`, not by the
+    /// daemon's `seq`. `seq` restarts whenever the daemon does while the app
+    /// keeps its messages, so two thoughts could share a seq and SwiftUI
+    /// would misplace rows. `ws.messages` is append-only (QuickAskPanel
+    /// relies on that too), so the index is unique and stable. Shown in
+    /// timestamp order; ties keep arrival order.
+    private var thoughts: [ThoughtEntry] {
+        ThoughtEntry.ordered(from: ws.messages)
     }
 
     // MARK: - Footer
@@ -117,6 +118,29 @@ struct ThoughtStreamView: View {
         .appFont(.secondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+}
+
+struct ThoughtEntry: Identifiable {
+    /// Index in `WebSocketManager.messages`: unique across daemon restarts.
+    let id: Int
+    let seq: Int
+    let timestamp: Date
+    let payload: ThoughtPayload
+
+    /// Thoughts in `messages`, sorted by timestamp; equal timestamps keep
+    /// arrival order (the index breaks the tie).
+    static func ordered(from messages: [WSMessage]) -> [ThoughtEntry] {
+        var entries: [ThoughtEntry] = []
+        for (index, msg) in messages.enumerated() {
+            if case let .thought(seq, ts, payload) = msg {
+                entries.append(ThoughtEntry(id: index, seq: seq, timestamp: ts, payload: payload))
+            }
+        }
+        entries.sort { lhs, rhs in
+            lhs.timestamp != rhs.timestamp ? lhs.timestamp < rhs.timestamp : lhs.id < rhs.id
+        }
+        return entries
     }
 }
 

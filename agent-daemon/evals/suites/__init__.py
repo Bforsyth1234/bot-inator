@@ -8,6 +8,9 @@
     One model run of one case. Must include ``ok`` (bool) and ``got``
     (the verdict, used to spot cases that flip between runs).
 
+Judged suites (``email_draft``, #133) set ``NEEDS_JUDGE`` and take a
+``judge`` engine keyword in ``run_case``; see :mod:`evals.judge`.
+
 ``personal`` (#121) builds its cases from the training corpus, not a file,
 and its results are never saved: its ``load_cases`` refuses and
 ``NEVER_SAVE`` is set; run it with ``evals.suites.personal.evaluate_personal``.
@@ -17,7 +20,7 @@ from __future__ import annotations
 from importlib import import_module
 from types import ModuleType
 
-SUITES = ("idea_judge", "tool_calls", "safety", "personal")
+SUITES = ("idea_judge", "tool_calls", "safety", "personal", "email_draft")
 
 
 def get(name: str) -> ModuleType:

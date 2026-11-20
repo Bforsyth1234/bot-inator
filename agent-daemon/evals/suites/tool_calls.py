@@ -107,7 +107,14 @@ def _prompt_and_steps(case: dict[str, Any], orchestrator: Any) -> tuple[str, int
 
     if case["kind"] == "chat":
         event = ContextEvent(event_type="user_message", metadata={"text": case["text"]})
-        return orchestrator._build_chat_prompt(event), CHAT_MAX_STEPS
+        prompt = orchestrator._build_chat_prompt(event)
+        if case.get("knowledge"):
+            # #134: snippets "retrieved" from the knowledge index, in the
+            # same block the Chat turn adds (ai/knowledge_retrieval.py).
+            from ai.knowledge_retrieval import Retrieval
+
+            prompt = Retrieval(snippets=list(case["knowledge"])).apply(prompt)
+        return prompt, CHAT_MAX_STEPS
     raw = case["event"]
     event = ContextEvent(
         event_type=str(raw["event_type"]), app_name=raw.get("app_name"),

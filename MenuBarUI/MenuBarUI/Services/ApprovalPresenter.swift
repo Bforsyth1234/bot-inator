@@ -39,6 +39,17 @@ final class ApprovalPresenter {
                 self?.handleCode(pending)
             }
             .store(in: &cancellables)
+        // #130: a code card whose chat rewrite ended without a new card
+        // (failed, or closed meanwhile) is closed by the daemon's
+        // approval_resolved. Nothing is sent back.
+        ws.$messages
+            .sink { [weak self] messages in
+                guard let self, let last = messages.last,
+                      case .approvalResolved(_, _, let payload) = last,
+                      payload.requestId == self.presentedCodeId else { return }
+                self.closeCodeWindow()
+            }
+            .store(in: &cancellables)
     }
 
     private func handle(_ pending: (seq: Int, payload: ApprovalRequestPayload)?) {

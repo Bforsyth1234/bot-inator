@@ -78,6 +78,10 @@ class ApprovalRequestPayload(BaseModel):
     # user denies, edits or touches it. Set only for undoable actions while
     # the user is at the Mac. ``None`` waits for a click as before.
     auto_approve_seconds: int | None = None
+    # #130: the card offers a chat thread (``POST /api/card-chat/{request_id}``)
+    # in place of the note field. ``None`` (older daemons, other cards) keeps
+    # the note field. Chat never approves; only the buttons decide.
+    chat: bool | None = None
 
 
 class ApprovalResponsePayload(BaseModel):
@@ -129,6 +133,11 @@ class CodeApprovalRequestPayload(BaseModel):
     # #90: a repair's review card shows a diff against the installed source.
     # ``None`` for a new tool (and older daemons).
     previous_code: str | None = None
+    # #130: the card offers a chat thread (see ``ApprovalRequestPayload.chat``).
+    chat: bool | None = None
+    # #130: this card's code was rewritten from the chat on card
+    # ``replaces_request_id``; that older card can no longer be approved.
+    replaces_request_id: str | None = None
 
 
 class CodeApprovalResponsePayload(BaseModel):

@@ -132,6 +132,18 @@ data for the personal model.
 4. **Off means gone.** Turning a source off deletes its rows; "Forget
    everything" deletes the whole index.
 
+**Card chat (#130).** The tool-idea and code-review cards carry a small
+chat thread in place of the note field. Nothing typed there is consent:
+only the card's Approve and Deny buttons decide, the chat model has no
+tools, and Approve is refused while a reply is in flight. A plan changed in
+chat is shown on the idea card before Approve builds it, and is checked
+like a fresh idea (#122 quotes, #123 deletes). Code changed from chat
+always re-enters the code gate: the old card is resolved as not approved
+and can install nothing, and the new draft goes through the checks, the
+sandboxed dry run and the critic onto a fresh code-review card (7b). The
+thread lives in memory only and is dropped when the card closes; it uses
+the daemon's existing engines under the existing privacy and ledger rules.
+
 **iPhone remote (amendment to 7a and 7c, user decisions 2026-11-10, item
 #85).** 7a: a reply `yes <code>` / `no <code>` sent from the user's own
 devices (`is_from_me = 1`, iMessage service, in the own thread only) is
@@ -325,6 +337,12 @@ Client → server: `approval_response`, `code_approval_response`,
 Wave 15 fields (all optional, absent from older daemons):
 `approval_request.origin_notes` `[str]` (#81) and `reversible` (#83);
 `code_approval_request.previous_code` (#90: a repair's diff base);
+`approval_request.chat` / `code_approval_request.chat` (#130: the card has
+a chat thread, `POST /api/card-chat/{request_id}`, instead of the note
+field) and `code_approval_request.replaces_request_id` (#130: this code was
+rewritten from that card's chat; the older card can no longer be approved;
+a rewrite that ends without a new card closes the old one with
+`approval_resolved` outcome `declined`);
 `command.duration` `"1h" | "tomorrow" | "indefinite"` (#87, for
 `pause_listeners`); `status.paused`, `paused_until` (ISO or "indefinite"),
 `held_count`, `inbox_count` (#87; a status frame is broadcast whenever they
@@ -539,7 +557,17 @@ the bearer token (see Auth above):
 | GET    | `/api/delivery/inbox`     | Offers over today's cap (#87).                    |
 | POST   | `/api/delivery/inbox/{id}/open` | Show it now (user-caused: no cap, no hold) (#87). |
 | DELETE | `/api/delivery/inbox/{id}` | Dismiss it (#87).                                |
+| POST   | `/api/delivery/held/{id}/open` | Show a held offer now (user-caused: not held again, not counted toward the cap) (#131). |
+| DELETE | `/api/delivery/held/{id}` | Dismiss one held offer (#131).                   |
+| DELETE | `/api/delivery/held`      | Clear every held offer: `{cleared}` (#131).       |
 | GET/PUT| `/api/delivery/settings`  | `{daily_cap, never_watch}` (#87).                 |
+| GET    | `/api/knowledge`          | Knowledge index status: per source `{enabled, cloud, items, chunks, last_indexed, error}`, folders, running, vector (#134). |
+| PUT    | `/api/knowledge/sources/{source}` | `{enabled?, cloud?}`; off deletes the source's rows and its cloud toggle (#134). |
+| GET/PUT| `/api/knowledge/folders`  | `{folders}`; a removed folder loses its rows (#134). |
+| POST   | `/api/knowledge/index-now` | Start a pass now (409 while one runs) (#134).    |
+| POST   | `/api/knowledge/forget`   | "Forget everything": deletes the index, every source off (#134). |
+| GET    | `/api/card-chat/{request_id}` | An open idea / code card's thread: `{kind, turns, plan, busy, rewriting, turns_left, tainted, origin_notes, can_rewrite}`; 404 unknown, 410 closed (#130). |
+| POST   | `/api/card-chat/{request_id}` | `{text}` → the same plus `result` (`answer`, `no_approval`, `no_deny`, `plan_changed`, `plan_refused`, `rewrite_started`, `rewrite_refused`) and `reply`; 409 busy, 410 closed, 413 too long, 429 thread full. Never approves (#130). |
 | POST   | `/api/watches/preview`    | Sentence (one detection-engine call) or spec → `{spec, words, backtest}`; saves nothing (#88). |
 | GET/POST | `/api/watches`          | List / save watches (≤ 20; denied 3× in a row switches one off) (#88). |
 | PATCH/DELETE | `/api/watches/{id}` | `{enabled?, daily_limit?, cooldown_minutes?}` / delete (#88). |
@@ -772,7 +800,9 @@ write-only; a save is mirrored into `os.environ` so it applies at once.
 |                               | (`AGENT_EGRESS_DB`); hooks in `groq_engine`,       |
 |                               | `orchestrator` (agent-loop client), `mlx_engine`,  |
 |                               | `memory`, `mcp_client`, `tool_sandbox`, `open_url`;|
-|                               | `routes/egress.py`.                                |
+|                               | `routes/egress.py`. Kind `knowledge_snippets`      |
+|                               | (#134): index snippets in a cloud Chat prompt, one |
+|                               | row per send, sources + count, never the text.     |
 | `ai/delivery.py`              | #87 right-moment delivery: busy gate, held offers  |
 |                               | + Inbox `~/.bot-inator/held_offers.json`           |
 |                               | (`AGENT_HELD_OFFERS_PATH`), settings               |
@@ -811,6 +841,30 @@ write-only; a save is mirrored into `os.environ` so it applies at once.
 |                               | `routes/meeting_notes.py`. Optional `mlx-whisper`. |
 | `tools/read_front_window.py`  | #89 front-window text via the app's Accessibility  |
 |                               | bridge (`bridge`, WS routed in `main.py`).         |
+| `ai/knowledge_index.py`       | #134 local knowledge index: `~/.bot-inator/        |
+|                               | knowledge.db` (0600, `AGENT_KNOWLEDGE_DB`) +       |
+|                               | `knowledge_index.json`                             |
+|                               | (`AGENT_KNOWLEDGE_SETTINGS_PATH`); sources mail,   |
+|                               | folders, chats, meeting notes, all off by default; |
+|                               | FTS5 + sqlite-vec; `KnowledgeIndexer` started in   |
+|                               | `main.py`; `routes/knowledge.py`.                  |
+| `ai/card_chat.py`             | #130 chat on idea / code cards: in-memory threads  |
+|                               | per request id (`CardChatStore`, dropped on close),|
+|                               | consent words answered without a model, idea chat  |
+|                               | on the main engine (`PLAN_*` markers), code chat on|
+|                               | the drafting engine (`CODE_CHANGE` → old card      |
+|                               | resolved not approved, `meta_tool_generator`       |
+|                               | re-drafts onto a new card, ≤ 3 per build); scrub   |
+|                               | per role (#31/#51); `routes/card_chat.py`.         |
+| `ai/knowledge_retrieval.py`   | #134 Chat retrieval: top-5 snippets in the Chat    |
+|                               | prompt (chat window, Quick Ask, iPhone remote),    |
+|                               | labelled data-not-instructions, cite the source.   |
+|                               | Cloud engine: cloud-toggled sources only and only  |
+|                               | with personal text allowed (#31), ledger row per   |
+|                               | send. Marks the turn (`TurnTaint.mark_retrieved`); |
+|                               | no Always-allow / countdown in such a turn; past   |
+|                               | chat indexed after the reply (without it when the  |
+|                               | turn used snippets).                               |
 
 ## 5. Inference engines
 

@@ -427,6 +427,10 @@ struct SettingsView: View {
             Section("Personal model") {
                 PersonalModelView()
             }
+            // #134: what Chat may search (the local knowledge index); off by default.
+            Section {
+                KnowledgeIndexSettingsView()
+            }
 
             // Wave 15: watches (#88), right-moment delivery (#87), what the
             // assistant did with Undo (#83), what left this Mac (#82).

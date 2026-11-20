@@ -16,6 +16,8 @@ struct CodeReviewAlert: View {
 
     @State private var draft: String = ""
     @State private var userNote: String = ""
+    /// #130: the card's chat (replaces the note field when offered).
+    @StateObject private var chat = CardChatModel()
     /// #104: off by default; the daemon trusts only this exact source.
     @State private var runOutsideSandbox = false
     /// Repair cards (#90) open on the diff; "Full source" shows the editor.
@@ -34,15 +36,48 @@ struct CodeReviewAlert: View {
             } else {
                 codeEditorSection
             }
-            noteSection
+            if chatOn {
+                chatSection
+            } else {
+                noteSection
+            }
             trustSection
             Spacer(minLength: 0)
             buttonRow
         }
         .padding(18)
         .frame(width: 680,
-               height: min(740, ((summary != nil ? 700 : 600) * textSize.layoutScale).rounded()))
-        .onAppear { if draft.isEmpty { draft = payload.code } }
+               height: min(chatOn ? 900 : 740,
+                           (((summary != nil ? 700 : 600) + (chatOn ? 170 : 0))
+                            * textSize.layoutScale).rounded()))
+        .onAppear {
+            chat.requestId = payload.requestId
+            if draft.isEmpty { draft = payload.code }
+        }
+    }
+
+    /// #130: the daemon offers a chat on this card.
+    private var chatOn: Bool { payload.chat == true }
+
+    private var chatSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if chat.rewriting {
+                Label("Rewriting from your chat. The new code goes through the same checks and sandboxed dry run and opens on a new review card; this one can't be approved.",
+                      systemImage: "arrow.triangle.2.circlepath")
+                    .appFont(.body, weight: .semibold)
+                    .foregroundStyle(.orange)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+            } else if draft != payload.code {
+                Text("The chat sees the code as drafted, not your edits.")
+                    .appFont(.fine)
+                    .foregroundStyle(.secondary)
+            }
+            CardChatView(model: chat, title: "Ask about this code",
+                         placeholder: "What does this line do? Why does it need that app?")
+        }
     }
 
     private var header: some View {
@@ -51,7 +86,8 @@ struct CodeReviewAlert: View {
                 .foregroundStyle(.purple)
                 .appFont(.title2)
             VStack(alignment: .leading, spacing: 2) {
-                Text(previousCode != nil ? "Repair Review" : "Code Review")
+                Text(previousCode != nil ? "Repair Review"
+                     : payload.replacesRequestId != nil ? "Code Review (rewritten)" : "Code Review")
                     .appFont(.headline)
                 Text(payload.toolName)
                     .appFont(.label, design: .monospaced)
@@ -211,7 +247,7 @@ struct CodeReviewAlert: View {
         HStack {
             Spacer()
             Button(role: .destructive) {
-                onDecision(false, nil, userNote, false)
+                onDecision(false, nil, chatOn ? "" : userNote, false)
             } label: {
                 Label("Deny", systemImage: "xmark.circle.fill")
             }
@@ -220,15 +256,17 @@ struct CodeReviewAlert: View {
             Button {
                 let edited: String? =
                     (draft != payload.code) ? draft : nil
-                onDecision(true, edited, userNote, runOutsideSandbox)
+                onDecision(true, edited, chatOn ? "" : userNote, runOutsideSandbox)
             } label: {
                 Label(previousCode != nil ? "Approve Repair" : "Approve & Install",
                       systemImage: "checkmark.circle.fill")
             }
-            .keyboardShortcut(.defaultAction)
+            // #130: Return in the chat field must never approve the card.
+            .keyboardShortcut(chatOn ? nil : KeyboardShortcut.defaultAction)
             .buttonStyle(.borderedProminent)
+            // #130: no Approve while a reply or a rewrite could change the code.
             .disabled(draft.trimmingCharacters(
-                in: .whitespacesAndNewlines).isEmpty)
+                in: .whitespacesAndNewlines).isEmpty || chat.blocksApproval)
         }
     }
 }

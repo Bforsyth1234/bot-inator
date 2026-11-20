@@ -206,7 +206,9 @@ def _select_detection_engine(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.seq = 0
+    # #132: seeded from the clock (microseconds), like Orchestrator._seq, so
+    # seq only grows across daemon restarts.
+    app.state.seq = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
     # Create ~/.bot-inator/token on first start so clients can read it
     # (#27). Never log the value.
     get_token()
@@ -569,6 +571,15 @@ async def lifespan(app: FastAPI):
     )
     orchestrator.delivery = delivery
     app.state.delivery = delivery
+    # #134: the local knowledge index (every source off until the user turns
+    # it on) and its background indexer; Chat searches it (part 2).
+    from ai import knowledge_index as knowledge_index_mod  # noqa: WPS433
+
+    app.state.knowledge_index = knowledge_index_mod.KnowledgeIndex()
+    knowledge_index_mod.set_default_index(app.state.knowledge_index)
+    orchestrator.knowledge_index = app.state.knowledge_index
+    app.state.knowledge_indexer = knowledge_index_mod.KnowledgeIndexer(app.state.knowledge_index)
+    await app.state.knowledge_indexer.start()
     # #78: standing rules ("always do this"): offers after 5 clean
     # approvals, runs without a card (journaled, Undo), never while paused.
     from ai import standing_rules as standing_rules_mod  # noqa: WPS433
@@ -703,6 +714,17 @@ async def lifespan(app: FastAPI):
     app.state.drafting_engine = drafting_engine
     app.state.memory = memory
     app.state.orchestrator = orchestrator
+    # #130: chat on the idea / code cards (memory only; main engine for the
+    # idea, the drafting engine for the code, as for what rewrites them).
+    from ai import card_chat as card_chat_mod  # noqa: WPS433
+    from tools import meta_tool_generator as _mtg_chat  # noqa: WPS433
+
+    app.state.card_chat = card_chat_mod.CardChatStore(
+        engine_for=lambda kind: orchestrator.engine if kind == card_chat_mod.IDEA
+        else (_mtg_chat._DRAFT_ENGINE or orchestrator.engine),
+    )
+    orchestrator.card_chat = app.state.card_chat
+    card_chat_mod.set_default_store(app.state.card_chat)
     app.state.idea_feedback = idea_feedback
     app.state.idea_outcomes = idea_outcomes
     app.state.approval_decisions = approval_decisions
@@ -724,6 +746,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        try:
+            await app.state.knowledge_indexer.stop()  # #134
+            app.state.knowledge_index.close()
+        except Exception:
+            logger.exception("Error stopping the knowledge indexer")
+        knowledge_index_mod.set_default_index(None)
+        orchestrator.knowledge_index = None
         delivery_task.cancel()
         personal_model_task.cancel()
         try:
@@ -855,6 +884,12 @@ app.include_router(first_run_routes.router)
 from routes import always_allow as always_allow_routes  # noqa: E402
 
 app.include_router(always_allow_routes.router)
+from routes import knowledge as knowledge_routes  # noqa: E402
+
+app.include_router(knowledge_routes.router)  # #134
+from routes import card_chat as card_chat_routes  # noqa: E402
+
+app.include_router(card_chat_routes.router)  # #130
 
 
 def _next_seq() -> int:

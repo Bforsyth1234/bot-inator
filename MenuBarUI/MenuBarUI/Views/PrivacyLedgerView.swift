@@ -36,6 +36,8 @@ struct EgressRow: Codable, Identifiable, Equatable {
         case "open_url": return "Opened in browser"
         case "model_download": return "Model download \(model ?? "")"
         case "imessage": return "iMessage to you"
+        // #134: snippets from the local knowledge index in a cloud Chat prompt.
+        case "knowledge_snippets": return "Your indexed data in a Chat prompt"
         default: return kind
         }
     }
