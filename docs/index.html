@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>bot-inator</title>
-<meta name="description" content="A menu bar app for Mac that notices what you're doing and offers to help. Runs on local models by default and asks before it does anything.">
+<meta name="description" content="A menu bar app for Mac that builds its own tools for what you do by hand and asks before it uses them. Runs on local models by default.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -17,8 +17,8 @@
   </nav>
 </header>
 <main>
-  <h1>A Mac assistant that asks first.</h1>
-  <p class="lede">bot-inator sits in your menu bar, notices what you're doing, and offers to help. Nothing happens until you click approve.</p>
+  <h1>A Mac assistant that builds its own tools, and asks before it uses them.</h1>
+  <p class="lede">bot-inator sits in your menu bar and notices what you keep doing by hand. It writes a small tool for it, and it learns from what you approve by training a model on your Mac. Nothing happens until you approve it.</p>
   <div class="buttons">
     <a class="button" href="https://github.com/Bforsyth1234/bot-inator/releases/latest">Download for Mac</a>
     <a class="button secondary" href="https://github.com/Bforsyth1234/bot-inator">Source code</a>
@@ -31,9 +31,10 @@
   <p>It watches a few things: new files in Downloads, incoming mail and iMessages, upcoming meetings, which app you're in. When something comes up it asks a model whether there's anything useful to do. If there is, you get a card. A PDF invoice lands and it offers to file it with your other invoices. You approve it or ignore it.</p>
 
   <div class="grid">
+    <div class="card"><h3>It writes its own tools</h3><p>When you keep doing something by hand, it offers to build a small tool for it. You read the full source before it's installed.</p></div>
+    <div class="card"><h3>It learns from what you approve</h3><p>Turn it on and it trains a small personal model on your Mac from the cards you approve and ignore. It's off by default, the data never leaves the Mac, and it's only used if it does better than the base model.</p></div>
     <div class="card"><h3>Every action is a card</h3><p>Moving a file, making a reminder, drafting an email: all of it waits for your click. Only read-only tools skip the card.</p></div>
     <div class="card"><h3>Local by default</h3><p>Models run on your Mac with MLX. A cloud key is optional, and a ledger in Settings shows everything that left the Mac today.</p></div>
-    <div class="card"><h3>It writes its own tools</h3><p>When you keep doing something by hand, it offers to build a small tool for it. You read the full source before it's installed.</p></div>
     <div class="card"><h3>Sandboxed and versioned</h3><p>Each tool runs in a short-lived <code>sandbox-exec</code> child and lives in its own git repo, so a bad change can be rolled back.</p></div>
   </div>
 

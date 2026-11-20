@@ -53,6 +53,7 @@ a { color: var(--accent); }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
 .card h3 { margin-top: 0; }
 .card p { margin: 0; color: var(--muted); font-size: 15px; }
+.grid .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
 ol li { margin-bottom: 6px; }
 code { font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
 footer { margin-top: 64px; padding-bottom: 40px; border-top: 1px solid var(--line); padding-top: 18px; font-size: 14px; color: var(--muted); }
