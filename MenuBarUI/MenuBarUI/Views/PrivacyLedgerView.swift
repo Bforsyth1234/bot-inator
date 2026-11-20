@@ -38,6 +38,8 @@ struct EgressRow: Codable, Identifiable, Equatable {
         case "imessage": return "iMessage to you"
         // #134: snippets from the local knowledge index in a cloud Chat prompt.
         case "knowledge_snippets": return "Your indexed data in a Chat prompt"
+        // #140: browser-history page text fetched for the knowledge index.
+        case "web_search" where tool == "knowledge_browser": return "Page text for your browser history index"
         default: return kind
         }
     }

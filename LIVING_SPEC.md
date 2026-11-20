@@ -122,7 +122,12 @@ data for the personal model.
 
 1. **Sources are opt-in, one at a time.** Mail, chosen folders, past Chat
    turns and meeting notes, each off by default. Mail has its own toggle.
-   iMessages are not a v1 source.
+   iMessages were not a v1 source.
+   AMENDED (user, 2026-11-20, items #137–#141): iMessages (with an exclude
+   list), Calendar, Notes, browser history and imported AI-chat exports may
+   be added as sources, each off by default with its own toggle and under
+   every rule in this section. Browser page text is a second, separate
+   opt-in because it uses the network; each fetch is in the privacy ledger.
 2. **The index stays on the Mac.** Snippets go to a cloud model only when
    that source's cloud toggle is on, and every such send is in the privacy
    ledger (#82).
@@ -565,7 +570,11 @@ the bearer token (see Auth above):
 | PUT    | `/api/knowledge/sources/{source}` | `{enabled?, cloud?}`; off deletes the source's rows and its cloud toggle (#134). |
 | GET/PUT| `/api/knowledge/folders`  | `{folders}`; a removed folder loses its rows (#134). |
 | POST   | `/api/knowledge/index-now` | Start a pass now (409 while one runs) (#134).    |
-| POST   | `/api/knowledge/forget`   | "Forget everything": deletes the index, every source off (#134). |
+| POST   | `/api/knowledge/forget`   | "Forget everything": deletes the index, every source off (#134); options back to defaults except the keep-out lists (Messages exclude, excluded sites, browser profiles, Notes folders) (#137–#141). |
+| GET/PUT| `/api/knowledge/sources/{source}/options` | Per-source options of `imessages`, `calendar`, `apple_notes`, `browser_history`, `ai_chats`; PUT validates (400 with the reader's message) and deletes newly narrowed rows at once (`deleted`); a change only a re-read can prune starts a one-source pass in a worker thread (#137–#141). |
+| GET    | `/api/knowledge/sources/{source}/choices` | The reader's pickers (Messages conversations + Full Disk Access error, Notes folders, browser profiles + look-back choices + suggested sites, AI-chat imports), in a worker thread; 404 for Calendar (#137–#141). |
+| POST   | `/api/knowledge/sources/ai_chats/imports` | `{path}` (absolute): ChatGPT / Claude export read once in place; same path again replaces the entry, keeping its id; 400 for a bad file (#141). |
+| DELETE | `/api/knowledge/sources/ai_chats/imports/{id}` | Remove an import and the conversations no other import holds (`deleted`); 404 unknown (#141). |
 | GET    | `/api/card-chat/{request_id}` | An open idea / code card's thread: `{kind, turns, plan, busy, rewriting, turns_left, tainted, origin_notes, can_rewrite}`; 404 unknown, 410 closed (#130). |
 | POST   | `/api/card-chat/{request_id}` | `{text}` → the same plus `result` (`answer`, `no_approval`, `no_deny`, `plan_changed`, `plan_refused`, `rewrite_started`, `rewrite_refused`) and `reply`; 409 busy, 410 closed, 413 too long, 429 thread full. Never approves (#130). |
 | POST   | `/api/watches/preview`    | Sentence (one detection-engine call) or spec → `{spec, words, backtest}`; saves nothing (#88). |
@@ -847,7 +856,25 @@ write-only; a save is mirrored into `os.environ` so it applies at once.
 |                               | (`AGENT_KNOWLEDGE_SETTINGS_PATH`); sources mail,   |
 |                               | folders, chats, meeting notes, all off by default; |
 |                               | FTS5 + sqlite-vec; `KnowledgeIndexer` started in   |
-|                               | `main.py`; `routes/knowledge.py`.                  |
+|                               | `main.py`; `routes/knowledge.py`. #137–#141: the   |
+|                               | registry's five sources appended to `SOURCES`,     |
+|                               | per-source `options` (validated; bad stored value  |
+|                               | → defaults + `options_error`), `get_options` /     |
+|                               | `set_options` (narrowing deletes at once; options  |
+|                               | generation stops a pass listed with old options);  |
+|                               | off resets cloud, page text and the import list;   |
+|                               | Forget keeps the keep-out lists. Browser page text |
+|                               | needs its own switch AND `AGENT_WEB_SEARCH`, and is|
+|                               | fetched only while the #119 guard allows (Index now|
+|                               | too: else `deferred:` title-only rows).            |
+| `ai/knowledge_sources/`       | #137–#141 read-only readers (`imessage`,           |
+|                               | `calendar`, `notes`, `browser`, `ai_exports`), one |
+|                               | interface (`NAME`, `TITLE`, `DESCRIPTION`,         |
+|                               | `TAINT_LABEL`, `DEFAULT_OPTIONS`,                  |
+|                               | `validate_options`, `listing`, `choices`);         |
+|                               | `__init__.py` is the ordered registry. Browser page|
+|                               | text is a web_search ledger row, tool              |
+|                               | `knowledge_browser`.                               |
 | `ai/card_chat.py`             | #130 chat on idea / code cards: in-memory threads  |
 |                               | per request id (`CardChatStore`, dropped on close),|
 |                               | consent words answered without a model, idea chat  |
@@ -864,7 +891,9 @@ write-only; a save is mirrored into `os.environ` so it applies at once.
 |                               | send. Marks the turn (`TurnTaint.mark_retrieved`); |
 |                               | no Always-allow / countdown in such a turn; past   |
 |                               | chat indexed after the reply (without it when the  |
-|                               | turn used snippets).                               |
+|                               | turn used snippets). #137–#141 nouns: message,     |
+|                               | calendar event, note, web page, AI chat; card      |
+|                               | labels = each reader's `TAINT_LABEL` (`ai/taint`). |
 
 ## 5. Inference engines
 

@@ -80,7 +80,8 @@ def count(index, table, source):
 
 def test_all_sources_off_by_default_and_nothing_indexed(tmp_path, readers):
     index = make(tmp_path, readers)
-    assert [s["enabled"] for s in index.status()["sources"]] == [False] * 4
+    assert [s["enabled"] for s in index.status()["sources"]] == [False] * len(ki.SOURCES)
+    assert len(ki.SOURCES) == 9  # #134's four + #137–#141's five
     result = index.run_pass()
     assert result["sources"] == {}
     assert index.index_source("mail")["indexed"] == 0
@@ -226,18 +227,31 @@ def test_fts_only_fallback_without_vec_extension(tmp_path, readers, monkeypatch)
     assert index.search("acme invoice")[0]["item_id"] == "102"
 
 
-def test_no_imessage_source(tmp_path, readers):
-    assert "imessage" not in ki.SOURCES and "messages" not in ki.SOURCES
+def test_imessages_source_is_off_by_default_with_its_own_toggles(tmp_path, readers):
+    """#137 lifted #134's "no iMessages": the source exists, off by default,
+    with its own toggle and cloud toggle; a Messages FOLDER is still refused
+    (chat.db is read only through its own reader)."""
+    assert "imessages" in ki.SOURCES and "imessage" not in ki.SOURCES
     index = make(tmp_path, readers)
+    assert index.enabled("imessages") is False and index.cloud_allowed("imessages") is False
     with pytest.raises(ki.SourceError):
-        index.set_source_enabled("imessage", True)
+        index.set_cloud_allowed("imessages", True)  # off: no cloud
+    with pytest.raises(ki.SourceError):
+        index.set_source_enabled("imessage", True)  # the old name is still unknown
+    index.set_source_enabled("imessages", True)
+    assert index.enabled("imessages") and not index.enabled("mail")
+    index.set_cloud_allowed("imessages", True)
+    assert index.cloud_allowed("imessages") and not index.cloud_allowed("mail")
     messages = Path.home() / "Library" / "Messages"
     if messages.is_dir():
         with pytest.raises(ki.SourceError):
             ki.check_folder(str(messages))
-    index.settings.path.parent.mkdir(parents=True, exist_ok=True)
+    # The forbidden roots still name Messages, whatever exists on this Mac.
+    assert Path.home() / "Library" / "Messages" in ki._forbidden_roots()
     index.settings.path.write_text('{"sources": {"imessage": {"enabled": true}}}')
-    assert "imessage" not in [s["source"] for s in make(tmp_path, readers).status()["sources"]]
+    status = make(tmp_path, readers).status()["sources"]
+    assert "imessage" not in [s["source"] for s in status]
+    assert next(s for s in status if s["source"] == "imessages")["enabled"] is False
 
 
 def test_folders_index_files_and_removed_folder_loses_rows(tmp_path):
@@ -310,7 +324,7 @@ def test_routes(tmp_path, readers):
                                                       idle=lambda: 0.0)
     with TestClient(app) as c:
         body = c.get("/api/knowledge").json()
-        assert [s["enabled"] for s in body["sources"]] == [False] * 4
+        assert [s["enabled"] for s in body["sources"]] == [False] * len(ki.SOURCES)
         assert c.put("/api/knowledge/sources/imessage", json={"enabled": True}).status_code == 404
         assert c.put("/api/knowledge/sources/mail", json={"cloud": True}).status_code == 400
         assert c.put("/api/knowledge/sources/mail", json={"enabled": True}).status_code == 200
@@ -331,3 +345,60 @@ def test_routes(tmp_path, readers):
         index.run_pass()
         forgot = c.post("/api/knowledge/forget").json()
         assert forgot["deleted"] == 2 and not forgot["sources"][0]["enabled"]
+
+
+# ---- batch embedding (2026-11-20: a first pass made one model call per chunk) ----
+
+class _CountingEmbedder:
+    """A single-text embedder that also has the batch path (``many``)."""
+
+    def __init__(self):
+        self.single_calls = 0
+        self.batch_sizes: list[int] = []
+
+    def __call__(self, text: str) -> list[float]:
+        self.single_calls += 1
+        return word_embedder(text)
+
+    def many(self, texts: list[str]) -> list[list[float]]:
+        self.batch_sizes.append(len(texts))
+        return [word_embedder(t) for t in texts]
+
+
+def test_an_items_chunks_are_embedded_in_one_model_call(tmp_path, readers):
+    emb = _CountingEmbedder()
+    index = make(tmp_path, readers, embedder=emb)
+    index.set_source_enabled("mail", True)
+    index._conn()
+    if not index.vec_loaded:
+        pytest.skip("vec0 extension not available")
+    long_text = " ".join(f"Paragraph {i} about the lease renewal and the deposit." * 12
+                         for i in range(12))
+    item = ki.SourceItem(item_id="long", version="1", title="Long mail", text=long_text)
+    n_chunks = len(ki.chunk_text(long_text))
+    assert n_chunks >= 3
+    assert index._write_item("mail", item) is True
+    assert emb.batch_sizes == [n_chunks]  # one call for the whole item
+    assert emb.single_calls == 0
+    assert count(index, "chunks", "mail") == n_chunks
+    hits = index.search("lease renewal deposit")
+    assert hits and hits[0]["item_id"] == "long"
+
+
+def test_a_plain_embedder_without_a_batch_path_still_works(tmp_path, readers):
+    index = make(tmp_path, readers)  # word_embedder: a bare function
+    index._conn()
+    if not index.vec_loaded:
+        pytest.skip("vec0 extension not available")
+    vecs = index._embed_many(["alpha beta", "gamma delta"])
+    assert len(vecs) == 2 and all(v is not None for v in vecs)
+
+
+def test_encode_is_called_without_a_progress_bar():
+    import inspect
+
+    from ai import memory
+
+    for fn in (memory._st_embed, memory._st_embed_many, ki.local_embedder):
+        src = inspect.getsource(fn)
+        assert src.count(".encode(") == src.count("show_progress_bar=False"), fn.__name__

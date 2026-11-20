@@ -118,6 +118,16 @@ KNOWLEDGE_SOURCE_NOUNS: Mapping[str, str] = {
     "mail": "email", "folders": "file", "chats": "past chat",
     "meeting_notes": "meeting note",
 }
+# #137–#141: each registry source's ``TAINT_LABEL`` (ai/knowledge_sources/;
+# kept literal here so this module imports nothing of the index;
+# tests/test_knowledge_sources_wiring.py checks they match).
+KNOWLEDGE_SOURCE_LABELS: Mapping[str, str] = {
+    "imessages": "indexed message",
+    "calendar": "indexed calendar event",
+    "apple_notes": "indexed note",
+    "browser_history": "indexed web page",
+    "ai_chats": "imported AI chat",
+}
 
 FROM_YOU = "from you"
 FROM_ASSISTANT = "written by the assistant"
@@ -399,9 +409,11 @@ class TurnTaint:
         for snip in snippets or ():
             if not isinstance(snip, Mapping):
                 continue
-            noun = KNOWLEDGE_SOURCE_NOUNS.get(str(snip.get("source") or ""), "item")
+            source = str(snip.get("source") or "")
+            phrase = KNOWLEDGE_SOURCE_LABELS.get(source) or (
+                f"indexed {KNOWLEDGE_SOURCE_NOUNS.get(source, 'item')}")
             title = _short(snip.get("title"))
-            label = f"indexed {noun} \u201c{title}\u201d" if title else f"an indexed {noun}"
+            label = f"{phrase} \u201c{title}\u201d" if title else f"an {phrase}"
             self._add(KNOWLEDGE_KIND, label, [snip.get("title"), snip.get("text")])
             marked = True
         return marked
