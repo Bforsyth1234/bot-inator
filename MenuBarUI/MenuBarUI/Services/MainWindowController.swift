@@ -63,7 +63,9 @@ final class MainWindowController {
         window.title = "bot-inator"
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
-        window.contentMinSize = NSSize(width: 760, height: 520)
+        // 820: the main sidebar (190) plus Settings' own category sidebar
+        // (170) and a 440-wide form (#135).
+        window.contentMinSize = NSSize(width: 820, height: 520)
         // Remembered size and place; the first time, most of the screen.
         if !window.setFrameUsingName(Self.frameName) {
             window.setContentSize(Self.defaultSize())

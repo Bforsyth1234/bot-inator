@@ -51,6 +51,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// #87: one delivery model (Pause, Inbox, settings) shared by the menu,
     /// the Inbox tab, Settings and Debug.
     let delivery = DeliveryViewModel()
+    /// #142: the Chat page's turns live as long as the app, so a reply that
+    /// arrives while the page is off screen is still there on return.
+    let chat = ChatViewModel()
     private var deliveryRefresh: AnyCancellable?
     private let approvalPresenter = ApprovalPresenter()
     /// Quick-ask panel (#74), opened by the global hotkey.
@@ -73,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             MainWindowView(watchMe: { [unowned self] in self.demonstration.toggleRecording() })
                 .environmentObject(self.ws)
                 .environmentObject(self.delivery)
+                .environmentObject(self.chat)
                 .environmentObject(self.mainWindowRouter)
                 .appTextSize()
         )
@@ -98,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         DaemonLauncher.shared.start()
         // #96: the new-version check, only when turned on in Settings.
         UpdateChecker.shared.startIfEnabled()
+        chat.attach(to: ws)  // #142: before connect, so the first frames count
         ws.connect()
         approvalPresenter.attach(to: ws)
         // The daemon sends a status frame whenever Pause, held offers or the

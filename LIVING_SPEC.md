@@ -149,6 +149,12 @@ sandboxed dry run and the critic onto a fresh code-review card (7b). The
 thread lives in memory only and is dropped when the card closes; it uses
 the daemon's existing engines under the existing privacy and ledger rules.
 
+**Stop (#143).** Stopping a chat turn never approves anything: a card the
+turn opened is withdrawn (resolved as not approved, closed in the app and its
+phone code killed) and nothing on it runs; no further tool call or model
+output of the turn can act. A call already approved and running is allowed to
+finish, and the stopped reply says that it completed.
+
 **iPhone remote (amendment to 7a and 7c, user decisions 2026-11-10, item
 #85).** 7a: a reply `yes <code>` / `no <code>` sent from the user's own
 devices (`is_from_me = 1`, iMessage service, in the own thread only) is
@@ -338,7 +344,8 @@ Server → client: `status`, `thought`, `approval_request`,
 `code_approval_request`, `tool_result`, `error`.
 Client → server: `approval_response`, `code_approval_response`,
 `command` (`pause_listeners`, `resume_listeners`, `reload_model`,
-`clear_memory`, `reload_dynamic_tools`).
+`clear_memory`, `reload_dynamic_tools`, `chat_cancel` (#143, with
+`message_id`)).
 Wave 15 fields (all optional, absent from older daemons):
 `approval_request.origin_notes` `[str]` (#81) and `reversible` (#83);
 `code_approval_request.previous_code` (#90: a repair's diff base);
@@ -358,9 +365,10 @@ Calendar (#60): server → client `calendar_request`; client → server
 `calendar_response`, `calendar_status` (see the Calendar flow below).
 Wave 16 frames:
 - **`approval_resolved`** (server → client, #85) `{request_id, outcome:
-  approved | declined | timed_out, note?}`: sent for every card once it is
+  approved | declined | timed_out | withdrawn, note?}`: sent for every card once it is
   answered (from any window or the phone) or times out; a client still
-  showing that card closes it without answering.
+  showing that card closes it without answering. `withdrawn` (#143): the
+  chat turn that opened it was stopped; also sent for a code-review card.
 - `notice.action` may be `{kind: "undo", entry_id}` (#78): the "Done
   automatically" notice of a standing-rule run; the banner's Undo calls
   `POST /api/rules/runs/{entry_id}/undo`. `open_settings` keeps
@@ -404,6 +412,15 @@ clients) is `{front_app?, window_title?, selection?, selection_source?
 turn's prompt; it is never stored (not in `memory.log_chat`, not in the
 recall query), and under a cloud main engine without the personal-text
 opt-in the selection is replaced by a "kept on this Mac" line (7c).
+Stop (#143): client → server `command` `{action: "chat_cancel", message_id}`.
+The daemon runs each chat turn as its own task keyed by `message_id` (turns
+stay one at a time); `chat_cancel` stops it: open cards get
+`approval_resolved` `withdrawn`, a call already approved and running
+finishes, then a `complete` thought and the assistant `chat_log` row carry
+the stopped reply (it starts with "Stopped."; the knowledge index keeps that
+turn's question only). An unknown or finished id is a no-op; an id still
+queued ends as stopped when it comes up. The Chat window's send button is
+Stop while a turn is pending (Esc too), and so is Quick Ask's.
 
 Thought stages: `event_received` → `analysis` (optional) → `memory`
 (optional) → `reasoning` → `plan` → `tool_result` → `complete`. The

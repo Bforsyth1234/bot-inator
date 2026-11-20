@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import threading
+from pathlib import Path
 from typing import Any, AsyncIterator, Iterator, Optional
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,57 @@ def _clear_cache_fn(mx: Any) -> Any:
     return clear if callable(clear) else None
 
 
+def local_model_bytes(model_name: str, cache_dir: Optional[Path] = None) -> Optional[int]:
+    """Bytes ``model_name`` takes on disk, from this Mac only (no network).
+
+    A local folder: the size of its files. A Hugging Face repo id: the size
+    of its snapshot in the local cache (``refs/main``'s, else the only one).
+    ``None`` when unknown: not a folder, not in the cache, or no
+    ``*.safetensors`` weights there yet (#136).
+    """
+    try:
+        folder = Path(model_name).expanduser()
+        if folder.is_dir():
+            snapshot = folder
+        else:
+            if cache_dir is None:
+                from .egress_log import _hf_cache_dir  # noqa: WPS433
+                cache_dir = _hf_cache_dir()
+            repo = Path(cache_dir) / ("models--" + model_name.replace("/", "--"))
+            snaps = repo / "snapshots"
+            ref = repo / "refs" / "main"
+            snapshot = None
+            if ref.is_file():
+                candidate = snaps / ref.read_text(encoding="utf-8").strip()
+                if candidate.is_dir():
+                    snapshot = candidate
+            if snapshot is None and snaps.is_dir():
+                dirs = [d for d in snaps.iterdir() if d.is_dir()]
+                if len(dirs) == 1:
+                    snapshot = dirs[0]
+            if snapshot is None:
+                return None
+        total, weights, seen = 0, False, set()
+        for entry in snapshot.rglob("*"):
+            try:
+                real = entry.resolve()
+                if not real.is_file() or real in seen:
+                    continue
+                seen.add(real)
+                total += real.stat().st_size
+                weights = weights or entry.suffix == ".safetensors"
+            except OSError:
+                continue
+        return total if weights and total > 0 else None
+    except Exception:
+        return None
+
+
+def _first_line(exc: BaseException, limit: int = 240) -> str:
+    text = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 class MLXEngine:
     """Async wrapper around mlx-lm for local inference on Apple Silicon.
 
@@ -125,9 +177,17 @@ class MLXEngine:
     supports_adapters: bool = True
 
     def __init__(
-        self, model_name: str = DEFAULT_MODEL, adapter_path: Optional[str] = None
+        self, model_name: str = DEFAULT_MODEL, adapter_path: Optional[str] = None,
+        fallback_model: Optional[str] = None,
     ) -> None:
         self.model_name: str = model_name
+        # #136: if ``model_name`` (as configured) fails to load, load
+        # ``fallback_model`` (the default for this role) instead, but only
+        # when it is already on this Mac: a fallback never downloads.
+        # ``load_error`` says what failed ("" once a load succeeds).
+        self._configured_model: str = model_name
+        self.fallback_model: Optional[str] = fallback_model
+        self.load_error: str = ""
         self.adapter_path: Optional[str] = str(adapter_path) if adapter_path else None
         self._model: Any = None
         self._tokenizer: Any = None
@@ -378,14 +438,45 @@ class MLXEngine:
 
         from . import egress_log
 
-        def _do_load() -> tuple[Any, Any]:
+        def _do_load(name: str) -> tuple[Any, Any]:
             # #82: a first load downloads the weights from Hugging Face.
-            with egress_log.model_download(model_name):
+            with egress_log.model_download(name):
                 if adapter:
-                    return load(model_name, adapter_path=adapter)
-                return load(model_name)
+                    return load(name, adapter_path=adapter)
+                return load(name)
 
-        self._model, self._tokenizer = await asyncio.to_thread(_do_load)
+        try:
+            self._model, self._tokenizer = await asyncio.to_thread(_do_load, model_name)
+            if model_name == self._configured_model:
+                self.load_error = ""  # a later reload of the fallback keeps it
+        except Exception as exc:
+            fallback = self.fallback_model
+            if not (fallback and not adapter and fallback != model_name
+                    and model_name == self._configured_model):
+                self.load_error = f"{model_name} failed to load: {_first_line(exc)}"
+                raise
+            if local_model_bytes(fallback) is None:
+                self.load_error = (
+                    f"{model_name} failed to load: {_first_line(exc)}. The default "
+                    f"{fallback} is not downloaded, so nothing was loaded."
+                )
+                raise
+            # #136: a typo'd id must not leave the engine without a model.
+            logger.exception("MLX model %s failed to load; using the default %s",
+                             model_name, fallback)
+            try:
+                self._model, self._tokenizer = await asyncio.to_thread(_do_load, fallback)
+            except Exception as fallback_exc:
+                self.load_error = (
+                    f"{model_name} failed to load: {_first_line(exc)}. The default "
+                    f"{fallback} failed too: {_first_line(fallback_exc)}"
+                )
+                raise
+            self.model_name = model_name = fallback
+            self.load_error = (
+                f"{self._configured_model} failed to load: {_first_line(exc)}. "
+                f"Using the default {fallback}."
+            )
         self._loaded = True
         logger.info("MLX model loaded: %s", model_name)
 

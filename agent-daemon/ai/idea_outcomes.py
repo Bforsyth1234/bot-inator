@@ -68,7 +68,9 @@ MAX_PATTERN_KEYS = 8
 
 # "expired": a held offer (#87) that ran out of shelf life unseen; never
 # counted as shown or decided.
-VERDICTS = ("approved", "declined", "timed_out", "expired")
+# "withdrawn" (#143): shown, then taken back because the user stopped the
+# chat request; shown but never decided (not a decline).
+VERDICTS = ("approved", "declined", "timed_out", "expired", "withdrawn")
 DECISIONS = ("approved", "denied", "edited")
 
 _SOURCE_ALIASES = {"open-help": "open_help", "next-step": "next_step",
@@ -317,7 +319,7 @@ class OutcomeStore(_JsonStore):
 
     def _summarize(self, offers: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         row = {"shown": 0, "approved": 0, "declined": 0, "timed_out": 0,
-               "kept": 0, "not_kept": 0, "pending": 0, "expired": 0}
+               "kept": 0, "not_kept": 0, "pending": 0, "expired": 0, "withdrawn": 0}
         for offer in offers:
             verdict = offer.get("verdict")
             if verdict == "expired":

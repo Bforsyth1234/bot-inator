@@ -26,7 +26,7 @@ def test_the_drafting_prompt_names_the_limits_and_the_builtins() -> None:
     prompt = _drafting_system_prompt()
     assert "Sandbox limits" in prompt
     for builtin in ("quit_app(app_name)", "take_screenshot(path)",
-                    "list_recent_emails(count, mailbox)", "read_email(message_id)"):
+                    "list_recent_emails(count, mailbox, since, until)", "read_email(message_id)"):
         assert builtin in prompt, builtin
     assert "CANNOT quit or close apps" in prompt
     assert "CANNOT read Mail's messages" in prompt

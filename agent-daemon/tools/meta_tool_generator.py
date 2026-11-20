@@ -114,7 +114,7 @@ Sandbox limits (CRITICAL — your tool runs under macOS sandbox-exec; these fail
   - quit / close an app: the built-in `quit_app(app_name)`;
   - take a screenshot or screen capture: the built-in `take_screenshot(path)`;
   - look at the screen or a window and describe or read what it shows (charts, images, layouts, text in a picture): the built-in `look_at_screen(question, target)`;
-  - list recent emails: the built-in `list_recent_emails(count, mailbox)`; one email's body: `read_email(message_id)`.
+  - list recent emails: the built-in `list_recent_emails(count, mailbox, since, until)`; one email's body: `read_email(message_id)`.
   - search the web or read a web page: the built-ins `web_search(query, limit)` and `fetch_page(url)` (the user's own switch and privacy ledger apply there, so never write a search or scraping tool);
   - look up a person's email address or phone number: the built-in `find_contact(name, limit)` (Contacts access belongs to the menu bar app);
   - what happened on a past day, or what the assistant did this week: the built-ins `recall_activity(day, until, kind)` and `weekly_report(weeks_ago)`.

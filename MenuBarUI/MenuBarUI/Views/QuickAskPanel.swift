@@ -115,6 +115,8 @@ final class QuickAskModel: ObservableObject {
     @Published private(set) var reply: String?
     @Published private(set) var progress: String?
     @Published private(set) var isPending = false
+    /// #143: the ask was stopped (optimistic, then the daemon's reply).
+    @Published private(set) var stopped = false
 
     private let ws: WebSocketManager
     private let send: QuickAskSend
@@ -164,6 +166,7 @@ final class QuickAskModel: ObservableObject {
         reply = nil
         progress = nil
         isPending = false
+        stopped = false
         messageId = nil
     }
 
@@ -206,12 +209,25 @@ final class QuickAskModel: ObservableObject {
         reply = nil
         progress = "thinking…"
         isPending = true
+        stopped = false
         draft = ""
         // The selection was for this one message.
         screen.selection = nil
         clipboardText = nil
         includeSelection = false
         includeWindowText = false
+    }
+
+    /// #143: Stop the running ask. "Stopped." shows at once; the daemon's
+    /// `complete` confirms it (or, if the answer beat the Stop, replaces it).
+    /// A second press does nothing.
+    func stop() {
+        guard isPending, let messageId else { return }
+        ws.sendChatCancel(messageId)
+        isPending = false
+        stopped = true
+        progress = nil
+        reply = ChatTranscript.stoppedText
     }
 
     private func ingest(_ messages: [WSMessage]) {
@@ -227,6 +243,7 @@ final class QuickAskModel: ObservableObject {
                 reply = payload.content
                 progress = nil
                 isPending = false
+                stopped = ChatTranscript.isStoppedReply(payload.content)
             case .plan:
                 progress = "planning…"
             case .toolResult:
@@ -271,6 +288,12 @@ struct QuickAskView: View {
                 .onSubmit { model.submit() }
             if model.isPending {
                 ProgressView().controlSize(.small)
+                // #143: Stop (Esc stops too while it runs; see the panel).
+                Button(action: model.stop) {
+                    Image(systemName: "stop.circle.fill").foregroundStyle(.red)
+                }
+                .buttonStyle(.borderless)
+                .help("Stop (Esc)")
             }
             Button(action: close) {
                 Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
@@ -362,7 +385,11 @@ struct QuickAskView: View {
             }
             ScrollView {
                 Group {
-                    if let reply = model.reply {
+                    if let reply = model.reply, model.stopped {
+                        Label(reply, systemImage: "stop.circle")
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    } else if let reply = model.reply {
                         Text(reply)
                             .textSelection(.enabled)
                     } else {
@@ -439,7 +466,11 @@ final class QuickAskPanelController {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.onCancel = { [weak self] in self?.close() }
+        // #143: Esc stops a running ask; otherwise it closes the panel.
+        panel.onCancel = { [weak self] in
+            guard let self else { return }
+            if self.model.isPending { self.model.stop() } else { self.close() }
+        }
         let root = QuickAskView(model: model) { [weak self] in self?.close() }
             .appTextSize()
         let hosting = NSHostingController(rootView: root)

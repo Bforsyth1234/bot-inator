@@ -83,7 +83,9 @@ ENV_PATH = "AGENT_TRAINING_DB"
 ENABLED_KEY = "AGENT_TRAINING_CORPUS"
 KEEP_MAIL_TEXT_KEY = "AGENT_TRAINING_KEEP_MAIL_TEXT"
 
-VERDICTS = ("approved", "denied", "edited", "timed_out")
+VERDICTS = ("approved", "denied", "edited", "timed_out", "withdrawn")
+# "withdrawn" (#143): the chat turn was stopped while the card was open; not
+# the user's decision, so like a timeout it says nothing either way.
 # Verdicts a model can learn from (#119: approved/edited -> target,
 # denied/undone -> negative). A timeout says nothing either way.
 TRAINABLE_VERDICTS = ("approved", "denied", "edited")

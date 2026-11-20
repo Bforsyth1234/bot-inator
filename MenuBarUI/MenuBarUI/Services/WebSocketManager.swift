@@ -236,6 +236,18 @@ final class WebSocketManager: ObservableObject {
         send(msg)
     }
 
+    /// #143: Stop the chat turn `messageId` (the id `sendUserMessage`
+    /// returned). Harmless to repeat; the daemon ignores an id that is not
+    /// running.
+    func sendChatCancel(_ messageId: String) {
+        let msg = WSMessage.command(
+            seq: nextSeq(),
+            timestamp: Date(),
+            payload: CommandPayload(action: .chatCancel, messageId: messageId)
+        )
+        send(msg)
+    }
+
     /// #84: the user's one sentence for the stopped recording, and the
     /// steps they removed.
     func sendDemonstrationDraft(_ payload: DemonstrationDraftPayload) {
@@ -452,6 +464,10 @@ final class WebSocketManager: ObservableObject {
                 // timed out: the open card closes without sending anything.
                 if pendingApproval?.payload.requestId == payload.requestId {
                     pendingApproval = nil
+                }
+                // #143: a code card withdrawn by Stop closes the same way.
+                if pendingCodeApproval?.payload.requestId == payload.requestId {
+                    pendingCodeApproval = nil
                 }
             case .notice(_, _, let payload):
                 showNotice(payload)

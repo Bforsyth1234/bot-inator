@@ -97,7 +97,10 @@ def test_mail_watcher_emits_new_received_mail_only(tmp_path) -> None:
     assert ev.metadata["sender"] == "Alice Example <alice@example.com>"
     assert ev.metadata["mailbox"] == "INBOX"
     assert ev.metadata["message_id"] == 2
-    assert ev.metadata["date"].startswith("2025-11-09T")
+    # #144: local time with offset, so compare the instant (any zone).
+    from datetime import datetime
+    stamp = datetime.fromisoformat(ev.metadata["date"])
+    assert stamp.tzinfo is not None and stamp.timestamp() == 1762711200
     assert set(ev.metadata) == {"sender", "subject", "date", "mailbox", "message_id", "bulk"}
 
 

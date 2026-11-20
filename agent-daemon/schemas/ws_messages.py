@@ -99,7 +99,9 @@ class ApprovalResponsePayload(BaseModel):
     auto_approved: bool = False
 
 
-ApprovalOutcome = Literal["approved", "declined", "timed_out"]
+# "withdrawn" (#143): the chat turn that opened the card was stopped; the
+# card is resolved NOT approved and nothing on it runs.
+ApprovalOutcome = Literal["approved", "declined", "timed_out", "withdrawn"]
 
 
 class ApprovalResolvedPayload(BaseModel):
@@ -423,6 +425,8 @@ CommandAction = Literal[
     "demonstration_start",
     "demonstration_stop",
     "demonstration_cancel",
+    # #143: stop the chat turn ``message_id`` (a no-op when it is not running).
+    "chat_cancel",
 ]
 
 
@@ -434,6 +438,8 @@ class CommandPayload(BaseModel):
     action: CommandAction
     # Only for ``pause_listeners`` (#87); ``None`` means "indefinite".
     duration: PauseDuration | None = None
+    # Only for ``chat_cancel`` (#143): the ``user_message`` to stop.
+    message_id: str | None = Field(default=None, max_length=128)
 
 
 # "window" (#89): the user ticked "include this window's text"; the app sends

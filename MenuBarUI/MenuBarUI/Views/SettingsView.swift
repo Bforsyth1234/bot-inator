@@ -25,6 +25,9 @@ struct DaemonSettings: Codable, Equatable {
     var cloudPersonalText: Bool?
     // OpenAI-compatible presets (#97). Optional so an older daemon decodes.
     var presets: [ProviderPreset]?
+    // #136: local MLX model per engine, and the memory note.
+    var mlxModels: [String: LocalModelInfo]?
+    var mlxMemoryNote: String?
 
     enum CodingKeys: String, CodingKey {
         case provider
@@ -44,6 +47,8 @@ struct DaemonSettings: Codable, Equatable {
         case lockedFields = "locked_fields"
         case cloudPersonalText = "cloud_personal_text"
         case presets
+        case mlxModels = "mlx_models"
+        case mlxMemoryNote = "mlx_memory_note"
     }
 }
 
@@ -62,6 +67,8 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var cloudPersonalText = false
     // Per-preset form state (#97), keyed by preset id.
     @Published var presetForms: [String: PresetForm] = [:]
+    // #136: the "Local models" fields (sent by Save).
+    let localModels = LocalModelsForm()
 
     private let baseURL: URL
     private let session: URLSession
@@ -255,6 +262,7 @@ final class SettingsViewModel: ObservableObject {
             presetSettings[preset.id] = fields.filter { !preset.lockedFields.contains($0.key) }
         }
         if !presetSettings.isEmpty { body["preset_settings"] = presetSettings }
+        body.merge(localModels.pendingChanges()) { _, new in new }  // #136
 
         isBusy = true
         defer { isBusy = false }
@@ -319,6 +327,7 @@ final class SettingsViewModel: ObservableObject {
         providerAnalysis = s.providerAnalysis ?? ""
         providerDrafting = s.providerDrafting ?? ""
         cloudPersonalText = s.cloudPersonalText ?? false
+        localModels.load(s.mlxModels, memoryNote: s.mlxMemoryNote)  // #136
         // Fresh form per preset from what is saved; typed keys are dropped
         // (never kept after a save), fetched model lists are kept.
         for preset in s.presets ?? [] {
@@ -343,48 +352,187 @@ final class SettingsViewModel: ObservableObject {
 }
 
 struct SettingsView: View {
+    /// Above the split view: every category and the search share it, so an
+    /// unsaved provider edit survives switching category or searching (#135).
     @StateObject private var viewModel = SettingsViewModel()
     /// #87: shared with the menu and the Inbox (MenuBarUIApp).
     @EnvironmentObject private var delivery: DeliveryViewModel
 
+    @State private var category: SettingsCategory? = .general
+    @State private var query = ""
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// Sections a search showed a second copy of (see `searchResults`).
+    @State private var shownInSearch: Set<SettingsSectionID> = []
+    /// Bumped for a section to rebuild its category copy after a search.
+    @State private var generation: [SettingsSectionID: Int] = [:]
+
+    private var trimmedQuery: String { SettingsSearch.normalize(query) }
+    private var isSearching: Bool { !trimmedQuery.isEmpty }
+    private var selectedCategory: SettingsCategory { category ?? .general }
+
     var body: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebar
+                .navigationSplitViewColumnWidth(min: 170, ideal: 200, max: 260)
+                // The main window's own sidebar toggle is enough.
+                .toolbar(removing: .sidebarToggle)
+        } detail: {
+            VStack(spacing: 0) {
+                ZStack {
+                    // Every category stays built, only the selected one is
+                    // shown: a section's own unsaved state (typed text, a
+                    // loaded list) survives switching category, as it did
+                    // in the single Form.
+                    ForEach(SettingsCategory.allCases) { c in
+                        let shown = !isSearching && c == selectedCategory
+                        categoryForm(c)
+                            .opacity(shown ? 1 : 0)
+                            .allowsHitTesting(shown)
+                            .accessibilityHidden(!shown)
+                            .disabled(!shown)
+                    }
+                    if isSearching {
+                        searchResults
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Divider()
+                saveBar
+            }
+            .disabled(viewModel.isBusy)
+        }
+        .frame(minWidth: 610, minHeight: 360)
+        .task { await viewModel.refresh() }
+        .onChange(of: trimmedQuery) { _, newValue in
+            if newValue.isEmpty {
+                // The search copies may have changed what their category
+                // copies show; rebuild those so they load fresh.
+                for id in shownInSearch { generation[id, default: 0] += 1 }
+                shownInSearch = []
+            } else {
+                shownInSearch.formUnion(visibleMatches.map(\.id))
+            }
+        }
+    }
+
+    // MARK: Sidebar
+
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            searchField
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+            List(selection: $category) {
+                ForEach(SettingsCategory.allCases) { c in
+                    Label(c.title, systemImage: c.symbol)
+                        .appFont(.body)
+                        .tag(c)
+                }
+            }
+            .listStyle(.sidebar)
+        }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search settings", text: $query)
+                .textFieldStyle(.plain)
+                .appFont(.body)
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Clear the search")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary))
+    }
+
+    // MARK: Detail
+
+    private func categoryForm(_ c: SettingsCategory) -> some View {
         Form {
+            ForEach(SettingsSearch.entries(in: c)) { entry in
+                // A new generation is a new identity: the section is built
+                // again and loads what is saved now.
+                ForEach([generation[entry.id] ?? 0], id: \.self) { _ in
+                    section(entry.id)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// Matches that have something to show (presets only when an engine
+    /// uses one).
+    private var visibleMatches: [SettingsEntry] {
+        SettingsSearch.filter(trimmedQuery).filter(isAvailable)
+    }
+
+    private func isAvailable(_ entry: SettingsEntry) -> Bool {
+        switch entry.id {
+        case .presets: return !viewModel.presetsInUse.isEmpty
+        case .localModels: return viewModel.editedEngines.values.contains("local")
+        default: return true
+        }
+    }
+
+    /// Matches from every category, each under its category name. These
+    /// are second copies of the sections (a view can't be in two places);
+    /// the provider sections read `viewModel`, so they are the same edits.
+    /// Other sections load from the daemon when they appear here, and their
+    /// category copies are rebuilt when the search is cleared.
+    private var searchResults: some View {
+        let groups = SettingsSearch.grouped(visibleMatches)
+        return Form {
+            if groups.isEmpty {
+                Section {
+                    Text("No settings match \"\(query.trimmingCharacters(in: .whitespacesAndNewlines))\"")
+                        .appFont(.body)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ForEach(groups, id: \.category) { group in
+                Section {
+                } header: {
+                    Label(group.category.title, systemImage: group.category.symbol)
+                        .appFont(.title3)
+                        .foregroundStyle(.primary)
+                }
+                ForEach(group.entries) { entry in
+                    section(entry.id)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// The view for one section. Each case is one of the old Form's
+    /// sections, unchanged.
+    @ViewBuilder
+    private func section(_ id: SettingsSectionID) -> some View {
+        switch id {
+        case .appearance:
             Section("Appearance") {
                 TextSizePicker()
             }
+        case .app:
             // #96: bundled daemon, start at login, new-version check.
             AppLifecycleSettingsView()
+        case .mainWindow:
             MainWindowSettingsView()
-
-            Section("Inference provider") {
-                Picker("Provider", selection: $viewModel.provider) {
-                    ForEach(viewModel.providerChoices, id: \.id) { choice in
-                        Text(choice.label).tag(choice.id)
-                    }
-                }
-                .disabled(viewModel.isLocked("provider"))
-                if let running = viewModel.runningSummary {
-                    Text("Running now: \(running)")
-                        .appFont(.secondary)
-                        .foregroundStyle(.secondary)
-                }
-                lockedNote("provider", env: "AGENT_PROVIDER")
-                DisclosureGroup("Per engine") {
-                    enginePicker("Main (agent)", field: "provider_main",
-                                 env: "AGENT_PROVIDER_MAIN",
-                                 selection: $viewModel.providerMain)
-                    enginePicker("Analysis", field: "provider_analysis",
-                                 env: "AGENT_PROVIDER_ANALYSIS",
-                                 selection: $viewModel.providerAnalysis)
-                    enginePicker("Drafting (new tools)", field: "provider_drafting",
-                                 env: "AGENT_PROVIDER_DRAFTING",
-                                 selection: $viewModel.providerDrafting)
-                }
-                if viewModel.showsPersonalTextToggle {
-                    personalTextToggle
-                }
-            }
-
+        case .provider:
+            providerSection
+        case .presets:
             ForEach(viewModel.presetsInUse, id: \.preset.id) { item in
                 ProviderPresetSection(
                     preset: item.preset, roles: item.roles,
@@ -393,85 +541,139 @@ struct SettingsView: View {
                     test: { await viewModel.testPreset(item.preset.id, role: item.roles[0]) }
                 )
             }
-
-            DailyBriefSettingsView()
-            WeeklyReportView()
-            MeetingPrepSettingsView()
-            // Wave 16: meeting notes (#86), "Watch me" shortcut (#84),
-            // iPhone remote (#85).
-            MeetingNotesSettingsView()
-            QuickAskSettingsView()
-            RecordShortcutSettingsView()
-            RemoteSettingsView()
-            ActivityHistorySettingsView()
+        case .localModels:
+            LocalModelsSection(form: viewModel.localModels, engines: viewModel.editedEngines)
+        case .vision:
             // #107: which model look_at_screen asks.
             VisionSettingsView()
+        case .webSearch:
             WebSearchSettingsView()
+        case .dailyBrief:
+            DailyBriefSettingsView()
+        case .weeklyReport:
+            WeeklyReportView()
+        case .meetingPrep:
+            MeetingPrepSettingsView()
+        case .meetingNotes:
+            // #86
+            MeetingNotesSettingsView()
+        case .quickAsk:
+            QuickAskSettingsView()
+        case .watchMe:
+            // #84
+            RecordShortcutSettingsView()
+        case .watches:
+            // #88
+            Section("Watch for…") {
+                WatchesView()
+            }
+        case .delivery:
+            // #87: right-moment delivery.
+            Section("Delivery") {
+                DeliverySettingsView(viewModel: delivery)
+            }
+        case .remote:
+            // #85
+            RemoteSettingsView()
+        case .permissions:
             PermissionsView()
-
+        case .rules:
             // #78: "always do this" rules the user turned on.
             Section("Standing rules") {
                 RulesView()
             }
+        case .alwaysAllow:
             // #116: "Always allow" pressed on a card; revoke here.
             Section("Always allow") {
                 AlwaysAllowView()
             }
+        case .knowledge:
+            // #134: what Chat may search (the local knowledge index); off by default.
+            Section {
+                KnowledgeIndexSettingsView()
+            }
+        case .activityHistory:
+            ActivityHistorySettingsView()
+        case .actionHistory:
+            // #83: what the assistant did, with Undo.
+            Section("History") {
+                ActionHistoryView()
+            }
+        case .privacyLedger:
+            // #82: what left this Mac.
+            PrivacyLedgerView()
+        case .trainingData:
             // #118: opt-in training corpus for a personal model.
             Section("Training data") {
                 TrainingDataView()
                 // #119: progress of a personal-model run (polls the daemon).
                 TrainingProgressView()
             }
+        case .personalModel:
             // #120: use the personal model (only after it beats the original) or go back.
             Section("Personal model") {
                 PersonalModelView()
             }
-            // #134: what Chat may search (the local knowledge index); off by default.
-            Section {
-                KnowledgeIndexSettingsView()
-            }
+        }
+    }
 
-            // Wave 15: watches (#88), right-moment delivery (#87), what the
-            // assistant did with Undo (#83), what left this Mac (#82).
-            Section("Watch for…") {
-                WatchesView()
-            }
-            Section("Delivery") {
-                DeliverySettingsView(viewModel: delivery)
-            }
-            Section("History") {
-                ActionHistoryView()
-            }
-            PrivacyLedgerView()
-
-            Section {
-                if let error = viewModel.errorMessage {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
+    private var providerSection: some View {
+        Section("Inference provider") {
+            Picker("Provider", selection: $viewModel.provider) {
+                ForEach(viewModel.providerChoices, id: \.id) { choice in
+                    Text(choice.label).tag(choice.id)
                 }
-                if let status = viewModel.statusMessage {
-                    Text(status).foregroundStyle(.secondary)
-                }
-                HStack {
-                    Button("Save") { Task { await viewModel.save() } }
-                        .keyboardShortcut(.defaultAction)
-                    if viewModel.saved?.restartRequired == true {
-                        Button("Restart Daemon") { Task { await viewModel.restart() } }
-                            .disabled(viewModel.saved?.canRestart != true)
-                            .help(viewModel.saved?.canRestart == true
-                                  ? "Restart the daemon so the saved settings take effect"
-                                  : "Daemon runs with --reload; restart it from its terminal")
-                    }
-                    Spacer()
-                    if viewModel.isBusy { ProgressView().controlSize(.small) }
-                }
+            }
+            .disabled(viewModel.isLocked("provider"))
+            if let running = viewModel.runningSummary {
+                Text("Running now: \(running)")
+                    .appFont(.secondary)
+                    .foregroundStyle(.secondary)
+            }
+            lockedNote("provider", env: "AGENT_PROVIDER")
+            DisclosureGroup("Per engine") {
+                enginePicker("Main (agent)", field: "provider_main",
+                             env: "AGENT_PROVIDER_MAIN",
+                             selection: $viewModel.providerMain)
+                enginePicker("Analysis", field: "provider_analysis",
+                             env: "AGENT_PROVIDER_ANALYSIS",
+                             selection: $viewModel.providerAnalysis)
+                enginePicker("Drafting (new tools)", field: "provider_drafting",
+                             env: "AGENT_PROVIDER_DRAFTING",
+                             selection: $viewModel.providerDrafting)
+            }
+            if viewModel.showsPersonalTextToggle {
+                personalTextToggle
             }
         }
-        .formStyle(.grouped)
-        .disabled(viewModel.isBusy)
-        .frame(minWidth: 440, minHeight: 360)
-        .task { await viewModel.refresh() }
+    }
+
+    /// One Save for every category, visible whatever is selected or typed.
+    private var saveBar: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let error = viewModel.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            }
+            if let status = viewModel.statusMessage {
+                Text(status).foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("Save") { Task { await viewModel.save() } }
+                    .keyboardShortcut(.defaultAction)
+                if viewModel.saved?.restartRequired == true {
+                    Button("Restart Daemon") { Task { await viewModel.restart() } }
+                        .disabled(viewModel.saved?.canRestart != true)
+                        .help(viewModel.saved?.canRestart == true
+                              ? "Restart the daemon so the saved settings take effect"
+                              : "Daemon runs with --reload; restart it from its terminal")
+                }
+                Spacer()
+                if viewModel.isBusy { ProgressView().controlSize(.small) }
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
     }
 
     /// Off by default (invariant 7c). Saved as soon as it is flipped.
