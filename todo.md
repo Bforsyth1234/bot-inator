@@ -73,7 +73,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #133
+Next ID: #134
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -542,6 +542,34 @@ Build in order: #118, #119, #121, #120 (#120's gate calls #121's suites). Code f
 `MLXEngine` already swaps models under a lock; `DecisionLog` and
 `OutcomeStore` (#79) hold verdicts and edit facts but no prompt or card
 text, and `ActionJournal` (#83) stores ids and paths only, on purpose.
+
+### Evals
+
+#133 — LLM-as-judge scorer for evals, plus a first judged suite (email drafts) [ ]
+Wave: _ · Agent: _ · Added: 2026-11-19 · Source: user
+Ask: "can i use llm as a judge" → "add llm as a judge to the todo.md".
+Today (2026-11-19, read from the source, not run): every eval suite scores with rules. `tool_calls` and `safety` check the tool name and argument matches (`{"contains": ...}` in `evals/cases/*.json`); `idea_judge` measures the app's own idea filter against a labelled pass/drop. Nothing scores free text, so a drafted email body, the weekly report or a chat answer can get worse without any eval noticing. `evals/run.py` exits 1 only on errors, never on a lower score.
+DECISIONS (assistant proposal, 2026-11-19; the user can overturn any):
+1. The judge is only for output with no single right answer. `tool_calls` and `safety` keep their rule checks: they are cheaper, give the same result every run, and are more reliable than a judge.
+2. Each rubric line is a yes/no question about the output ("Is it addressed to the sender?"), not a 1–10 score. A case passes only if every line passes. The judge writes a one-line reason before each verdict; reasons go in the result file.
+3. The judge must be a different model from the one under test. `--judge-provider` / `--judge-model` flags; the run refuses if they match the model under test.
+4. The judge can use a cloud provider because eval cases are made-up data, not the user's. It is used only by `evals/run.py` and never inside the daemon, so invariant 7c is unchanged. Not available inside `ai/model_eval.py` (#120 gate): that gate runs on the user's Mac with local-only data.
+5. Judge calls repeat like the case runs (`--repeats`), so a flaky judge shows up as a flaky case.
+6. Before any judged suite counts, check the judge against hand labels: about 20 outputs graded by the user, judge agreement ≥ 85%. Below that, fix the rubric first. The labels live in a cases file so the check can be re-run.
+Files (expected):
+⚬ OWNED: new `evals/judge.py` (rubric scorer: prompt, yes/no + reason parse, refuse same-model), new `evals/suites/email_draft.py` (one agent turn with a stubbed incoming email, capture `draft_email` args, score `body` / `subject` with the judge), new `evals/cases/email_draft.json` (~10 cases, each with a `rubric` list), new `evals/cases/judge_calibration.json` (hand labels), new `tests/test_eval_judge.py`.
+⚬ EDITED: `evals/run.py` (`--judge-provider`, `--judge-model`, `--min-accuracy` → exit 1 below it; judge reasons in results), `evals/suites/__init__.py` (`SUITES` += `email_draft`).
+⚬ Do NOT touch: `ai/model_eval.py`, any daemon code.
+Approach: `judge.py` exposes `async score(output, rubric, engine) -> {"ok", "lines": [{"q", "verdict", "reason"}]}`. Prompt asks for one JSON object per line; a parse failure counts as "no" with reason "unparseable", never as a pass. `email_draft` reuses `tool_calls.run_case`'s stub-tools pattern and takes the body from the captured `draft_email` call. Fallback if the agent turn is too slow or flaky to drive: call the drafting role directly with the email text and judge its reply.
+Verify:
+⚬ New test: `score()` with a fake judge engine returning yes/yes/no → `ok` false and the failing line named; non-vacuous: make `score` ignore verdicts, test fails.
+⚬ New test: unparseable judge reply → that line is "no"; non-vacuous: treat parse failure as pass, test fails.
+⚬ New test: same provider + model for judge and run → refused with a clear error.
+⚬ New test: `--min-accuracy 0.9` with 0.8 accuracy → exit 1; non-vacuous: drop the check, exit 0.
+⚬ Live (batched, rule 11): run `python -m evals.run --suite email_draft --judge-provider groq` once; user grades the calibration set; record agreement in this item.
+⚬ pytest gate (rule 8).
+Later (not this item): judged suites for the weekly report (#128) and meeting prep; a scheduled CI eval job once there is CI.
+Deviations:
 
 ### Security and providers
 
