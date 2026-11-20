@@ -317,6 +317,19 @@ def test_view_offers_cloud_presets_and_says_what_leaves(client):
     by_id = {c["id"]: c for c in view["choices"]}
     assert by_id["local"]["leaves_mac"].startswith("Nothing")
     assert "Only tool drafts" in by_id["mixed"]["leaves_mac"]
+    assert "2 minutes" in by_id["cloud"]["ready"]
+    assert by_id["local"]["ready"].startswith("Ready")
     assert "Privacy ledger" in view["ledger_line"]
     assert view["recommended"]["choice"] in ("local", "cloud")
     assert next(p for p in view["presets"] if p["id"] == "groq")["note"]
+
+
+def test_ready_line_says_what_is_left_to_download(monkeypatch):
+    from routes import first_run as route
+
+    monkeypatch.setattr(route.first_run, "local_download_bytes",
+                        lambda models: {"total": 8_000_000_000, "done": 3_000_000_000, "unknown": []})
+    assert "5.0 GB download" in route._ready_line(["a/b"])
+    monkeypatch.setattr(route.first_run, "local_download_bytes",
+                        lambda models: {"total": 8_000_000_000, "done": 8_000_000_000, "unknown": []})
+    assert route._ready_line(["a/b"]).startswith("Ready now")

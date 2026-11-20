@@ -11,8 +11,10 @@ struct FirstRunChoice: Codable, Identifiable, Equatable {
     var id: String
     var title: String
     var leavesMac: String
+    /// How soon this choice can start (download left, or a key away).
+    var ready: String?
     enum CodingKeys: String, CodingKey {
-        case id, title
+        case id, title, ready
         case leavesMac = "leaves_mac"
     }
 }
@@ -256,6 +258,9 @@ struct FirstRunView: View {
                                 .padding(.horizontal, 6).padding(.vertical, 1)
                                 .background(Capsule().fill(Color.accentColor.opacity(0.2)))
                         }
+                    }
+                    if let ready = c.ready {
+                        Text(ready).appFont(.secondary)
                     }
                     Text("Leaves this Mac: \(c.leavesMac)")
                         .appFont(.secondary).foregroundStyle(.secondary)

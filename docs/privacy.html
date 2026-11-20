@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy · bot-inator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a class="name" href="./">bot-inator</a>
+  <nav>
+    <a href="https://github.com/Bforsyth1234/bot-inator">GitHub</a>
+    <a href="privacy.html">Privacy</a>
+    <a href="terms.html">Terms</a>
+  </nav>
+</header>
+<main>
+  <h1>Privacy Policy</h1>
+  <p class="muted">Last updated November 19, 2026</p>
+
+  <p>The short version: bot-inator runs on your Mac and I don't collect anything. There are no accounts, no analytics and no crash reporting, and the app doesn't send anything to me.</p>
+
+  <h2>What stays on your Mac</h2>
+  <p>To make suggestions, the app reads things on your Mac: file names and contents in folders it watches, mail and iMessages, calendar events, and which app is in front. It keeps its settings, history and the tools it writes in <code>~/.bot-inator</code> on your Mac. macOS asks for your permission before the app can read mail, messages, calendars or other protected data, and you can take that permission back in System Settings at any time.</p>
+  <p>With the default <strong>Local</strong> setup, the models run on your Mac and none of this data leaves it.</p>
+
+  <h2>When data leaves your Mac</h2>
+  <p>Only in these cases, each one something you turn on:</p>
+  <ul>
+    <li><strong>Cloud key or Mixed setup.</strong> Prompts go to the provider you pick (for example OpenAI, Anthropic, Google, xAI, Groq or OpenRouter) using your own API key. With Cloud key that includes event summaries, chat and tool drafts. With Mixed it is only tool drafts. Message and email text is replaced before it's sent unless you turn that on in Settings. That provider's own privacy policy covers what it does with the data.</li>
+    <li><strong>Model downloads.</strong> If you choose to download local models, they come from Hugging Face. That's a download request; your data isn't sent.</li>
+    <li><strong>Web search</strong> (off by default). If you turn it on and add a Brave Search key, search queries go to Brave and pages you ask it to read are fetched directly.</li>
+    <li><strong>iPhone remote</strong> (off by default). If you turn it on, card and answer text is sent through Apple's iMessage to your own number.</li>
+  </ul>
+  <p>Every request that leaves the Mac is listed in <strong>Settings → Privacy ledger</strong>, so you can check.</p>
+
+  <h2>Downloads and the website</h2>
+  <p>The app and this website are hosted on GitHub. GitHub may log requests when you visit this page or download a release; see <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>. This site has no cookies or trackers of its own.</p>
+
+  <h2>Removing your data</h2>
+  <p>Quit the app, delete <code>bot-inator.app</code>, and delete the <code>~/.bot-inator</code> folder. Downloaded models are in <code>~/.cache/huggingface</code>.</p>
+
+  <h2>Changes and contact</h2>
+  <p>If this policy changes, the new version will be posted here with a new date. Questions: <a href="https://github.com/Bforsyth1234/bot-inator/issues">open an issue on GitHub</a>.</p>
+</main>
+<footer>
+  <a href="./">Home</a>
+  <a href="terms.html">Terms of Service</a>
+  <a href="https://github.com/Bforsyth1234/bot-inator">GitHub</a>
+</footer>
+</body>
+</html>
