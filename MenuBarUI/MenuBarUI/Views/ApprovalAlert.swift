@@ -14,6 +14,8 @@ struct ApprovalAlert: View {
     var countdown: AutoApproveCountdown? = nil
 
     @State private var userNote: String = ""
+    /// #130: the idea card's chat (replaces the note field when offered).
+    @StateObject private var chat = CardChatModel()
     @State private var values: [String: String] = [:]
     @State private var populated = false
     @State private var showTechnical = false
@@ -43,7 +45,7 @@ struct ApprovalAlert: View {
     private var windowHeight: CGFloat {
         let base: CGFloat = toolIdeaSummary != nil ? 580
             : bundleActions.map(BundleCard.windowHeight) ?? (spec?.windowHeight ?? 480)
-        let extra: CGFloat = countdown != nil ? 40 : 0
+        let extra: CGFloat = (countdown != nil ? 40 : 0) + (chatOn ? 170 : 0)
         return min(ApprovalEditSpec.maxWindowHeight, ((base + extra) * textSize.layoutScale).rounded())
     }
 
@@ -74,7 +76,11 @@ struct ApprovalAlert: View {
                             argsSection
                         }
                     }
-                    noteSection
+                    if chatOn {
+                        chatSection
+                    } else {
+                        noteSection
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 // Room for focus rings, which a scroll view would clip.
@@ -90,8 +96,48 @@ struct ApprovalAlert: View {
         .padding(18)
         .frame(width: 520, height: windowHeight)
         .stopsCountdown(countdown)
-        .onAppear(perform: populate)
+        .onAppear {
+            chat.requestId = payload.requestId
+            populate()
+        }
     }
+
+    /// #130: the daemon offers a chat on this card (tool ideas).
+    private var chatOn: Bool { payload.chat == true }
+
+    /// The plan as changed in chat (what Approve builds), then the thread.
+    private var chatSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let plan = chat.plan {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Plan changed in chat", systemImage: "arrow.triangle.2.circlepath")
+                        .appFont(.secondary, weight: .semibold)
+                        .foregroundStyle(.blue)
+                    Text(plan.description)
+                        .appFont(.body, weight: .semibold)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(plan.expectedLogic)
+                        .appFont(.body)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Approve builds this plan. The summary above describes the first version.")
+                        .appFont(.fine)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            }
+            CardChatView(model: chat, title: "Ask about this idea",
+                         placeholder: "What will it touch? Can it do less?",
+                         onActivity: { countdown?.stop() })
+        }
+    }
+
+    /// The note sent with the decision: none when the card has a chat.
+    private var decisionNote: String { chatOn ? "" : userNote }
 
     private var header: some View {
         HStack(spacing: 10) {
@@ -319,7 +365,7 @@ struct ApprovalAlert: View {
             if let label = alwaysAllowLabel, let onAlwaysAllow {
                 Button {
                     countdown?.stop()
-                    onAlwaysAllow(userNote, currentEditedArgs)
+                    onAlwaysAllow(decisionNote, currentEditedArgs)
                 } label: {
                     Label(label, systemImage: "checkmark.seal")
                         .lineLimit(1)
@@ -331,7 +377,7 @@ struct ApprovalAlert: View {
             Spacer()
             Button(role: .destructive) {
                 countdown?.stop()
-                onDecision(false, userNote, nil)
+                onDecision(false, decisionNote, nil)
             } label: {
                 Label("Deny", systemImage: "xmark.circle.fill")
             }
@@ -339,11 +385,12 @@ struct ApprovalAlert: View {
 
             Button {
                 countdown?.stop()
-                onDecision(true, userNote, currentEditedArgs)
+                onDecision(true, decisionNote, currentEditedArgs)
             } label: {
                 Label(approveLabel, systemImage: "checkmark.circle.fill")
             }
-            .keyboardShortcut(.defaultAction)
+            // #130: Return in the chat field must never approve the card.
+            .keyboardShortcut(chatOn ? nil : KeyboardShortcut.defaultAction)
             .buttonStyle(.borderedProminent)
             .disabled(!approveEnabled)
         }
@@ -372,6 +419,7 @@ struct ApprovalAlert: View {
     }
 
     private var approveEnabled: Bool {
+        if chatOn && chat.blocksApproval { return false }  // #130: a reply may change the card
         if let actions = bundleActions {
             return BundleCard.isComplete(actions, ticks: ticks, values: actionValues)
         }

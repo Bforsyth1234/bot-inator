@@ -32,6 +32,8 @@ Hook helpers (called by the runner at each egress site):
 * :func:`record_tool_run` for an MCP tool call or a network-enabled
   sandboxed tool.
 * :func:`record_open_url` for ``open_url``.
+* :func:`record_knowledge_send` when Chat put knowledge-index snippets in a
+  cloud engine's prompt (#134; ``ai/knowledge_retrieval.py``).
 * :func:`model_download` (context manager) around a model load that may
   download weights.
 * :func:`trusted_tool_run` (context manager) around a call of a generated
@@ -104,6 +106,11 @@ KINDS = KINDS | {KIND_IMESSAGE_IMAGE}
 # provider, or the page's host; each redirect hop is its own row).
 KIND_WEB_SEARCH = "web_search"
 KINDS = KINDS | {KIND_WEB_SEARCH}
+
+# #134 part 2: snippets from the local knowledge index went into a Chat
+# prompt for a cloud engine (one row per send: sources + count, never text).
+KIND_KNOWLEDGE = "knowledge_snippets"
+KINDS = KINDS | {KIND_KNOWLEDGE}
 
 NOTHING_TODAY = "Nothing left this Mac today"
 LIMIT_NOTE = (
@@ -738,6 +745,30 @@ def record_web_search(
         return (log or default_log()).record(
             KIND_WEB_SEARCH, host_of(url), None, None, bytes_out, bytes_in,
             None, text, tool=tool, note=note,
+        )
+    except Exception:
+        logger.exception("egress record failed")
+        return False
+
+
+def record_knowledge_send(
+    *, sources: Any, count: int, host: Optional[str] = None,
+    model: Optional[str] = None, bytes_out: int = 0, role: str = "main",
+    log: Optional[EgressLog] = None,
+) -> bool:
+    """#134: ``count`` knowledge-index snippets from ``sources`` went to a
+    cloud engine in a Chat prompt (decision 6). The row names the sources and
+    the count; the snippet text is NEVER stored, keep-text or not (the
+    inference row for the same call follows the keep-text switch). Never
+    raises."""
+    try:
+        names = sorted({str(s) for s in (sources or ()) if str(s)})
+        n = max(0, int(count or 0))
+        note = (f"{n} snippet{'s' if n != 1 else ''} from your knowledge index"
+                f" ({', '.join(names) or 'none'}) in a Chat prompt")
+        return (log or default_log()).record(
+            KIND_KNOWLEDGE, host, role, model, bytes_out, 0, PERSONAL_SENT, None,
+            note=note,
         )
     except Exception:
         logger.exception("egress record failed")

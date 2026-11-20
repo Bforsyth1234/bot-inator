@@ -53,6 +53,9 @@ from . import (
 from . import standing_rules
 from . import always_allow as always_allow_mod
 from . import card_batch
+from . import card_chat as card_chat_mod  # #130
+from . import knowledge_retrieval  # #134 part 2
+from .delivery import BYPASS_KEY as DELIVERY_BYPASS_KEY
 from . import needs_reply as reply_checks
 
 # #117: an undoable card approves itself after this many seconds, only
@@ -459,7 +462,10 @@ class Orchestrator:
 
         self._ws_send: Optional[WSSendCallable] = None
         self._subscribers: set[WSSendCallable] = set()
-        self._seq: int = 0
+        # #132: seeded from the clock (microseconds) so seq only grows across
+        # daemon restarts; the app keeps frames from earlier runs. ~1.8e15,
+        # well inside Swift Int (2^63) and JSON-safe doubles (2^53).
+        self._seq: int = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
         self._task: Optional[asyncio.Task[None]] = None
         self._pending: dict[str, asyncio.Future[ApprovalResponsePayload]] = {}
         self._pending_code: dict[
@@ -543,6 +549,10 @@ class Orchestrator:
         self.mcp_manager: Optional[Any] = None
         # #81 injection shield: what outside text the current turn read.
         self._taint = taint.TurnTaint()
+        # #130: ``ai.card_chat.CardChatStore`` (set by main.py): the chat on
+        # idea / code cards. Never resolves a card except a code rewrite,
+        # which resolves it as NOT approved.
+        self.card_chat: Optional[Any] = None
         # #83: ``ai.action_journal.ActionJournal`` (set by main.py).
         self.action_journal: Optional[Any] = None
         # #90: ``ai.tool_health.ToolHealthLog`` (set by main.py).
@@ -672,6 +682,11 @@ class Orchestrator:
 
     def submit_approval_response(self, payload: ApprovalResponsePayload) -> bool:
         """Resolve a pending approval. Returns ``True`` if a waiter was found."""
+        chat = getattr(self, "card_chat", None)
+        if payload.approved and chat is not None and chat.blocks_approval(payload.request_id):
+            # #130: a chat reply is in flight; the card may be about to change.
+            logger.info("Approval %s refused: card chat busy", payload.request_id)
+            return False
         fut = self._pending.pop(payload.request_id, None)
         if fut is None or fut.done():
             return False
@@ -682,6 +697,13 @@ class Orchestrator:
         self, payload: CodeApprovalResponsePayload
     ) -> bool:
         """Resolve a pending code-approval. Mirrors :meth:`submit_approval_response`."""
+        chat = getattr(self, "card_chat", None)
+        if chat is not None:
+            # #130: a Deny on a card whose chat rewrite runs cancels it.
+            chat.note_code_response(payload.request_id, bool(payload.approved))
+            if payload.approved and chat.blocks_approval(payload.request_id):
+                logger.info("Code approval %s refused: card chat busy", payload.request_id)
+                return False
         fut = self._pending_code.pop(payload.request_id, None)
         if fut is None or fut.done():
             return False
@@ -697,6 +719,8 @@ class Orchestrator:
         event_id: Optional[str] = None,
         summary: Optional[str] = None,
         previous_code: Optional[str] = None,
+        chat_rewrite: bool = False,
+        replaces_request_id: Optional[str] = None,
     ) -> CodeApprovalResponsePayload:
         """Prompt the user to review AI-generated Python source.
 
@@ -713,6 +737,17 @@ class Orchestrator:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[CodeApprovalResponsePayload] = loop.create_future()
         self._pending_code[request_id] = fut
+        # #130: the card's chat. ``chat_rewrite``: the caller re-drafts when
+        # the chat asks for a change (the card is then resolved NOT approved
+        # and its code goes back through the code gate).
+        chat = getattr(self, "card_chat", None)
+        if chat is not None:
+            chat.open_code(
+                request_id, tool_name=tool_name, description=description, code=code,
+                summary=summary, shield=getattr(self, "_taint", None),
+                rewritable=chat_rewrite,
+                replace=lambda: self._replace_code_card(request_id),
+            )
         msg = CodeApprovalRequest(
             seq=self._next_seq(),
             timestamp=_now_iso(),
@@ -725,6 +760,8 @@ class Orchestrator:
                 summary=summary or None,
                 previous_code=previous_code or None,
                 timeout_seconds=int(self.code_approval_timeout),
+                chat=True if chat is not None else None,
+                replaces_request_id=replaces_request_id or None,
             ),
         )
         await self._send(msg)
@@ -747,6 +784,21 @@ class Orchestrator:
             return CodeApprovalResponsePayload(
                 request_id=request_id, approved=False
             )
+        finally:
+            if chat is not None:
+                chat.close(request_id)  # #130: the thread is not kept
+
+    def _replace_code_card(self, request_id: str) -> bool:
+        """#130: the card's chat asked for a code change. Resolve the card as
+        NOT approved (its Approve can no longer install anything); the
+        generator re-drafts and shows a new card. False if already closed."""
+        fut = self._pending_code.pop(request_id, None)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(CodeApprovalResponsePayload(
+            request_id=request_id, approved=False, user_note=card_chat_mod.REPLACED_NOTE,
+        ))
+        return True
 
     # ---- dynamic tool loading ----------------------------------------
 
@@ -1376,6 +1428,9 @@ class Orchestrator:
             ctx,
             redact_selection=privacy.should_redact("main"),
         )
+        # #134: snippets from the user's own index (unchanged when none).
+        found = await knowledge_retrieval.for_chat(self, text, event_id)
+        prompt = found.apply(prompt)
         await self._emit_thought(
             event_id, "reasoning", f"Prompt: {prompt[:200]}"
         )
@@ -1394,7 +1449,9 @@ class Orchestrator:
         if shield is not None:
             shield.begin_turn("chat", user_text=text)
             shield.mark_context(ctx)
+            shield.mark_retrieved(found.snippets)  # #134: outside text
         self._turn_kind = "chat"
+        found.record_send()  # #134: ledger row when they go to a cloud engine
         result = await self._run_agent(event_id, prompt, max_steps=6)
         reply = str(result) if result is not None else ""
 
@@ -1417,6 +1474,7 @@ class Orchestrator:
                 f"Auto-rerun with {pending}: {rerun_prompt[:160]}",
             )
             self._rerun_tool_name = pending
+            found.record_send()
             try:
                 result = await self._run_agent(event_id, rerun_prompt, max_steps=6)
             finally:
@@ -1441,6 +1499,10 @@ class Orchestrator:
             except Exception:
                 logger.exception("idea source %r observe_chat failed", source)
 
+        # #134: a past chat for the index (before the reply is logged, so a
+        # background pass never indexes a reply that was kept out).
+        await knowledge_retrieval.index_turn(self, event_id, text, reply,
+                                             used_retrieval=bool(found))
         if self.memory is not None and reply:
             try:
                 await asyncio.to_thread(
@@ -1905,6 +1967,8 @@ class Orchestrator:
             auto_allowed = bool(
                 not bypass and allow_store is not None
                 and allow_store.allows(tool_name, trigger)
+                # #134 (7a): retrieved text never skips a card.
+                and not knowledge_retrieval.used_this_turn(shield)
             )
             batcher = getattr(orchestrator, "card_batcher", None)
             if (
@@ -2423,7 +2487,18 @@ class Orchestrator:
         if getattr(self, "always_allow", None) is not None and len(set(card_tools)) == 1 \
                 and always_allow_mod.eligible(card_tools[0], trigger):
             allow_label = always_allow_mod.describe(card_tools[0], trigger)
-        auto_seconds = self._countdown_seconds(all_undoable)
+        auto_seconds = (  # #134 (7a): retrieved text never shortens a card
+            None if knowledge_retrieval.used_this_turn(getattr(self, "_taint", None))
+            else self._countdown_seconds(all_undoable)
+        )
+        # #130: an idea card carries a chat thread (in memory, this card only).
+        chat = getattr(self, "card_chat", None)
+        chat_on = chat is not None and tool_name == "generate_custom_tool" and not actions
+        if chat_on:
+            chat.open_idea(
+                request_id, tool_args=tool_args, summary=summary,
+                origin_notes=origin_notes, shield=getattr(self, "_taint", None),
+            )
 
         msg = ApprovalRequest(
             seq=self._next_seq(),
@@ -2448,21 +2523,30 @@ class Orchestrator:
                 outside_sandbox=tool_name in getattr(self, "_unsandboxed_tools", ()),
                 always_allow_label=allow_label,
                 auto_approve_seconds=auto_seconds,
+                chat=True if chat_on else None,
             ),
         )
         offer_id = self._record_offer_shown(tool_name, tool_args)
         self._note_card_source(offer_id)
         delivery = getattr(self, "delivery", None)
-        if delivery is not None and getattr(self, "_turn_kind", "") == "event":
-            # #87: an ambient turn's card counts toward the daily cap.
+        if delivery is not None and getattr(self, "_turn_kind", "") == "event" and not (
+            getattr(self, "_current_event_meta", None) or {}
+        ).get(DELIVERY_BYPASS_KEY):
+            # #87: an ambient turn's card counts toward the daily cap; one the
+            # user opened (Show on a held offer, the Inbox) does not (#131).
             try:
                 delivery.note_ambient_card()
             except Exception:
                 logger.exception("delivery.note_ambient_card failed")
         await self._send(msg)
 
+        chat_plan: Optional[dict[str, str]] = None
         try:
             resp = await asyncio.wait_for(fut, timeout=timeout)
+            if chat_on:
+                # #130: Approve builds the plan the chat changed (shown on the
+                # card) and hands the thread to the build once.
+                chat_plan = chat.finish_idea(request_id, approved=bool(resp.approved))
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
             logger.info("Approval %s timed out", request_id)
@@ -2476,6 +2560,8 @@ class Orchestrator:
             await self._send_approval_resolved(request_id, "timed_out")
             return False, None
         finally:
+            if chat_on:
+                chat.close(request_id)  # #130: the thread is not kept
             if remote is not None:
                 try:
                     remote.forget(request_id)
@@ -2525,6 +2611,8 @@ class Orchestrator:
                 }},
                 bool(resp.approved),
             )
+        if chat_plan and resp.approved and not resp.edited_args:
+            return True, card_chat_mod.plan_edits(tool_args, chat_plan)
         return bool(resp.approved), resp.edited_args
 
     def _countdown_seconds(self, all_undoable: bool) -> Optional[int]:

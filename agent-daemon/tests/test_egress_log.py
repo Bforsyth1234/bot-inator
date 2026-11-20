@@ -311,6 +311,10 @@ EXEMPT: dict[str, str] = {
     # #112: a unix socket to the daemon's per-call sandbox relay, not the
     # network; the relayed call's row is McpManager.call_tool's (above).
     "tools/mcp.py": "AF_UNIX socket to the sandbox relay only",
+    # #134: loads MiniLM only from a snapshot already in the local cache
+    # (``local_files_only=True``); it never downloads. The download, when
+    # there is one, is ai/memory.py's ``_load_st_model`` (above).
+    "ai/knowledge_index.py": "local_files_only model load, no download",
 }
 
 

@@ -81,3 +81,11 @@ os.environ.setdefault(
     "AGENT_TOOL_TRUST_PATH",
     os.path.join(_tempfile.mkdtemp(prefix="bot-inator-w18-"), "tool_trust.json"),
 )
+# Wave 29 (#134 part 2): the app lifespan creates the default knowledge index;
+# keep the developer's real ~/.bot-inator/knowledge.db and
+# knowledge_index.json out of tests.
+_wave29_tmp = _tempfile.mkdtemp(prefix="bot-inator-w29-")
+os.environ.setdefault("AGENT_KNOWLEDGE_DB", os.path.join(_wave29_tmp, "knowledge.db"))
+os.environ.setdefault(
+    "AGENT_KNOWLEDGE_SETTINGS_PATH", os.path.join(_wave29_tmp, "knowledge_index.json")
+)

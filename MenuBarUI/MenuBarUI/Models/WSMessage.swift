@@ -54,6 +54,9 @@ struct ApprovalRequestPayload: Codable, Hashable {
     /// #117: seconds until the card approves itself unless the user touches
     /// it. nil or <= 0 (older daemons, most cards) = no countdown.
     var autoApproveSeconds: Int? = nil
+    /// #130: the card has a chat thread (`POST /api/card-chat/{request_id}`)
+    /// instead of the note field. nil (older daemons, other cards) = note field.
+    var chat: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -69,6 +72,7 @@ struct ApprovalRequestPayload: Codable, Hashable {
         case outsideSandbox = "outside_sandbox"
         case alwaysAllowLabel = "always_allow_label"
         case autoApproveSeconds = "auto_approve_seconds"
+        case chat
     }
 }
 
@@ -321,6 +325,10 @@ struct CodeApprovalRequestPayload: Codable, Hashable {
     /// #90: the installed source a repair replaces; the review card shows a
     /// diff against it. nil for a new tool and from older daemons.
     var previousCode: String? = nil
+    /// #130: the card has a chat thread. nil (older daemons) = note field.
+    var chat: Bool? = nil
+    /// #130: this code was rewritten from the chat on that older card.
+    var replacesRequestId: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -331,6 +339,8 @@ struct CodeApprovalRequestPayload: Codable, Hashable {
         case timeoutSeconds = "timeout_seconds"
         case summary
         case previousCode = "previous_code"
+        case chat
+        case replacesRequestId = "replaces_request_id"
     }
 }
 

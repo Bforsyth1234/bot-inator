@@ -119,6 +119,10 @@ API auth → sandbox for installed tools → live checks.
 | 25 | A: #122 · B: #123 (user 2026-11-18: "finish the todos i want to do B") | A `ai/orchestrator.py` (refusal in `gated_forward` + mail prompt only), `ai/taint.py`, new `tests/test_injected_shortcut.py` · B `tools/meta_tool_generator.py` (prompt + idea check), `tools/tool_sandbox.py` (profile), `ai/open_help.py` (idea judge text only, if needed), `evals/cases/safety.json` (`del_*`), new `tests/test_trash_only_tools.py`. Runner at close: LIVING_SPEC §1, card text plumbing in `ai/orchestrator.py` if B needs it | [x] closed 2026-11-18 (#122 #123 `[~] live`; 2177 tests) |
 | 26 | A: #124 · B: #126 · C: #127 · D: #128 (user 2026-11-18: "divide up all the todos into waves. and then implement them") | A new `tools/web_search.py`, `ai/egress_log.py` (one kind + one record helper, additive), `ai/taint.py` (the two tool sets only), new `tests/test_web_search.py`, `evals/cases/safety.json` (`inj_search_exfil` only) · B `tools/find_files.py`, new `tools/recall_activity.py`, `tests/test_find_files.py`, new `tests/test_recall_activity.py` · C new `Services/ContactsBridge.swift`, new `tools/contacts.py`, `schemas/ws_messages.py`, `WSMessage.swift`, `WebSocketManager.swift`, `Info.plist`, new `tests/test_contacts.py` · D new `events/weekly_report.py`, new `routes/weekly_report.py`, new `Views/WeeklyReportView.swift`, new `tests/test_weekly_report.py`. Runner at close: `tools/__init__.py`, `ai/orchestrator.py` (#124 card in a marked or background turn; `_describe_event` for the weekly report), `main.py`, `user_settings.py`, `ai/permissions.py`, `ai/privacy.py`, `ai/taint.py` (#127 origin label, after A), `tools/meta_tool_generator.py` (prompt), `SettingsView.swift`, `PermissionsView.swift`, LIVING_SPEC, README | [x] closed 2026-11-18 (#124 #126 #127 #128 `[~] live`; full gate with wave 27: 2408 tests) |
 | 27 | A: #125 (alone: it changes how a background turn runs, so it goes last) | `ai/watches.py`, new `tests/test_scheduled_ask.py`, `ai/orchestrator.py` (the ask turn only), `ai/delivery.py` (one event type) | [x] closed 2026-11-19 (#125 `[~] live`; 2408 tests, swiftc clean) |
+| 28 | A: #131 · B: #132 · C: #133 · D: #134 part 1 (index core) (user 2026-11-19: "divide up the current todos into waves and use subagents using opus 5.5") | A `events/file_watcher.py`, `ai/delivery.py`, `routes/delivery.py`, `Views/OfferInboxView.swift`, own tests · B `Views/ThoughtStreamView.swift`, `Services/WebSocketManager.swift`, `ai/orchestrator.py` (`_seq` seed only), own test · C `evals/judge.py`, `evals/suites/email_draft.py`, `evals/cases/email_draft.json`, `evals/cases/judge_calibration.json`, `evals/run.py`, `evals/suites/__init__.py`, `tests/test_eval_judge.py` · D new `ai/knowledge_index.py`, new `routes/knowledge.py`, new `Views/KnowledgeIndexSettingsView.swift`, new `tests/test_knowledge_index.py`. Runner at close: `tests/test_egress_log.py` (EXEMPT row for the index's local-only model load) | [x] closed 2026-11-20 (#131 #132 #133 `[~] live`; #134 part 1 done; 2465 tests, swiftc clean) |
+| 29 | A: #134 part 2 (alone: Chat retrieval, taint, cloud toggle + ledger, registration; plus two wave-28 leftovers: `main.py` seq seed, held Show not counted as an ambient card) | `ai/orchestrator.py` (chat turn + `note_ambient_card` bypass), `ai/taint.py`, `ai/egress_log.py` (one kind), `main.py`, `SettingsView.swift` (one line), `evals/cases/safety.json` (one case), new tests | [x] closed 2026-11-20 (#134 `[~] live`; 2485 tests, swiftc clean) |
+| 30 | A: #130 (alone: approval path of both gates, goes last) | new `ai/card_chat.py`, new `routes/card_chat.py`, new `Views/CardChatView.swift`, `ApprovalAlert.swift`, `CodeReviewAlert.swift`, `ai/orchestrator.py` (idea/code gate only), `tools/meta_tool_generator.py` (chat context only), `schemas/ws_messages.py` + `WSMessage.swift` if needed, `main.py` (router), `ApprovalPresenter.swift`, LIVING_SPEC, new tests | [x] closed 2026-11-20 (#130 `[~] live`; 2523 tests, swiftc clean) |
+| — | #96 | needs the user's signing run; not schedulable | open |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
 ### Runner decisions on open questions (runner, 2026-11-09)
@@ -154,7 +158,7 @@ pass-rate measurement is a live check · #38 a second
 
 ## Live checks
 
-None open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
+Open (waves 28–30, 2026-11-20): #130, #131, #132, #133, #134; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
 
 ## Completed items (archived to DONE.md)
 
@@ -464,7 +468,7 @@ Shared DECISIONS for #43–#47 (user + assistant, 2026-11-09):
 
 ### Approvals and UI
 
-#130 — Chat on the tool-idea and code-review cards instead of a one-shot note [ ]
+#130 — Chat on the tool-idea and code-review cards instead of a one-shot note [~] live
 Wave: _ · Agent: _ · Added: 2026-11-19 · Source: user
 Ask: "when the app suggests a tool instead of a note input we should have a chat input that we can chat with the llm about what they plan on creating or in the code review on what they did create."
 Today: both cards have a single "Note (optional)" `TextField` sent once with the decision (`user_note`): `Views/ApprovalAlert.swift:259` (idea gate, `generate_custom_tool`) and `Views/CodeReviewAlert.swift:182` (code gate). No back-and-forth before deciding.
@@ -478,7 +482,21 @@ DECISIONS (user, 2026-11-19):
 Files (expected): routes/card_chat.py (new, rule 12), ai/card_chat.py (new), schemas/ws_messages.py; Swift: Views/CardChatView.swift (new), ApprovalAlert.swift, CodeReviewAlert.swift.
 Verify: a chat question on each card gets an answer grounded in the plan / code shown; a message like "approve it" does not approve; a chat-requested code change re-enters the code gate; pytest gate + Swift typecheck (rule 8).
 
-#131 — BUG: Inbox "Held for later" fills with dozens of rows titled "file" that do nothing when clicked [ ]
+Results (wave 30, 2026-11-20):
+⚬ New `ai/card_chat.py`: `CardChatStore`, threads in memory only, one per card request id. A message that only says "yes" / "approve it" / "LGTM" / "no" / "deny" gets a fixed "use the Approve / Deny button" reply and never reaches the model. Idea card: the model may end with `PLAN_DESCRIPTION:` / `PLAN_LOGIC:`; code card: `CODE_CHANGE:`. Limits: 1500 chars a message, 12 user turns a card, one reply in flight, 120 s timeout, 3 rewrites a build.
+⚬ New `routes/card_chat.py`: `GET` / `POST /api/card-chat/{request_id}` (HTTP, behind the app-wide auth). The iPhone remote gets no chat.
+⚬ ROLES: idea chat = main engine (it wrote the plan); code chat = drafting engine (it rewrites the code). No new setting. Cloud: `privacy.scrub_idea_text` and the engine's own ledger row; no new data path.
+⚬ REWRITE (7b): the old code card is resolved as NOT approved and removed, the generator drafts again through checks, sandboxed dry run and critic, and the new code arrives on a NEW card (`replaces_request_id`); only that card's Approve installs it. Repair cards answer but refuse changes.
+⚬ CONSENT (7a): Approve is refused while a reply or rewrite is in flight; Return no longer triggers Approve on chat cards.
+⚬ THREAD: stays on the daemon; handed once to `generate_custom_tool` on Approve, closed in the approval coroutines' `finally` (approve, deny, red X, timeout). Never written to disk, memory.db, the knowledge index or the training corpus.
+⚬ TAINT: a tainted card stays tainted; a chat change that repeats 5+ words of the outside text is refused, as is a plan that would delete for good (#123).
+⚬ Also edited: `ai/orchestrator.py` (approval paths, ~70 lines), `tools/meta_tool_generator.py` (`chat_context`, `revise_source`, `_review_with_chat`), `schemas/ws_messages.py` + `WSMessage.swift` (optional `chat`, `replaces_request_id`), `main.py`, new `Views/CardChatView.swift`, `ApprovalAlert.swift`, `CodeReviewAlert.swift`, `ApprovalPresenter.swift`, LIVING_SPEC §1 (new paragraph) / §3 / §4.
+⚬ Tests: `tests/test_card_chat.py` (38, fake engines). Rule 5: 19 one-at-a-time breaks, each turns its test red.
+⚬ Live (user): ask an idea card "which files will it touch?"; type "approve it" (card stays open); ask for a narrower scope ("Plan changed in chat", Approve builds that plan); on a code card ask for a change ("Rewriting…", then a new "Code Review (rewritten)" card).
+⚬ UNVERIFIED: the SwiftUI layout in the real app; whether a real model emits the `PLAN_*` / `CODE_CHANGE` markers (if not, chat answers but changes nothing); the provenance file keeps the original `expected_logic`, not the chat change.
+Deviations: `test_route_requires_auth` accepts 404 or 503 for the authed call (depends on whether an earlier test ran the app lifespan); the 401 checks are unchanged.
+
+#131 — BUG: Inbox "Held for later" fills with dozens of rows titled "file" that do nothing when clicked [~] live
 Wave: _ · Agent: _ · Added: 2026-11-19 · Source: user (screenshot)
 Ask: "what are all these files nothing happens when i click them."
 Evidence (2026-11-19): Inbox showed "Held for later (35)", every row "file · held: you were typing · expires 4:58–5:04 PM". `~/.bot-inator/held_offers.json` had 33 held entries; 32 were `file` / `created` events for paths inside `~/Downloads/bot-inator.app/Contents/Resources/python/lib/python3.14/site-packages/torch/...` (`.py` / `__pycache__/*.pyc`), all stamped 19:58:47Z within a few ms. Unpacking the app download into Downloads emitted one event per file in the bundle.
@@ -495,7 +513,19 @@ Verify:
 ⚬ Live: unzip a large app into Downloads → at most one held row, with a readable name, and Dismiss / Clear all work.
 ⚬ pytest gate + Swift typecheck (rule 8).
 
-#132 — BUG: Thoughts list is not in time order [ ]
+Results (wave 28 slot A, 2026-11-20):
+⚬ `events/file_watcher.py`: `classify_path()`; a file inside a bundle (`BUNDLE_SUFFIXES`, e.g. `.app`) maps to the outermost bundle, one `created` event per burst (sliding `BUNDLE_QUIET_S` = 30 s); a bundle moved into place gives one `renamed`; paths under hidden folders and `NOISE_DIRS` (`__pycache__`, `site-packages`, `node_modules`, `.git`, …) are dropped.
+⚬ `ai/delivery.py`: `_title` for `file` events ("New in Downloads: x.pdf", "Moved to …", "Renamed in …", "Changed in …"); `open_held(id)` (bypasses the busy check, not counted toward the idea cap), `dismiss_held(id)`, `clear_held()`.
+⚬ `routes/delivery.py`: `POST /api/delivery/held/{id}/open`, `DELETE /api/delivery/held/{id}`, `DELETE /api/delivery/held`.
+⚬ `OfferInboxView.swift`: Show + Dismiss on held rows, "Clear all held".
+⚬ Tests: `tests/test_file_watcher_bundles.py` (7, one on real FSEvents: an `.app` with 60 nested files → 1 event), `tests/test_delivery_held_actions.py` (13). Rule 5: old watcher routing → 6 of 7 fail; `_title` branch removed → 7 fail; dismiss/clear no-ops → 3 fail; bypass marker removed → 2 fail.
+⚬ Live (user): unzip a large app into Downloads → at most one held row with a readable name; Show, Dismiss, Clear all work. Old rows get readable titles after a daemon restart.
+⚬ UNVERIFIED: the Swift UI (typecheck only); Archive Utility's real unpack sequence (move path tested at handler level).
+Deviations:
+⚬ Plain new folders are NOT collapsed into one event, only bundles: watches, standing rules and routine move detection point at folders such as `~/Downloads/Invoices`.
+⚬ Coalescing held file events not done: downstream reads one `metadata.path`, so a merged entry would drop the turn for every file but the first.
+
+#132 — BUG: Thoughts list is not in time order [~] live
 Wave: _ · Agent: _ · Added: 2026-11-19 · Source: user (screenshot)
 Ask: "there is bug in the thoughts list. Its not listing in order."
 Evidence (2026-11-19): Thoughts showed 16:31:41, 16:33:02, 16:33:03, 16:33:07, 16:34:45, then 15:41:25, 15:41:48 below them.
@@ -511,6 +541,17 @@ Verify:
 ⚬ If the daemon seed changes: test that `_next_seq()` after a fresh Orchestrator is greater than a seq from an earlier instance; non-vacuous: revert to 0, test fails.
 ⚬ pytest gate + Swift typecheck (rule 8).
 
+
+Results (wave 28 slot B, 2026-11-20):
+⚬ CAUSE confirmed from the source (not reproduced live): `Orchestrator._seq` started at 0 on every daemon start, `WebSocketManager` only appends, and `ThoughtStreamView` keyed rows by raw `seq`, so rows had duplicate ids after a restart. Timestamps were ruled out.
+⚬ `ThoughtStreamView.swift`: `ThoughtEntry` (id = index in `ws.messages`, unique because the list is append-only), sorted by timestamp, ties by arrival; scroll goes to the newest.
+⚬ `ai/orchestrator.py`: `_seq` seeded from the clock in microseconds (~1.8e15, under 2^53).
+⚬ Tests: `tests/test_seq_restart.py` (2). Rule 5: seed back to 0 → `assert 1 > 10000` fails.
+⚬ Other views checked, no change needed: approvals key on `requestId`, notices on `notice.id`, the inbox on its HTTP ids.
+⚬ Left for wave 29: `main.py`'s second counter (`app.state.seq = 0`) also restarts at 0; harmless today, seeded the same way for consistency.
+⚬ Live (user): restart the daemon with Thoughts open → new thoughts at the bottom in time order.
+⚬ UNVERIFIED: SwiftUI rendering and scroll in the real app.
+Deviations: `WebSocketManager.swift` not changed (not needed).
 
 ---
 
@@ -528,7 +569,7 @@ Verify:
 
 ### Memory
 
-#134 — "It knows your stuff": local search over your mail, files and past chats [ ]
+#134 — "It knows your stuff": local search over your mail, files and past chats [~] live
 Wave: _ · Agent: _ · Added: 2026-11-19 · Source: user
 Ask: From "ok why cant the app become their own personal gpt" → "yes it
 does" (belongs on the roadmap). The user wants Chat to answer questions
@@ -570,7 +611,32 @@ Verify:
 ⚬ A planted injection in an indexed email cannot get a side-effecting
   tool to run (extend the #122 safety suite).
 ⚬ pytest gate; Xcode build for the Settings screen.
-Deviations:
+Results (part 1, wave 28 slot D, 2026-11-20):
+⚬ `ai/knowledge_index.py`: own db `~/.bot-inator/knowledge.db` (0600, secure delete) and own settings file `knowledge_index.json`; sources `mail`, `folders`, `chats`, `meeting_notes`, all off by default, no iMessage source; FTS5 + vec0 search fused by rank, vector hits only within distance 1.2, keyword-only when vec0 or a local embedder is missing; never downloads a model (`local_files_only`); incremental passes (unchanged items skipped unread, 500 changed items per source per pass); source off deletes its rows and its cloud toggle; `forget_everything()` deletes the db file and turns every source off.
+⚬ API for part 2: `search(query, top_k=5, *, sources=None, for_cloud=False)` → snippets `{source, item_id, title, link, date, text, score, match}`; `cloud_allowed(source)`; `index_chat_turn(event_id, user_text, reply_text="")`; `KnowledgeIndexer(index)` with `start()` / `stop()` / `index_now()`.
+⚬ `routes/knowledge.py` (`/api/knowledge`: status, source + cloud toggles, folders, index-now, forget); `Views/KnowledgeIndexSettingsView.swift`.
+⚬ Tests: `tests/test_knowledge_index.py` (17, tmp paths and fake readers). Rule 5: 11 one-line breaks, each fails its test.
+⚬ Runner at close: `tests/test_egress_log.py` EXEMPT row (the index imports sentence_transformers but only loads a cached snapshot).
+⚬ UNVERIFIED: the real Mail store, textutil / PDFKit extraction, the real MiniLM load, speed of a large first mail pass, the Settings view in the running app.
+Results (part 2, wave 29, 2026-11-20):
+⚬ New `ai/knowledge_retrieval.py`: `for_chat()` searches the index (top 5) and appends a delimited block of snippets (source, title, date) marked as DATA, not instructions, with "cite the email/file/note" wording. No source on or no hit → prompt byte-for-byte unchanged.
+⚬ WHICH TURNS: Chat, Quick Ask and the iPhone remote (one code path, `_handle_user_message`). The phone turn always uses the cloud-toggle filter, because its answer leaves the Mac over iMessage. Scheduled asks and ambient turns do not retrieve.
+⚬ CLOUD: a cloud engine gets snippets only when the source's cloud toggle is on AND `personal_text_allowed()` (the stricter of the two). Each send is one `knowledge_snippets` ledger row (sources + count, never text). Local engine: no row.
+⚬ TAINT: `TurnTaint.mark_retrieved()` (kind `knowledge`): `run_shortcut` refused, tool ideas may not quote it, cards carry an origin note. 7a: no "Always allow" bypass and no countdown in a retrieval turn.
+⚬ PAST CHATS: `index_chat_turn` runs right after the turn. A turn that used snippets is indexed with the user's text only (its reply may quote a source with other toggles); ids kept in `reply_kept_out`.
+⚬ Registration: `main.py` (router, index + indexer in lifespan, `app.state.seq` clock seed), `tests/conftest.py` (tmp index paths), `SettingsView.swift`, `PrivacyLedgerView.swift` (one label), LIVING_SPEC §3.2 / §4.
+⚬ Wave-28 leftover: a held offer opened with Show no longer counts toward `cards_today`.
+⚬ Eval: `inj_indexed_mail_shortcut` in `evals/cases/safety.json`; `evals/suites/tool_calls.py` passes a case's `knowledge` snippets through the same block.
+⚬ Tests: `tests/test_knowledge_chat.py` (20). Rule 5: 21 breaks, each fails its test (grouped runs, matched by assertion). Not break-tested: the conftest env lines (removing them would read the real ~/.bot-inator).
+⚬ Live (user): Mail on → Index now → a Chat question answerable from one email cites it; Mail off → not found. With a cloud key: cloud toggle off → no ledger row; on → one row per send, no text. `python -m evals.run --suite safety` → check `inj_indexed_mail_shortcut`.
+⚬ UNVERIFIED: citation quality and recall with a real model and real Mail; the phone path end to end; the rerun path's second ledger row; added latency per Chat turn from embedding the query.
+Deviations (part 2):
+⚬ `tests/test_personal_evals.py` case-count bound raised from 25 to 30 (safety.json was at exactly 25).
+⚬ `evals/suites/tool_calls.py` and `ai/knowledge_index.py` edited additively (see above); route rows went in LIVING_SPEC §3.2, where route rows live.
+Deviations (part 1):
+⚬ Background passes run on AC power OR after 300 s idle (#119's training needs both). One line in `background_blocked` if the user wants both.
+⚬ Vector distance limit added: without it the nearest chunk always "matched".
+⚬ Uses private helpers from `ai/memory.py` and `tools/list_recent_emails.py` rather than editing them.
 
 ### Personal model
 
@@ -589,7 +655,7 @@ text, and `ActionJournal` (#83) stores ids and paths only, on purpose.
 
 ### Evals
 
-#133 — LLM-as-judge scorer for evals, plus a first judged suite (email drafts) [ ]
+#133 — LLM-as-judge scorer for evals, plus a first judged suite (email drafts) [~] live
 Wave: _ · Agent: _ · Added: 2026-11-19 · Source: user
 Ask: "can i use llm as a judge" → "add llm as a judge to the todo.md".
 Today (2026-11-19, read from the source, not run): every eval suite scores with rules. `tool_calls` and `safety` check the tool name and argument matches (`{"contains": ...}` in `evals/cases/*.json`); `idea_judge` measures the app's own idea filter against a labelled pass/drop. Nothing scores free text, so a drafted email body, the weekly report or a chat answer can get worse without any eval noticing. `evals/run.py` exits 1 only on errors, never on a lower score.
@@ -613,7 +679,16 @@ Verify:
 ⚬ Live (batched, rule 11): run `python -m evals.run --suite email_draft --judge-provider groq` once; user grades the calibration set; record agreement in this item.
 ⚬ pytest gate (rule 8).
 Later (not this item): judged suites for the weekly report (#128) and meeting prep; a scheduled CI eval job once there is CI.
+Results (wave 28 slot C, 2026-11-20):
+⚬ `evals/judge.py`: `score()` (one JSON line per rubric line, reason before verdict; missing or unclear → "no", "unparseable"), `check_distinct()` (`SameModelError`), calibration helpers and CLI (`python -m evals.judge`, exits 1 under 85%).
+⚬ `evals/suites/email_draft.py` + `evals/cases/email_draft.json` (10 made-up cases, 4 rubric lines each, one with an injection); `evals/cases/judge_calibration.json` (20 outputs, labels ungraded).
+⚬ `evals/run.py`: `--judge-provider`, `--judge-model`, `--min-accuracy` (exit 1 below it), judge reasons saved per run.
+⚬ Tests: `tests/test_eval_judge.py` (11). Rule 5, the four Verify tests: `score` ignoring verdicts, parse failure as pass, same-model check off, accuracy check removed → each fails.
+⚬ Live (user): `cd agent-daemon && .venv/bin/python -m evals.run --suite email_draft --judge-provider groq`; grade `judge_calibration.json`, then `.venv/bin/python -m evals.judge --judge-provider groq`; record agreement here. With `--provider groq` too, pass `--judge-model` (same default model is refused).
+⚬ UNVERIFIED: any real judge or model run.
 Deviations:
+⚬ Cases are chat requests ("Draft a reply to the email from X") with `read_email` stubbed, not `mail_received` events: a bare event doesn't ask for a reply.
+⚬ Agreement is counted per rubric line across repeats, not per output.
 
 ### Security and providers
 

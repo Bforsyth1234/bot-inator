@@ -183,6 +183,34 @@ final class DeliveryViewModel: ObservableObject {
         }
     }
 
+    // #131: held rows get Show / Dismiss, and the section a Clear all.
+    func openHeld(_ offer: HeldOfferSummary) async {
+        do {
+            _ = try await send("api/delivery/held/\(offer.id)/open", method: "POST")
+            await refresh()
+        } catch {
+            errorMessage = "Failed to show the held offer: \(error.localizedDescription)"
+        }
+    }
+
+    func dismissHeld(_ offer: HeldOfferSummary) async {
+        do {
+            _ = try await send("api/delivery/held/\(offer.id)", method: "DELETE")
+            await refresh()
+        } catch {
+            errorMessage = "Failed to dismiss the held offer: \(error.localizedDescription)"
+        }
+    }
+
+    func clearHeld() async {
+        do {
+            _ = try await send("api/delivery/held", method: "DELETE")
+            await refresh()
+        } catch {
+            errorMessage = "Failed to clear held offers: \(error.localizedDescription)"
+        }
+    }
+
     func loadSettings() async {
         do {
             settings = try JSONDecoder().decode(DeliverySettings.self,
@@ -248,9 +276,9 @@ struct OfferInboxView: View {
                         .controlSize(.small)
                 }
             }
-            section(title: "Inbox", items: viewModel.status?.inbox ?? [], showActions: true,
+            section(title: "Inbox", items: viewModel.status?.inbox ?? [], held: false,
                     empty: "Nothing waiting. Suggestions over today's limit land here.")
-            section(title: "Held for later", items: viewModel.status?.held ?? [], showActions: false,
+            section(title: "Held for later", items: viewModel.status?.held ?? [], held: true,
                     empty: "Nothing held. Suggestions wait here during meetings and while you type.")
         }
         .padding(.horizontal, 14)
@@ -286,30 +314,40 @@ struct OfferInboxView: View {
     }
 
     @ViewBuilder
-    private func section(title: String, items: [HeldOfferSummary], showActions: Bool,
+    private func section(title: String, items: [HeldOfferSummary], held: Bool,
                          empty: String) -> some View {
-        Text("\(title) (\(items.count))").appFont(.label)
+        HStack {
+            Text("\(title) (\(items.count))").appFont(.label)
+            Spacer()
+            if held && !items.isEmpty {
+                Button("Clear all held") { Task { await viewModel.clearHeld() } }
+                    .controlSize(.small)
+                    .help("Drop every held suggestion without showing it")
+            }
+        }
         if items.isEmpty {
             Text(empty).appFont(.secondary).foregroundStyle(.secondary)
         } else {
-            ForEach(items) { item in row(item, showActions: showActions) }
+            ForEach(items) { item in row(item, held: held) }
         }
     }
 
-    private func row(_ item: HeldOfferSummary, showActions: Bool) -> some View {
+    private func row(_ item: HeldOfferSummary, held: Bool) -> some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.title).appFont(.body).lineLimit(2)
                 Text(detail(item)).appFont(.fine).foregroundStyle(.secondary)
             }
             Spacer()
-            if showActions {
-                Button("Show") { Task { await viewModel.open(item) } }
-                    .controlSize(.small)
-                    .help("Show this suggestion now")
-                Button("Dismiss") { Task { await viewModel.dismiss(item) } }
-                    .controlSize(.small)
+            Button("Show") {
+                Task { if held { await viewModel.openHeld(item) } else { await viewModel.open(item) } }
             }
+            .controlSize(.small)
+            .help("Show this suggestion now")
+            Button("Dismiss") {
+                Task { if held { await viewModel.dismissHeld(item) } else { await viewModel.dismiss(item) } }
+            }
+            .controlSize(.small)
         }
         .padding(.vertical, 2)
     }

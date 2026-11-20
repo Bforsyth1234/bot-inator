@@ -107,6 +107,16 @@ KIND_PHRASES: Mapping[str, str] = {
     "window": "the window",
     "mcp": "an MCP tool",
     "selection": "the selected text",
+    # #134: snippets Chat retrieved from the user's local knowledge index.
+    "knowledge": "your indexed data",
+}
+
+# #134: retrieved knowledge-index snippets (``mark_retrieved``) and how a card
+# names each one's source.
+KNOWLEDGE_KIND = "knowledge"
+KNOWLEDGE_SOURCE_NOUNS: Mapping[str, str] = {
+    "mail": "email", "folders": "file", "chats": "past chat",
+    "meeting_notes": "meeting note",
 }
 
 FROM_YOU = "from you"
@@ -379,6 +389,22 @@ class TurnTaint:
                 label = f"web page {_short(result.get('url'))}"
         self._add(kind, label, [result])
         return True
+
+    def mark_retrieved(self, snippets: Optional[Iterable[Any]]) -> bool:
+        """#134 decision 7: knowledge-index snippets put in this turn's
+        prompt are outside text (LIVING_SPEC §1 "Knowledge index" rule 3):
+        each marks the turn and is kept for ``origin_of`` / ``quotes_outside``
+        like a read. Returns whether anything marked."""
+        marked = False
+        for snip in snippets or ():
+            if not isinstance(snip, Mapping):
+                continue
+            noun = KNOWLEDGE_SOURCE_NOUNS.get(str(snip.get("source") or ""), "item")
+            title = _short(snip.get("title"))
+            label = f"indexed {noun} \u201c{title}\u201d" if title else f"an indexed {noun}"
+            self._add(KNOWLEDGE_KIND, label, [snip.get("title"), snip.get("text")])
+            marked = True
+        return marked
 
     def note_own_read(self, kind: str, result: Any) -> None:
         """#127: record a read of the user's OWN data (their contacts) so a

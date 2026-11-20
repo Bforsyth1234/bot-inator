@@ -61,7 +61,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 logger = logging.getLogger(__name__)
@@ -509,11 +509,41 @@ def shelf_life(event_type: str, metadata: Mapping[str, Any], held_since: float) 
     return held_since + EVENT_SHELF_LIFE.get(event_type, DEFAULT_SHELF_LIFE)
 
 
+_TEMP_NAME_SUFFIXES = (".crdownload", ".download", ".part", ".tmp")
+
+
+def _file_title(meta: Mapping[str, Any]) -> str:
+    """#131: "New in Downloads: x.pdf" for a raw file event, "" without a path."""
+    path = PurePath(str(meta.get("path") or "").rstrip("/"))
+    name = path.name
+    if not name:
+        return ""
+    folder = path.parent.name or str(path.parent)
+    action = str(meta.get("action") or "")
+    if action == "modified":
+        verb = "Changed in"
+    elif action == "renamed":
+        src = PurePath(str(meta.get("from") or ""))
+        if src.name.lower().endswith(_TEMP_NAME_SUFFIXES) or not src.name:
+            verb = "New in"  # a finished download arrives as a rename
+        elif src.parent != path.parent:
+            verb = "Moved to"
+        else:
+            verb = "Renamed in"
+    else:
+        verb = "New in"
+    return f"{verb} {folder}: {name}"[:160]
+
+
 def _title(event_type: str, meta: Mapping[str, Any]) -> str:
     for key in ("card_text", "description", "tool_name"):
         text = " ".join(str(meta.get(key) or "").split())
         if text:
             return text[:160]
+    if event_type == "file":
+        text = _file_title(meta)
+        if text:
+            return text
     return event_type
 
 
@@ -896,6 +926,47 @@ class Delivery:
                     self._changed()
                     return True
         return False
+
+    # ---- held (#131) ----------------------------------------------------
+
+    def open_held(self, offer_id: str) -> Optional[Any]:
+        """Take a held offer out now; the event to push, marked user-caused
+        (``BYPASS_KEY = "held"``), so the busy gate does not hold it again.
+        An idea opened this way is not counted toward the daily cap, as with
+        the Inbox."""
+        with self._lock:
+            for i, entry in enumerate(self.held):
+                if entry.id == offer_id:
+                    self.held.pop(i)
+                    if entry.event_type == "pattern_detected":
+                        self._roll_day()
+                        self._user_opened += 1
+                    self._changed()
+                    event = _event_from_dict(entry.event)
+                    event.metadata[HELD_SINCE_KEY] = entry.held_since
+                    event.metadata[HELD_REASON_KEY] = entry.reason
+                    event.metadata[BYPASS_KEY] = "held"
+                    return event
+        return None
+
+    def dismiss_held(self, offer_id: str) -> bool:
+        """Drop one held offer without running it."""
+        with self._lock:
+            for i, entry in enumerate(self.held):
+                if entry.id == offer_id:
+                    self.held.pop(i)
+                    self._changed()
+                    return True
+        return False
+
+    def clear_held(self) -> int:
+        """Drop every held offer; returns how many."""
+        with self._lock:
+            n = len(self.held)
+            if n:
+                self.held = []
+                self._changed()
+        return n
 
     # ---- views ----------------------------------------------------------
 

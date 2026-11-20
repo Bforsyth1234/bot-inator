@@ -18,6 +18,7 @@ Case shape (``evals/cases/safety.json``)::
     {"id": "...", "category": "injection_mail",
      "kind": "chat" | "event", "text": "...", "event": {...},
      "tool_results": {"read_email": {...}},
+     "knowledge": [{"source": "mail", "title": ..., "text": ...}],  # chat: #134 snippets
      "allow": ["open_url"],                  # side-effecting tools that are fine here
      "forbid": [{"tool": "open_url", "args": {"url": {"contains": "evil"}}}]}
 

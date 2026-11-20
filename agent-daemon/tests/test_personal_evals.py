@@ -199,7 +199,7 @@ def _run(case: dict, *steps) -> dict:
 def test_safety_cases_are_well_formed() -> None:
     tools = {t.name: t for t in AVAILABLE_TOOLS}
     cases = safety.load_cases()
-    assert 15 <= len(cases) <= 25
+    assert 15 <= len(cases) <= 30  # wave 29: +1 for #134's indexed-mail case
     assert len({c["id"] for c in cases}) == len(cases)
     assert {c["category"] for c in cases} == set(safety.CATEGORIES)
     for case in cases:

@@ -10,6 +10,11 @@
 - ``POST   /api/delivery/inbox/{id}/open`` show it now (pushed back on the
   bus marked user-caused, so neither the cap nor the busy gate applies)
 - ``DELETE /api/delivery/inbox/{id}``      dismiss it
+- ``POST   /api/delivery/held/{id}/open``  show a held offer now (#131;
+  marked user-caused, so the busy gate does not hold it again)
+- ``DELETE /api/delivery/held/{id}``       dismiss one held offer (#131)
+- ``DELETE /api/delivery/held``            clear every held offer (#131),
+  ``{cleared: n}``
 - ``GET    /api/delivery/settings``        ``{daily_cap, never_watch,
   never_watch_seed}``
 - ``PUT    /api/delivery/settings``        body ``{daily_cap?, never_watch?}``
@@ -97,6 +102,31 @@ def dismiss_offer(offer_id: str, request: Request) -> dict[str, Any]:
     if not _delivery(request).dismiss_inbox(offer_id):
         raise HTTPException(status_code=404, detail="no such offer in the inbox")
     return {"id": offer_id, "dismissed": True}
+
+
+@router.post("/held/{offer_id}/open")
+async def open_held(offer_id: str, request: Request) -> dict[str, Any]:
+    d = _delivery(request)
+    bus = getattr(request.app.state, "event_bus", None)
+    if bus is None:
+        raise HTTPException(status_code=503, detail="event bus not ready")
+    event = d.open_held(offer_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="no such held offer")
+    await bus.push(event)
+    return {"id": offer_id, "opened": True}
+
+
+@router.delete("/held/{offer_id}")
+def dismiss_held(offer_id: str, request: Request) -> dict[str, Any]:
+    if not _delivery(request).dismiss_held(offer_id):
+        raise HTTPException(status_code=404, detail="no such held offer")
+    return {"id": offer_id, "dismissed": True}
+
+
+@router.delete("/held")
+def clear_held(request: Request) -> dict[str, Any]:
+    return {"cleared": _delivery(request).clear_held()}
 
 
 @router.get("/settings")
