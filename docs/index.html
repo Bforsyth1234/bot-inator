@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bot-inator</title>
+<meta name="description" content="A menu bar app for Mac that notices what you're doing and offers to help. Runs on local models by default and asks before it does anything.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a class="name" href="./">bot-inator</a>
+  <nav>
+    <a href="https://github.com/Bforsyth1234/bot-inator">GitHub</a>
+    <a href="privacy.html">Privacy</a>
+    <a href="terms.html">Terms</a>
+  </nav>
+</header>
+<main>
+  <h1>A Mac assistant that asks first.</h1>
+  <p class="lede">bot-inator sits in your menu bar, notices what you're doing, and offers to help. Nothing happens until you click approve.</p>
+  <div class="buttons">
+    <a class="button" href="https://github.com/Bforsyth1234/bot-inator/releases/latest">Download for Mac</a>
+    <a class="button secondary" href="https://github.com/Bforsyth1234/bot-inator">Source code</a>
+  </div>
+  <p class="small">Free, MIT licensed. Apple Silicon, macOS 14 or later. Signed and notarized.</p>
+
+  <img class="demo" src="demo.gif" alt="A PDF lands in Downloads, bot-inator offers to file it, and it is moved after approval">
+
+  <h2>What it does</h2>
+  <p>It watches a few things: new files in Downloads, incoming mail and iMessages, upcoming meetings, which app you're in. When something comes up it asks a model whether there's anything useful to do. If there is, you get a card. A PDF invoice lands and it offers to file it with your other invoices. You approve it or ignore it.</p>
+
+  <div class="grid">
+    <div class="card"><h3>Every action is a card</h3><p>Moving a file, making a reminder, drafting an email: all of it waits for your click. Only read-only tools skip the card.</p></div>
+    <div class="card"><h3>Local by default</h3><p>Models run on your Mac with MLX. A cloud key is optional, and a ledger in Settings shows everything that left the Mac today.</p></div>
+    <div class="card"><h3>It writes its own tools</h3><p>When you keep doing something by hand, it offers to build a small tool for it. You read the full source before it's installed.</p></div>
+    <div class="card"><h3>Sandboxed and versioned</h3><p>Each tool runs in a short-lived <code>sandbox-exec</code> child and lives in its own git repo, so a bad change can be rolled back.</p></div>
+  </div>
+
+  <h2>Getting started</h2>
+  <ol>
+    <li>Download the zip (about 540 MB), unzip it and move <code>bot-inator.app</code> to Applications.</li>
+    <li>Open it. A setup window asks how you want to run the models.</li>
+    <li>Pick <strong>Cloud key</strong> to try it in a couple of minutes with your own OpenAI, Anthropic, Gemini, Groq or OpenRouter key. Pick <strong>Local</strong> to keep everything on the Mac. That download is about 13 GB, or 8 GB on Macs with less than 24 GB of memory.</li>
+  </ol>
+  <p class="muted">You can switch between them later in Settings.</p>
+
+  <h2>Who makes it</h2>
+  <p>I'm Brooks Forsyth, and I build bot-inator on my own. It's early, and some suggestions will miss. Bug reports and "it suggested something dumb" reports are both useful: <a href="https://github.com/Bforsyth1234/bot-inator/issues">open an issue on GitHub</a>.</p>
+</main>
+<footer>
+  <a href="privacy.html">Privacy Policy</a>
+  <a href="terms.html">Terms of Service</a>
+  <a href="https://github.com/Bforsyth1234/bot-inator">GitHub</a>
+</footer>
+</body>
+</html>

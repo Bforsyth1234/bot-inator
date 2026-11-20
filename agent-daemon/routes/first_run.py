@@ -86,10 +86,26 @@ def _cloud_presets() -> list[dict[str, Any]]:
     ]
 
 
+def _ready_line(models: list[str]) -> str:
+    """How soon a choice running ``models`` locally can start, from what is
+    left to download. Facts only: the screen still never picks (7c)."""
+    d = first_run.local_download_bytes(models)
+    left = max(d["total"] - d["done"], 0)
+    if left == 0 and not d["unknown"]:
+        return "Ready now: the models are already on this Mac."
+    return (f"Ready after a {left / 1e9:.1f} GB download. "
+            "You can start on a cloud key and switch in Settings later.")
+
+
+CLOUD_READY_LINE = ("Ready in about 2 minutes once you paste a key. "
+                    "Switch to Local any time in Settings, then Restart Daemon.")
+
+
 def _view() -> dict[str, Any]:
     gb = first_run.physical_memory_gb()
     models = _local_models()
     download = first_run.local_download_bytes(list(models.values()))
+    local_roles, _ = _roles("mixed")
     return {
         "pending": first_run.is_pending(),
         "memory_gb": None if gb is None else round(gb, 1),
@@ -97,13 +113,16 @@ def _view() -> dict[str, Any]:
         "cloud_below_gb": first_run.CLOUD_BELOW_GB,
         "choices": [
             {"id": "local", "title": "Local",
-             "leaves_mac": "Nothing: every engine runs on this Mac."},
+             "leaves_mac": "Nothing: every engine runs on this Mac.",
+             "ready": _ready_line(list(models.values()))},
             {"id": "cloud", "title": "Cloud key",
              "leaves_mac": "Event summaries, chat and tool drafts go to the provider you pick. "
-                           + PERSONAL_LINE},
+                           + PERSONAL_LINE,
+             "ready": CLOUD_READY_LINE},
             {"id": "mixed", "title": "Mixed",
              "leaves_mac": "Only tool drafts go to the provider you pick: the tool you asked "
-                           "for and its code. " + PERSONAL_LINE},
+                           "for and its code. " + PERSONAL_LINE,
+             "ready": _ready_line([models[r] for r in local_roles])},
         ],
         "ledger_line": LEDGER_LINE,
         "presets": _cloud_presets(),
