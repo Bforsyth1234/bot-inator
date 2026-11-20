@@ -89,11 +89,16 @@ def _cloud_presets() -> list[dict[str, Any]]:
 def _ready_line(models: list[str]) -> str:
     """How soon a choice running ``models`` locally can start, from what is
     left to download. Facts only: the screen still never picks (7c)."""
-    d = first_run.local_download_bytes(models)
-    left = max(d["total"] - d["done"], 0)
-    if left == 0 and not d["unknown"]:
+    missing = [m for m in dict.fromkeys(models) if not first_run.is_downloaded(m)]
+    if not missing:
         return "Ready now: the models are already on this Mac."
-    return (f"Ready after a {left / 1e9:.1f} GB download. "
+    d = first_run.local_download_bytes(missing)
+    left = max(d["total"] - d["done"], 0)
+    # A model with no known size still downloads; never claim "0.0 GB".
+    what = f"downloading {left / 1e9:.1f} GB" if left >= 50_000_000 else "downloading the models"
+    if left >= 50_000_000 and d["unknown"]:
+        what += " plus models of unknown size"
+    return (f"Ready after {what}. "
             "You can start on a cloud key and switch in Settings later.")
 
 
