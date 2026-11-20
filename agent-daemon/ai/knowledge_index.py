@@ -1047,7 +1047,11 @@ def mail_listing(mail_root: Optional[Path] = None, max_items: int = MAX_MAIL_ITE
     the Mail ROWID that ``read_email(message_id)`` takes; ``link`` is a
     ``message://`` URL that opens the mail in Mail. Needs Full Disk Access."""
     from events import mail_watcher as mw
-    from tools import list_recent_emails as lre
+    # The module, not the tool: ``tools/__init__`` exports a tool object named
+    # ``list_recent_emails`` that shadows the submodule on ``from tools import``.
+    import importlib
+
+    lre = importlib.import_module("tools.list_recent_emails")
     from tools.read_email import mail_root as default_root
 
     root = Path(mail_root).expanduser() if mail_root is not None else default_root()
