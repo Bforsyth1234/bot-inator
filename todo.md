@@ -73,7 +73,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #134
+Next ID: #135
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -527,6 +527,50 @@ Verify:
 ---
 
 ### Memory
+
+#134 — "It knows your stuff": local search over your mail, files and past chats [ ]
+Wave: _ · Agent: _ · Added: 2026-11-19 · Source: user
+Ask: From "ok why cant the app become their own personal gpt" → "yes it
+does" (belongs on the roadmap). The user wants Chat to answer questions
+about the user's own life ("what did my landlord say about the lease?",
+"when is the Acme invoice due?") the way a personal GPT would.
+DECISIONS (user, 2026-11-19):
+1. This is retrieval, not fine-tuning. Facts come from a local index that
+   the model searches before answering. The personal model (#118–#121)
+   stays limited to deciding what to offer and writing cards; it is not
+   trained on indexed content for this item.
+2. Build on the existing sqlite-vec store and MiniLM embedder in
+   `ai/memory.py`, in a separate db file, not by mixing indexed content
+   into `memory.db`.
+3. The index and its embeddings never leave the Mac (invariant 7c).
+4. Sources in v1: mail (#41 reader), files in folders the user picks,
+   past Chat turns, meeting notes. Not iMessages in v1.
+5. Consent: one opt-in per source, all off by default; mail needs its own
+   toggle, as messages will when they are added.
+6. Cloud key: retrieved snippets go to a cloud model only if that source's
+   cloud toggle is on, and every send is in the privacy ledger (#82).
+7. Taint: any turn that used retrieved content is tainted like #81/#122
+   (no `run_shortcut`, no tool ideas quoting it).
+8. Retention: turning a source off deletes its rows from the index, and
+   Settings has a "Forget everything" button.
+(4–8: user accepted the proposed answers, 2026-11-19. LIVING_SPEC §1
+"Knowledge index".)
+Files: TBD at wave planning. Likely a new `ai/knowledge_index.py`, a new
+router for index status/settings, and a new Settings screen.
+Approach: Incremental indexer (chunk + embed on change, AC power or idle
+only, like #119's training), hybrid search (sqlite FTS5 + vector), top-k
+snippets with source links injected into the Chat prompt, and answers
+that cite which email or file they came from. Fallback if MiniLM recall
+is poor: FTS5 only for v1.
+Verify:
+⚬ Live: ask Chat a question only answerable from an indexed email; the
+  answer cites that email. Turn the source off; the same question no
+  longer finds it and its rows are gone from the db.
+⚬ Nothing from the index appears in network traffic with no cloud key.
+⚬ A planted injection in an indexed email cannot get a side-effecting
+  tool to run (extend the #122 safety suite).
+⚬ pytest gate; Xcode build for the Settings screen.
+Deviations:
 
 ### Personal model
 
