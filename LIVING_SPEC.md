@@ -115,6 +115,23 @@ decide what to offer and write the card, and nothing else:
    newly fail) and the user can return
    to the base model in one click.
 
+**Knowledge index (constraint on 7a and 7c, user decisions 2026-11-19,
+item #134).** Chat may search a local index of the user's own data to
+answer questions. It is retrieval only; indexed content is not training
+data for the personal model.
+
+1. **Sources are opt-in, one at a time.** Mail, chosen folders, past Chat
+   turns and meeting notes, each off by default. Mail has its own toggle.
+   iMessages are not a v1 source.
+2. **The index stays on the Mac.** Snippets go to a cloud model only when
+   that source's cloud toggle is on, and every such send is in the privacy
+   ledger (#82).
+3. **Retrieved text is outside text.** A turn that used it is tainted as
+   in #81/#122: `run_shortcut` is refused and tool ideas may not quote it.
+   It never approves, skips or shortens a card.
+4. **Off means gone.** Turning a source off deletes its rows; "Forget
+   everything" deletes the whole index.
+
 **iPhone remote (amendment to 7a and 7c, user decisions 2026-11-10, item
 #85).** 7a: a reply `yes <code>` / `no <code>` sent from the user's own
 devices (`is_from_me = 1`, iMessage service, in the own thread only) is
