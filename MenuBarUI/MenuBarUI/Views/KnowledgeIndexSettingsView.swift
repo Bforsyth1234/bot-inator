@@ -3,7 +3,9 @@ import SwiftUI
 
 /// What the assistant knows (#134): the local knowledge index Chat can
 /// search to answer questions about your mail, files, past chats and
-/// meeting notes. Every source is off by default and stays on this Mac
+/// meeting notes, and (#137–#141) Messages, Calendar, Notes, browser
+/// history and imported AI chats, whose own controls are in
+/// `KnowledgeSourceOptionsViews.swift`. Every source is off by default and stays on this Mac
 /// (~/.bot-inator/knowledge.db). Turning a source off deletes what was
 /// indexed from it; "Forget everything" deletes the whole index.
 ///
@@ -20,12 +22,19 @@ struct KnowledgeSourceStatus: Codable, Equatable, Identifiable {
     let chunks: Int
     let lastIndexed: Double?
     let error: String
+    // #137–#141 (absent from an older daemon).
+    let description: String?
+    let hasOptions: Bool?
+    let optionsError: String?
+    let notice: String?
 
     var id: String { source }
 
     enum CodingKeys: String, CodingKey {
-        case source, label, enabled, cloud, items, chunks, error
+        case source, label, enabled, cloud, items, chunks, error, description, notice
         case lastIndexed = "last_indexed"
+        case hasOptions = "has_options"
+        case optionsError = "options_error"
     }
 }
 
@@ -157,7 +166,7 @@ final class KnowledgeIndexViewModel: ObservableObject {
 
     func forgetEverything() async {
         await run("/api/knowledge/forget", method: "POST",
-                  done: "The whole index is deleted and every source is off.")
+                  done: "The whole index is deleted and every source is off. Your lists of things to leave out are kept.")
     }
 }
 
@@ -206,7 +215,7 @@ struct KnowledgeIndexSettingsView: View {
             }
             Button("Cancel", role: .cancel) { confirmOff = nil }
         } message: {
-            Text("Everything indexed from it is deleted from this Mac. Your actual mail, files and notes are not touched.")
+            Text(offMessage(confirmOff?.source ?? ""))
         }
         .confirmationDialog("Forget everything?", isPresented: $confirmForget) {
             Button("Forget everything", role: .destructive) {
@@ -214,7 +223,7 @@ struct KnowledgeIndexSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Deletes the whole index and turns every source off. Your actual mail, files and notes are not touched. This can't be undone.")
+            Text("Deletes the whole index, turns every source off and puts their settings back to the defaults, except the lists of things to leave out (Messages conversations, sites, browser profiles and Notes folders), which are kept. The AI-chat import list is cleared. Your actual mail, messages, files and notes are not touched. This can't be undone.")
         }
     }
 
@@ -240,7 +249,26 @@ struct KnowledgeIndexSettingsView: View {
         case "folders": return "Text documents, PDFs, Word and RTF files in the folders you add below."
         case "chats": return "What you and the assistant said in earlier chats."
         case "meeting_notes": return "Transcripts of meetings you recorded with meeting notes."
+        case "imessages": return "Your iMessage and SMS conversations, one day of a conversation at a time. These are mostly other people's words: what they wrote to you. Needs Full Disk Access."
         default: return ""
+        }
+    }
+
+    private func description(_ source: KnowledgeSourceStatus) -> String {
+        let own = explanation(source.source)
+        return own.isEmpty ? (source.description ?? "") : own
+    }
+
+    private func offMessage(_ source: String) -> String {
+        switch source {
+        case "ai_chats":
+            return "Everything indexed from your imports is deleted from this Mac and the import list is cleared. Your export files are not touched."
+        case "browser_history":
+            return "Everything indexed from your browser history is deleted from this Mac and page text is switched off. Your look-back, excluded sites and profiles are kept. Your browsers are not touched."
+        case "imessages":
+            return "Everything indexed from Messages is deleted from this Mac. Your left-out conversations stay left out. Your messages are not touched."
+        default:
+            return "Everything indexed from it is deleted from this Mac. Your actual mail, files and notes are not touched."
         }
     }
 
@@ -258,7 +286,7 @@ struct KnowledgeIndexSettingsView: View {
             ))
             .appFont(.body)
             .disabled(viewModel.isBusy)
-            Text(explanation(source.source))
+            Text(description(source))
                 .appFont(.fine)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -272,8 +300,24 @@ struct KnowledgeIndexSettingsView: View {
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let notice = source.notice, !notice.isEmpty {
+                    Label(notice, systemImage: "info.circle")
+                        .appFont(.fine)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let optionsError = source.optionsError, !optionsError.isEmpty {
+                    Label(optionsError, systemImage: "exclamationmark.triangle")
+                        .appFont(.fine)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if source.source == "folders" {
                     folderList(status.folders)
+                }
+                // #137–#141: per-source controls, only while the source is on.
+                if source.hasOptions == true {
+                    KnowledgeSourceOptionsView(source: source.source) { await viewModel.refresh() }
                 }
                 Toggle("Allow snippets in cloud answers", isOn: Binding(
                     get: { source.cloud },

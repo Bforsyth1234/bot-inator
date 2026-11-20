@@ -12,8 +12,25 @@ Sources (decision 4/5), each its own opt-in, ALL OFF by default:
                     :func:`index_chat_turn` for part 2)
 * ``meeting_notes`` transcripts in ``~/.bot-inator/meetings/*.txt`` (#86)
 
-iMessages are NOT a source (v1); a chosen folder may not be inside
-``~/Library/Messages`` or ``~/Library/Mail``.
+and, from the registry in ``ai/knowledge_sources/`` (#137–#141, LIVING_SPEC
+§1 amendment 2026-11-20), each with PER-SOURCE OPTIONS kept validated in
+the settings file (``options``):
+
+* ``imessages``       iMessage conversations, minus an exclude list (#137)
+* ``calendar``        calendar events in a window (#138)
+* ``apple_notes``     Notes app notes, minus excluded folders (#139)
+* ``browser_history`` visited pages: titles + URLs; page text a 2nd opt-in (#140)
+* ``ai_chats``        imported ChatGPT / Claude export files (#141)
+
+A chosen folder still may not be inside ``~/Library/Messages`` or
+``~/Library/Mail`` (iMessages are read through their own reader only).
+
+Options rules (decided in wave 32): turning a source OFF deletes its rows
+and resets its opt-ins (cloud toggle, browser page text, the AI-chat import
+list); its other options stay. "Forget everything" resets every option to
+its default EXCEPT the lists that keep things out (:data:`KEPT_ON_FORGET`:
+iMessage exclude list, excluded sites, browser profile choice, excluded
+Notes folders): forgetting must never widen what a later "on" reads.
 
 Storage: ``~/.bot-inator/knowledge.db`` (``AGENT_KNOWLEDGE_DB`` overrides),
 SQLite, 0600, ``secure_delete`` on, a separate file from memory.db
@@ -28,6 +45,9 @@ model ``ai.memory`` already loaded, else loads a copy already in the local
 Hugging Face cache with ``local_files_only``; otherwise no vectors.
 
 NOTHING IN THIS MODULE MAKES A NETWORK CALL (invariant 7c, decision 3).
+The one networked path in the index is browser page text (#140), inside
+``ai/knowledge_sources/browser.py`` (through #124's fetch and ledger row);
+this module only decides whether it may run (:meth:`KnowledgeIndex.page_text_gate`).
 Cloud use of snippets is part 2's job: :func:`cloud_allowed` says whether a
 source's cloud toggle is on (off by default), and ``search(for_cloud=True)``
 returns only such sources.
@@ -50,19 +70,37 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
-SOURCES: tuple[str, ...] = ("mail", "folders", "chats", "meeting_notes")
+BASE_SOURCES: tuple[str, ...] = ("mail", "folders", "chats", "meeting_notes")
+# Extended with the registry's sources at the end of this module (the
+# readers import this module, so the registry loads after it is defined).
+SOURCES: tuple[str, ...] = BASE_SOURCES
 SOURCE_LABELS = {
     "mail": "Mail",
     "folders": "Folders you choose",
     "chats": "Past chats",
     "meeting_notes": "Meeting notes",
+}
+# Registry modules by source name (filled at the end of this module).
+SOURCE_MODULES: dict[str, Any] = {}
+
+# Option keys that turning a source OFF resets (opt-ins and the record of
+# what was imported). Everything else survives "off".
+RESET_ON_OFF: dict[str, tuple[str, ...]] = {
+    "browser_history": ("page_text",),
+    "ai_chats": ("imports",),
+}
+# Option keys "Forget everything" keeps: they only ever keep things OUT.
+KEPT_ON_FORGET: dict[str, tuple[str, ...]] = {
+    "imessages": ("exclude",),
+    "browser_history": ("excluded_domains", "profiles"),
+    "apple_notes": ("exclude_folders",),
 }
 
 DATA_DIR = Path.home() / ".bot-inator"
@@ -151,6 +189,16 @@ Reader = Callable[[], Listing]
 # ---------------------------------------------------------------------------
 
 
+def _copy(value: Any) -> Any:
+    return json.loads(json.dumps(value))
+
+
+def default_options(source: str) -> dict[str, Any]:
+    """A fresh copy of a registry source's DEFAULT_OPTIONS ({} for others)."""
+    module = SOURCE_MODULES.get(source)
+    return _copy(module.DEFAULT_OPTIONS) if module is not None else {}
+
+
 def _blank_settings() -> dict[str, Any]:
     return {
         "version": 1,
@@ -161,6 +209,10 @@ def _blank_settings() -> dict[str, Any]:
         # #134 part 2: Chat turns that used retrieved snippets. Their reply
         # (which may quote another source) is never indexed as chat content.
         "reply_kept_out": [],
+        # #137–#141: per-source options, stored validated.
+        "options": {s: default_options(s) for s in SOURCE_MODULES},
+        # A stored value that failed validation (defaults used instead).
+        "options_error": {},
     }
 
 
@@ -188,6 +240,18 @@ class _Settings:
             data[key] = {s: got[s] for s in SOURCES if s in got}
         data["reply_kept_out"] = [str(e) for e in raw.get("reply_kept_out") or []
                                   if isinstance(e, str)][-MAX_CHAT_ROWS:]
+        stored = raw.get("options") if isinstance(raw.get("options"), dict) else {}
+        for name, module in SOURCE_MODULES.items():
+            if name not in stored:
+                continue
+            try:
+                data["options"][name] = module.validate_options(_copy(stored[name]))
+            except (ValueError, TypeError) as exc:
+                # Defaults instead, never a crash; status shows why.
+                data["options"][name] = default_options(name)
+                data["options_error"][name] = (
+                    f"Saved settings for {module.TITLE} were not valid ({exc}); "
+                    "the defaults are used until you save them again.")
         return data
 
     def save(self) -> None:
@@ -310,7 +374,7 @@ def local_embedder() -> Optional[Embedder]:
     except ImportError:
         return None
 
-    def _embed(text: str) -> list[float]:
+    def _model() -> Any:
         global _local_model
         with _local_model_lock:
             if _local_model is None:
@@ -318,9 +382,21 @@ def local_embedder() -> Optional[Embedder]:
 
                 device = os.environ.get("AGENT_EMBED_DEVICE", "cpu").strip() or "cpu"
                 _local_model = SentenceTransformer(str(snap), device=device, local_files_only=True)
-            model = _local_model
-        return [float(x) for x in model.encode(text, normalize_embeddings=True)]
+            return _local_model
 
+    def _embed(text: str) -> list[float]:
+        vec = _model().encode(text, normalize_embeddings=True, show_progress_bar=False)
+        return [float(x) for x in vec]
+
+    def _embed_many(texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        vecs = _model().encode(list(texts), normalize_embeddings=True, show_progress_bar=False)
+        return [[float(x) for x in vec] for vec in vecs]
+
+    # An embedder may carry ``many`` (a list in, a list out, ONE model call);
+    # ``KnowledgeIndex._embed_many`` uses it for an item's chunks.
+    _embed.many = _embed_many  # type: ignore[attr-defined]
     return _embed
 
 
@@ -338,6 +414,46 @@ def _try_load_vec(conn: Any) -> Optional[str]:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _timestamp(date: str) -> Optional[float]:
+    """Unix seconds of an item's ISO ``date`` (naive = local), or None."""
+    text = (date or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.astimezone()
+    return when.timestamp()
+
+
+def _before(date: str, cutoff: float) -> bool:
+    ts = _timestamp(date)
+    return ts is not None and ts < cutoff
+
+
+def _default_fetch_allowed() -> bool:
+    """The #119 guard (AC power or the user away), for an index with no
+    KnowledgeIndexer attached."""
+    from ai import personal_training as pt
+
+    return background_blocked(pt.power_source, pt.input_idle_seconds) is None
+
+
+def _web_search_enabled() -> bool:
+    """The #124 web opt-in, read live (``AGENT_WEB_SEARCH``, default off)."""
+    import importlib
+
+    try:
+        return bool(importlib.import_module("tools.web_search").is_enabled())
+    except Exception:
+        logger.warning("knowledge index: web opt-in unreadable; treated as off", exc_info=True)
+        return False
 
 
 _SCHEMA = """
@@ -384,6 +500,9 @@ class KnowledgeIndex:
         mail_root: Optional[Path] = None,
         notes_dir: Optional[Path] = None,
         clock: Callable[[], float] = time.time,
+        source_overrides: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        fetch_allowed: Optional[Callable[[], bool]] = None,
+        web_enabled: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.db_path = Path(db_path) if db_path is not None else default_db_path()
         self.settings = _Settings(Path(settings_path) if settings_path is not None
@@ -398,12 +517,27 @@ class KnowledgeIndex:
         self.vec_reason = ""
         self._mail_root = mail_root
         self._notes_dir = notes_dir
+        # Per-source keyword overrides for the registry readers' listing() /
+        # choices() (tests: fake chat.db, osascript runner, calendar backend,
+        # browser home, fetch ...). Never user input.
+        self.source_overrides: dict[str, dict[str, Any]] = {
+            k: dict(v) for k, v in (source_overrides or {}).items()}
+        # #140 page text: whether a fetch may happen right now (the #119
+        # guard: AC power or the user away). KnowledgeIndexer sets its own.
+        self.fetch_allowed: Callable[[], bool] = fetch_allowed or _default_fetch_allowed
+        # #140: the #124 web opt-in (AGENT_WEB_SEARCH), read live.
+        self.web_enabled: Callable[[], bool] = web_enabled or _web_search_enabled
+        # Bumped on every options change; a pass that listed with older
+        # options stops writing (an excluded conversation is never re-added).
+        self._options_gen: dict[str, int] = {}
         self.readers: dict[str, Reader] = {
             "mail": lambda: mail_listing(self._mail_root),
             "folders": lambda: folder_listing(self.folders()),
             "chats": lambda: chat_listing(kept_out=self.settings.data.get("reply_kept_out", ())),
             "meeting_notes": lambda: notes_listing(self._notes_dir),
         }
+        for name in SOURCE_MODULES:
+            self.readers[name] = (lambda n=name: self._registry_listing(n))
         self.readers.update(readers or {})
         self.running = False
         self.last_pass: dict[str, Any] = {}
@@ -476,6 +610,37 @@ class KnowledgeIndex:
             return None
         return _serialize(vec)
 
+    def _embed_many(self, texts: list[str]) -> list[Optional[bytes]]:
+        """Vectors for several texts with ONE model call when the embedder has
+        a batch path (``embedder.many``); a plain single-text embedder is
+        called once per text. A failed or wrong-sized batch falls back to
+        keyword only for those chunks, as ``_embed`` does."""
+        if not texts:
+            return []
+        emb = self.embedder()
+        if emb is None or not self.vec_loaded:
+            return [None] * len(texts)
+        many = getattr(emb, "many", None)
+        if many is None:
+            return [self._embed(t) for t in texts]
+        try:
+            vecs = list(many(list(texts)))
+        except Exception:
+            logger.exception("knowledge index: embedding failed; keyword only for this item")
+            return [None] * len(texts)
+        if len(vecs) != len(texts):
+            logger.warning("knowledge index: embedder gave %d vectors for %d texts",
+                           len(vecs), len(texts))
+            return [None] * len(texts)
+        out: list[Optional[bytes]] = []
+        for vec in vecs:
+            if len(vec) != EMBED_DIM:
+                logger.warning("knowledge index: embedder gave %d dims, want %d", len(vec), EMBED_DIM)
+                out.append(None)
+            else:
+                out.append(_serialize(vec))
+        return out
+
     # ---- settings --------------------------------------------------------
 
     @staticmethod
@@ -502,6 +667,14 @@ class KnowledgeIndex:
                 entry["cloud"] = False
                 self.settings.data["last_indexed"].pop(source, None)
                 self.settings.data["last_error"].pop(source, None)
+                # Opt-ins and the import record go with the rows (module doc).
+                reset = RESET_ON_OFF.get(source, ())
+                if reset:
+                    opts = self.settings.data["options"].setdefault(source, default_options(source))
+                    defaults = default_options(source)
+                    for key in reset:
+                        opts[key] = defaults.get(key)
+                    self._bump(source)
                 deleted = self._delete_where("source = ?", (source,))
             self.settings.save()
         return deleted
@@ -536,6 +709,279 @@ class KnowledgeIndex:
                     "source = 'folders' AND substr(item_id, 1, ?) = ?", (len(prefix), prefix))
             self.settings.save()
         return deleted
+
+    # ---- per-source options (#137–#141) -------------------------------------
+
+    def source_module(self, source: str) -> Any:
+        """The registry module of ``source``; SourceError for the four
+        #134 sources (they have no options) and unknown names."""
+        self._check(source)
+        module = SOURCE_MODULES.get(source)
+        if module is None:
+            raise SourceError(f"{source} has no options")
+        return module
+
+    def _bump(self, source: str) -> None:
+        with self._lock:
+            self._options_gen[source] = self._options_gen.get(source, 0) + 1
+
+    def get_options(self, source: str) -> dict[str, Any]:
+        """A copy of the source's stored (validated) options."""
+        self.source_module(source)
+        with self._lock:
+            got = self.settings.data["options"].get(source)
+            return _copy(got) if got is not None else default_options(source)
+
+    def options_error(self, source: str) -> str:
+        return str(self.settings.data.get("options_error", {}).get(source, ""))
+
+    def set_options(self, source: str, options: Any) -> dict[str, Any]:
+        """Validate (the module's ``validate_options``) and store. A ValueError
+        carries the module's message (raised as :class:`SourceError`).
+
+        Narrowing changes take effect at once, not at the next pass:
+        newly excluded iMessage conversations, a shorter browser look-back,
+        newly excluded sites, newly excluded Notes folders, a shorter
+        calendar window and removed AI-chat imports delete their rows here.
+        Returns ``{"options", "deleted", "reindex"}``; ``reindex`` says a
+        one-source pass should follow (what can only be pruned by re-reading:
+        a browser profile unticked, page text turned off, an import added)."""
+        module = self.source_module(source)
+        try:
+            new = module.validate_options(_copy(options) if options is not None else None)
+        except (ValueError, TypeError) as exc:
+            raise SourceError(str(exc)) from None
+        with self._lock:
+            old = self.get_options(source)
+            self.settings.data["options"][source] = new
+            self.settings.data.setdefault("options_error", {}).pop(source, None)
+            self._bump(source)
+            self.settings.save()
+        deleted, reindex = self._apply_narrowing(source, old, new)
+        return {"options": _copy(new), "deleted": deleted, "reindex": reindex}
+
+    def _apply_narrowing(self, source: str, old: dict, new: dict) -> tuple[int, bool]:
+        module = SOURCE_MODULES[source]
+        over = self.source_overrides.get(source, {})
+        if source == "imessages":
+            added = [e for e in new.get("exclude", []) if e not in old.get("exclude", [])]
+            if not added:
+                return 0, False
+            convs = {e.lower() for e in added}
+            try:  # handles / identifiers -> chat guids (reads chat.db only)
+                got = module.choices(new, **over)
+                convs |= {str(c["id"]).lower() for c in got.get("conversations", [])
+                          if c.get("excluded")}
+            except Exception:
+                logger.warning("knowledge index: Messages conversations not listed", exc_info=True)
+            return self._delete_items(source, lambda iid, *_: module.conversation_of(iid).lower()
+                                      in convs), False
+        if source == "browser_history":
+            deleted = 0
+            days, before = new.get("lookback_days", 0), old.get("lookback_days", 0)
+            if days and (before == 0 or days < before):
+                now = float((over.get("clock") or self.clock)())
+                cutoff = now - days * 86400.0
+                deleted += self._delete_items(source, lambda _i, _l, date: _before(date, cutoff))
+            added = [d for d in new.get("excluded_domains", [])
+                     if d not in old.get("excluded_domains", [])]
+            if added:
+                deleted += self._delete_items(
+                    source, lambda _i, link, _d: bool(link) and module.is_excluded(link, added))
+            narrowed = new.get("profiles") is not None and (
+                old.get("profiles") is None or not set(new["profiles"]) >= set(old["profiles"]))
+            page_off = bool(old.get("page_text")) and not new.get("page_text")
+            return deleted, bool(narrowed or page_off)
+        if source == "apple_notes":
+            added = [f for f in new.get("exclude_folders", [])
+                     if f not in old.get("exclude_folders", [])]
+            if not added:
+                return 0, False
+            return self._delete_notes_in(added), True
+        if source == "calendar":
+            if (new.get("days_back", 0) >= old.get("days_back", 0)
+                    and new.get("days_ahead", 0) >= old.get("days_ahead", 0)):
+                return 0, False
+            now = datetime.now().astimezone()
+            clock = over.get("clock")
+            if clock is not None:
+                now = clock()
+            lo = (now - timedelta(days=new["days_back"])).timestamp()
+            hi = (now + timedelta(days=new["days_ahead"])).timestamp()
+
+            def outside(_i: str, _l: str, date: str) -> bool:
+                ts = _timestamp(date)
+                return ts is not None and not (lo <= ts < hi)
+            return self._delete_items(source, outside), False
+        if source == "ai_chats":
+            keep = {i["path"] for i in new.get("imports", [])}
+            gone = [i for i in old.get("imports", []) if i["path"] not in keep]
+            added = any(i not in old.get("imports", []) for i in new.get("imports", []))
+            deleted = self._delete_import_rows(gone, new) if gone else 0
+            return deleted, bool(gone or added)
+        return 0, False
+
+    def _delete_items(self, source: str, match: Callable[[str, str, str], bool]) -> int:
+        """Delete ``source`` items where ``match(item_id, link, date)``."""
+        with self._lock:
+            if not self._exists():
+                return 0
+            db = self._conn()
+            rows = db.execute("SELECT item_id, link, date FROM items WHERE source = ?",
+                              (source,)).fetchall()
+            doomed = [r[0] for r in rows if match(r[0], r[1] or "", r[2] or "")]
+            for item_id in doomed:
+                self._delete_item(db, source, item_id)
+            db.commit()
+            return len(doomed)
+
+    def _delete_notes_in(self, folders: list[str]) -> int:
+        """Notes whose text starts with ``Folder: <an excluded folder>``
+        (the reader's first line) are deleted."""
+        sep = getattr(SOURCE_MODULES.get("apple_notes"), "FOLDER_SEP", " / ")
+        with self._lock:
+            if not self._exists():
+                return 0
+            db = self._conn()
+            rows = db.execute("SELECT item_id, text FROM chunks WHERE source = 'apple_notes' "
+                              "AND ord = 0").fetchall()
+            doomed = []
+            for item_id, text in rows:
+                first = (text or "").split("\n", 1)[0]
+                if not first.startswith("Folder: "):
+                    continue
+                path = first[len("Folder: "):].strip()
+                if any(path == f or path.startswith(f + sep) for f in folders):
+                    doomed.append(item_id)
+            for item_id in doomed:
+                self._delete_item(db, "apple_notes", item_id)
+            db.commit()
+            return len(doomed)
+
+    def _delete_import_rows(self, gone: list[dict], remaining: dict) -> int:
+        """Rows of removed AI-chat imports that no remaining import holds.
+        Reads the files' metadata only (no conversation text). A removed
+        file that is missing deletes nothing here; the next complete pass
+        prunes its conversations."""
+        module = SOURCE_MODULES["ai_chats"]
+        over = self.source_overrides.get("ai_chats", {})
+        try:
+            removed = {i.item_id for i in module.listing({"imports": gone}, **over).items}
+            kept = {i.item_id for i in module.listing(remaining, **over).items}
+        except Exception:
+            logger.warning("knowledge index: removed import not read", exc_info=True)
+            return 0
+        doomed = removed - kept
+        return self._delete_items("ai_chats", lambda iid, *_: iid in doomed) if doomed else 0
+
+    def add_ai_chat_import(self, path: Any) -> dict[str, Any]:
+        """Import a ChatGPT / Claude export file (#141): validated by the
+        reader's ``make_import`` (reads it once, in place). The same path
+        again replaces its entry and keeps its id. SourceError on a bad file."""
+        module = self.source_module("ai_chats")
+        if not isinstance(path, str) or not path.strip():
+            raise SourceError("Pick an export file (.json or .zip).")
+        clean = str(Path(path.strip()).expanduser())
+        current = self.get_options("ai_chats")
+        same = next((i for i in current["imports"] if i["path"] == clean), None)
+        over = {k: v for k, v in self.source_overrides.get("ai_chats", {}).items()
+                if k == "max_bytes"}
+        try:
+            entry = module.make_import(
+                clean, clock=self.clock,
+                new_id=(lambda: same["id"]) if same is not None else None, **over)
+        except (ValueError, TypeError) as exc:
+            raise SourceError(str(exc)) from None
+        imports = [entry if i["path"] == clean else i for i in current["imports"]]
+        if same is None:
+            imports.append(entry)
+        self.set_options("ai_chats", {"imports": imports})
+        return entry
+
+    def remove_ai_chat_import(self, import_id: str) -> int:
+        """Remove one import and delete its conversations (those no other
+        import holds). SourceError when there is no such import."""
+        current = self.get_options("ai_chats")
+        if not any(i["id"] == import_id for i in current["imports"]):
+            raise SourceError(f"no import {import_id!r}")
+        left = [i for i in current["imports"] if i["id"] != import_id]
+        return int(self.set_options("ai_chats", {"imports": left})["deleted"])
+
+    def choices(self, source: str) -> dict[str, Any]:
+        """What Settings needs for the source's pickers (the reader's
+        ``choices``; file or osascript work: call it off the event loop)."""
+        module = self.source_module(source)
+        fn = getattr(module, "choices", None)
+        if fn is None:
+            raise SourceError(f"{module.TITLE} has nothing to choose")
+        return fn(self.get_options(source), **self.source_overrides.get(source, {}))
+
+    def _versions(self, source: str) -> dict[str, str]:
+        """``{item_id: version}`` of one source (one query)."""
+        with self._lock:
+            if not self._exists():
+                return {}
+            return {r[0]: r[1] for r in self._conn().execute(
+                "SELECT item_id, version FROM items WHERE source = ?", (source,))}
+
+    def page_text_gate(self) -> tuple[bool, str]:
+        """#140: may browser page text be fetched at all? Needs BOTH the
+        source's own ``page_text`` switch AND the #124 web opt-in
+        (``AGENT_WEB_SEARCH``): the stricter reading of 7c, so no single
+        switch in this screen sends visited addresses to the web while the
+        user has the web turned off. ``(allowed, why not)``."""
+        if not self.get_options("browser_history").get("page_text"):
+            return False, ""
+        try:
+            web = bool(self.web_enabled())
+        except Exception:
+            web = False
+        if not web:
+            return False, ("Page text is on, but web access is off (Settings › Web search), "
+                           "so only titles and addresses are indexed.")
+        return True, ""
+
+    def _registry_listing(self, source: str) -> Listing:
+        module = SOURCE_MODULES[source]
+        opts = self.get_options(source)
+        over = dict(self.source_overrides.get(source, {}))
+        if source == "apple_notes":
+            over.setdefault("known_versions", self._versions(source))
+        if source == "browser_history":
+            return self._browser_listing(module, opts, over)
+        return module.listing(opts, **over)
+
+    def _browser_listing(self, module: Any, opts: dict, over: dict) -> Listing:
+        allowed, _why = self.page_text_gate()
+        if not allowed:
+            # No fetch callable is even built: the reader makes no network use.
+            opts = {**opts, "page_text": False}
+            over.pop("fetch", None)
+            return module.listing(opts, **over)
+        listing = module.listing(opts, **over)
+        items = list(listing.items)
+        for item in items:
+            if item.load is not None and item.version.startswith("page:"):
+                item.load = self._deferrable(item, item.load)
+        return Listing(items, complete=listing.complete, error=listing.error)
+
+    def _deferrable(self, item: SourceItem, load: Callable[[], Mapping[str, str]]
+                    ) -> Callable[[], Mapping[str, str]]:
+        """A page-text load that fetches only while the guard allows (AC
+        power or the user away), checked per page, "Index now" included.
+        Otherwise the title and address are indexed now under a ``deferred:``
+        version, so a later allowed pass sees a changed version and fetches."""
+        def guarded() -> Mapping[str, str]:
+            try:
+                ok = bool(self.fetch_allowed())
+            except Exception:
+                ok = False
+            if ok:
+                return load()
+            item.version = "deferred:" + item.version
+            when = (item.date or "")[:10]
+            return {"text": f"{item.title}\n{item.link}" + (f"\nLast visited {when}." if when else "")}
+        return guarded
 
     # ---- deletion ----------------------------------------------------------
 
@@ -581,10 +1027,21 @@ class KnowledgeIndex:
                 except FileNotFoundError:
                     pass
             kept_out = list(self.settings.data.get("reply_kept_out") or [])
+            kept_lists = {
+                source: {k: _copy(self.settings.data["options"].get(source, {}).get(k))
+                         for k in keys if k in self.settings.data["options"].get(source, {})}
+                for source, keys in KEPT_ON_FORGET.items()}
             self.settings.data = _blank_settings()
             # Ids only (no content): a later "chats" on must still leave
             # those replies out (#134 part 2).
             self.settings.data["reply_kept_out"] = kept_out
+            # Exclude lists survive (module doc): forgetting never widens
+            # what a later "on" reads.
+            for source, kept in kept_lists.items():
+                if source in self.settings.data["options"]:
+                    self.settings.data["options"][source].update(kept)
+            for source in SOURCE_MODULES:
+                self._bump(source)
             self.settings.save()
         return count
 
@@ -599,13 +1056,16 @@ class KnowledgeIndex:
             ).fetchone()
         return row[0] if row else None
 
-    def _write_item(self, source: str, item: SourceItem) -> bool:
-        """(Re)write one loaded item. False when the source went off meanwhile."""
+    def _write_item(self, source: str, item: SourceItem, *, gen: Optional[int] = None) -> bool:
+        """(Re)write one loaded item. False when the source went off meanwhile
+        or (``gen`` given) its options changed since it was listed."""
         chunks = chunk_text(item.text or "")
         # Embed outside the lock (slow); write under it.
-        vecs = [self._embed(f"{item.title}\n{c}") for c in chunks] if chunks else []
+        vecs = self._embed_many([f"{item.title}\n{c}" for c in chunks])
         with self._lock:
             if not self.settings.enabled(source):
+                return False
+            if gen is not None and self._options_gen.get(source, 0) != gen:
                 return False
             db = self._conn()
             self._delete_item(db, source, item.item_id)
@@ -645,6 +1105,10 @@ class KnowledgeIndex:
         if not self.enabled(source):
             result["error"] = "off"
             return result
+        gen = self._options_gen.get(source, 0)
+
+        def current() -> bool:  # still on, and listed with today's options
+            return self.enabled(source) and self._options_gen.get(source, 0) == gen
         try:
             listing = self.readers[source]()
         except Exception as exc:
@@ -653,7 +1117,7 @@ class KnowledgeIndex:
         seen: set[str] = set()
         finished = True
         for item in listing.items:
-            if not self.enabled(source):
+            if not current():
                 finished = False
                 break
             seen.add(item.item_id)
@@ -669,11 +1133,11 @@ class KnowledgeIndex:
                 logger.warning("knowledge index: could not load %s item", source, exc_info=True)
                 result["failed"] += 1
                 continue
-            if not self._write_item(source, item):
+            if not self._write_item(source, item, gen=gen):
                 finished = False
                 break
             result["indexed"] += 1
-        if finished and listing.complete and not listing.error and self.enabled(source):
+        if finished and listing.complete and not listing.error and current():
             with self._lock:
                 if self._exists():
                     db = self._conn()
@@ -706,8 +1170,13 @@ class KnowledgeIndex:
                 "ON i.source = c.source AND i.item_id = c.item_id WHERE c.has_vec = 0 LIMIT ?",
                 (limit,)).fetchall()
         done = 0
-        for rowid, title, text in rows:
-            vec = self._embed(f"{title}\n{text}")
+        vecs: list[Optional[bytes]] = []
+        for start in range(0, len(rows), 32):  # one model call per 32 chunks
+            batch = self._embed_many([f"{t}\n{x}" for _, t, x in rows[start:start + 32]])
+            vecs.extend(batch)
+            if any(v is None for v in batch):
+                break
+        for (rowid, _title, _text), vec in zip(rows, vecs):
             if vec is None:
                 break
             with self._lock:
@@ -867,6 +1336,16 @@ class KnowledgeIndex:
                     out[source]["chunks"] = int(n)
         return out
 
+    def _notice(self, source: str) -> str:
+        """A non-error note for Settings (never blocks pruning)."""
+        if source != "browser_history" or "browser_history" not in SOURCE_MODULES:
+            return ""
+        allowed, why = self.page_text_gate()
+        if not allowed:
+            return why
+        return ("Page text is fetched only while the Mac is on AC power or you're away; "
+                "until then pages are indexed by title and address.")
+
     def status(self) -> dict[str, Any]:
         counts = self.counts()
         data = self.settings.data
@@ -884,6 +1363,12 @@ class KnowledgeIndex:
                     "items": counts[s]["items"], "chunks": counts[s]["chunks"],
                     "last_indexed": data["last_indexed"].get(s),
                     "error": data["last_error"].get(s, ""),
+                    # #137–#141 (empty / {} for the four #134 sources).
+                    "description": getattr(SOURCE_MODULES.get(s), "DESCRIPTION", ""),
+                    "has_options": s in SOURCE_MODULES,
+                    "options": self.get_options(s) if s in SOURCE_MODULES else {},
+                    "options_error": self.options_error(s),
+                    "notice": self._notice(s),
                 }
                 for s in SOURCES
             ],
@@ -1225,7 +1710,11 @@ class KnowledgeIndexer:
         self.blocked_reason: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
         self._pass: Optional[asyncio.Task] = None
+        self._reindex: dict[str, asyncio.Task] = {}
         self._stop = False
+        # #140: page text is fetched only while this guard allows, in every
+        # pass ("Index now" and option-triggered passes included).
+        index.fetch_allowed = lambda: background_blocked(self.power, self.idle) is None
 
     def _guard(self) -> bool:
         self.blocked_reason = background_blocked(self.power, self.idle)
@@ -1253,7 +1742,8 @@ class KnowledgeIndexer:
 
     async def _loop(self) -> None:
         while not self._stop:
-            if any(self.index.enabled(s) for s in SOURCES) and self._guard():
+            if (not self._reindex and any(self.index.enabled(s) for s in SOURCES)
+                    and self._guard()):
                 await self._run(background=True)
             await asyncio.sleep(self.interval)
 
@@ -1267,15 +1757,43 @@ class KnowledgeIndexer:
 
     @property
     def running(self) -> bool:
-        return self._pass is not None
+        return self._pass is not None or bool(self._reindex)
 
     async def index_now(self) -> bool:
-        """Start a pass now (no guard). False if one is already running."""
+        """Start a pass now (no guard, except that browser page text is
+        still fetched only on AC power or while the user is away). False if
+        one is already running."""
         if self._pass is not None:
             return False
         asyncio.ensure_future(self._run(background=False))
         await asyncio.sleep(0)
         return True
+
+    def reindex(self, source: str) -> Optional[asyncio.Task]:
+        """After an options change: one pass over ``source`` in a worker
+        thread (never on the event loop: Calendar's reader blocks on the
+        app, Notes on osascript), after any pass already running. Not
+        guarded, like "Index now" (page text still is). None when off or
+        one is already queued for it."""
+        if not self.index.enabled(source) or source in self._reindex:
+            return None
+
+        async def run() -> Any:
+            try:
+                while self._pass is not None and not self._stop:
+                    # Poll: awaiting a finished pass would not yield to the
+                    # loop before ``_run`` clears ``_pass``.
+                    await asyncio.sleep(0.05)
+                if self._stop:
+                    return None
+                return await asyncio.to_thread(self.index.index_source, source,
+                                               keep_going=lambda: not self._stop)
+            finally:
+                self._reindex.pop(source, None)
+
+        task = asyncio.ensure_future(run())
+        self._reindex[source] = task
+        return task
 
     def status(self) -> dict[str, Any]:
         return {"running": self.running, "blocked_reason": self.blocked_reason,
@@ -1318,3 +1836,24 @@ def index_chat_turn(event_id: str, user_text: str, reply_text: str = "", *, date
                     keep_reply: bool = True) -> bool:
     return get_default_index().index_chat_turn(event_id, user_text, reply_text, date=date,
                                                keep_reply=keep_reply)
+
+
+# ---------------------------------------------------------------------------
+# Registry sources (#137–#141): loaded last, because the readers import
+# ``Listing`` / ``SourceItem`` from this module (ai/knowledge_sources/__init__).
+# ---------------------------------------------------------------------------
+
+
+def _load_registry() -> None:
+    global SOURCES
+    import importlib
+
+    registry = importlib.import_module("ai.knowledge_sources")  # may be mid-import
+    for file_name in registry.MODULE_NAMES:
+        module = importlib.import_module(f"ai.knowledge_sources.{file_name}")
+        SOURCE_MODULES[module.NAME] = module
+        SOURCE_LABELS[module.NAME] = module.TITLE
+    SOURCES = BASE_SOURCES + tuple(SOURCE_MODULES)
+
+
+_load_registry()

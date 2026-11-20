@@ -93,8 +93,21 @@ def _load_st_model(model_name: str = DEFAULT_ST_MODEL) -> Any:
 
 def _st_embed(text: str) -> list[float]:
     model = _load_st_model()
-    vec = model.encode(text, normalize_embeddings=True)
+    vec = model.encode(text, normalize_embeddings=True, show_progress_bar=False)
     return [float(x) for x in vec]
+
+
+def _st_embed_many(texts: list[str]) -> list[list[float]]:
+    """One ``encode`` call for a list of texts (the knowledge index embeds an
+    item's chunks together: one call per item, not one per chunk)."""
+    if not texts:
+        return []
+    model = _load_st_model()
+    vecs = model.encode(list(texts), normalize_embeddings=True, show_progress_bar=False)
+    return [[float(x) for x in vec] for vec in vecs]
+
+
+_st_embed.many = _st_embed_many  # type: ignore[attr-defined]
 
 
 def default_embedder() -> Embedder:

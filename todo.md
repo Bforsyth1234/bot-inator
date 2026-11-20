@@ -73,7 +73,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #135
+Next ID: #145
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -122,6 +122,8 @@ API auth → sandbox for installed tools → live checks.
 | 28 | A: #131 · B: #132 · C: #133 · D: #134 part 1 (index core) (user 2026-11-19: "divide up the current todos into waves and use subagents using opus 5.5") | A `events/file_watcher.py`, `ai/delivery.py`, `routes/delivery.py`, `Views/OfferInboxView.swift`, own tests · B `Views/ThoughtStreamView.swift`, `Services/WebSocketManager.swift`, `ai/orchestrator.py` (`_seq` seed only), own test · C `evals/judge.py`, `evals/suites/email_draft.py`, `evals/cases/email_draft.json`, `evals/cases/judge_calibration.json`, `evals/run.py`, `evals/suites/__init__.py`, `tests/test_eval_judge.py` · D new `ai/knowledge_index.py`, new `routes/knowledge.py`, new `Views/KnowledgeIndexSettingsView.swift`, new `tests/test_knowledge_index.py`. Runner at close: `tests/test_egress_log.py` (EXEMPT row for the index's local-only model load) | [x] closed 2026-11-20 (#131 #132 #133 `[~] live`; #134 part 1 done; 2465 tests, swiftc clean) |
 | 29 | A: #134 part 2 (alone: Chat retrieval, taint, cloud toggle + ledger, registration; plus two wave-28 leftovers: `main.py` seq seed, held Show not counted as an ambient card) | `ai/orchestrator.py` (chat turn + `note_ambient_card` bypass), `ai/taint.py`, `ai/egress_log.py` (one kind), `main.py`, `SettingsView.swift` (one line), `evals/cases/safety.json` (one case), new tests | [x] closed 2026-11-20 (#134 `[~] live`; 2485 tests, swiftc clean) |
 | 30 | A: #130 (alone: approval path of both gates, goes last) | new `ai/card_chat.py`, new `routes/card_chat.py`, new `Views/CardChatView.swift`, `ApprovalAlert.swift`, `CodeReviewAlert.swift`, `ai/orchestrator.py` (idea/code gate only), `tools/meta_tool_generator.py` (chat context only), `schemas/ws_messages.py` + `WSMessage.swift` if needed, `main.py` (router), `ApprovalPresenter.swift`, LIVING_SPEC, new tests | [x] closed 2026-11-20 (#130 `[~] live`; 2523 tests, swiftc clean) |
+| 31 | A: #137 · B: #138 · C: #139 · D: #140 · E: #141 (readers only; user 2026-11-20: "Build them") | each slot owns one new reader module and its test: A `ai/knowledge_sources/imessage.py` · B `ai/knowledge_sources/calendar.py` · C `ai/knowledge_sources/notes.py` · D `ai/knowledge_sources/browser.py` · E `ai/knowledge_sources/ai_exports.py` (+ `tests/test_knowledge_source_<name>.py`, fixtures under `tests/fixtures/knowledge/<name>/`). Nobody edits `ai/knowledge_index.py`, routes, Swift or `ai/taint.py` | [x] closed 2026-11-20 (readers built: 167 tests) |
+| 32 | A: #137–#141 wiring (alone: shared files) | new `ai/knowledge_sources/__init__.py`, `ai/knowledge_index.py` (`SOURCES`, per-source options, readers), `routes/knowledge.py`, `Views/KnowledgeIndexSettingsView.swift`, `ai/taint.py`, `ai/egress_log.py` (if #140 needs a kind), `ai/knowledge_retrieval.py` (labels), `evals/cases/safety.json`, `tests/test_knowledge_index.py`, LIVING_SPEC §3/§4, new tests. Runner at close: batch embedding in `ai/knowledge_index.py` + `ai/memory.py` | [x] closed 2026-11-20 (#137–#141 `[~] live`; 2727 tests at wave close, swiftc clean) |
 | — | #96 | needs the user's signing run; not schedulable | open |
 | — | every `[~] live` item (waves 1–12) | Live checks list — marked done by the user 2026-11-10; list and write-ups moved to DONE.md | [x] closed 2026-11-10 |
 
@@ -158,7 +160,7 @@ pass-rate measurement is a live check · #38 a second
 
 ## Live checks
 
-Open (waves 28–30, 2026-11-20): #130, #131, #132, #133, #134; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
+Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #137–#141; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
 
 ## Completed items (archived to DONE.md)
 
@@ -440,6 +442,24 @@ Shared DECISIONS for #43–#47 (user + assistant, 2026-11-09):
    (DONE.md #11: the wrong `show_notification` argument broke every
    notifying tool).
 
+#144 — BUG: "How many emails since 12 pm" is wrong (49 instead of 5): email times are in UTC and there is no time filter [ ]
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user (screenshot)
+Ask: "why is the llm wrong about this" — asked "how many emails have i recieved since 12 pm", got "49 emails since 12 pm today"; Mail showed 5 (12:21 Costco, 12:16 Fandango, 12:04 CSA Events, 12:04 Connecticut Science Center, 12:03 EcoFlow).
+Cause (proven 2026-11-20 by running `list_recent_emails_from(mail_root(), 50)`):
+1. UTC times. `list_recent_emails` dates come from `events/mail_watcher.py` `_iso_date` (`tz=timezone.utc`), e.g. Fandango 12:16 PM local came back as `2026-11-20T17:16:17+00:00`. The model compared these against "12:00" without converting, so everything after 7 AM local (12:00 UTC) counted. `read_email` and anything else using `_iso_date` likely has the same problem.
+2. No time filter, 50 cap. The tool only takes `count` (`MAX_COUNT = 50`). The model asked for 50, got 50 (oldest `2026-11-20T12:00:47+00:00`) and counted 49 as "after 12:00". On a busy day the true count can exceed 50, so the tool cannot answer "how many since X" even with correct times.
+Fix (expected):
+1. Dates the model sees are local time with the offset (`2026-11-20T12:16:17-05:00`). Decide whether to change `_iso_date` itself (check the watcher's other users and tests) or add a local variant used by the tools.
+2. `list_recent_emails` gets `since` (and maybe `until`): ISO date-time or "YYYY-MM-DD", local time, filtered in SQL on `date_received`. With a time range the result reports the full `count` matching (not capped at 50) and lists at most `MAX_COUNT`, saying when the list is truncated. Docstring tells the model to use `since` for "how many since …" questions.
+3. Optional: put the current local time with offset in the chat system prompt if not already there, so "12 pm today" resolves correctly.
+Files (expected): tools/list_recent_emails.py, events/mail_watcher.py (`_iso_date` or a new helper), maybe tools/read_email.py, tests/test_list_recent_emails*.py. No registration change (still read-only).
+Verify:
+⚬ New test: an Envelope Index fixture with mail at 11:55 and 12:16 local → `date` strings carry the local offset; non-vacuous: revert to UTC, test fails.
+⚬ New test: `since="<today>T12:00"` returns only the 12:16 mail and `count == 1`; with 60 matching mails `count == 60` and the list is capped and marked truncated.
+⚬ Eval case (evals/cases): "how many emails since 12 pm" uses `since`.
+⚬ Live: ask "how many emails have I received since 12 pm" → matches Mail.
+⚬ pytest gate (rule 8).
+
 ---
 
 ---
@@ -553,7 +573,41 @@ Results (wave 28 slot B, 2026-11-20):
 ⚬ UNVERIFIED: SwiftUI rendering and scroll in the real app.
 Deviations: `WebSocketManager.swift` not changed (not needed).
 
----
+#142 — BUG: Chat answer never appears if you leave the Chat window while it is thinking [ ]
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user (screenshot)
+Ask: "the chat stops working when i go away from the chat window while waiting for an answer. the answer never appears."
+Evidence (2026-11-20): user asked "how many emails have i gotten today", switched away while it was working, came back: Reasoning (4) showed event_received, two memory rows and the reasoning prompt, but no answer was ever shown.
+Code facts (not yet proven as the cause):
+⚬ `Views/ChatView.swift` holds the turns in a `@StateObject ChatViewModel`. Leaving the Chat section (`showMainWindow(section:)`) likely tears the view down; coming back builds a new model, runs `loadHistory()` (`GET /api/chats`) and replays `ws.messages`.
+⚬ The daemon writes the user row to `chat_log` at the start of the turn and the assistant row only at the end (`ai/orchestrator.py:1402`, `:1509`). On return the turn comes back from history with `isPending: false`, so no spinner, and nothing re-fetches history when the reply is logged.
+⚬ `appendThought` only fills the answer from a `thought` with `stage == .complete` for an event id already in `byId`. If the final reply arrives as a different frame, or while no ChatView is alive and later drops out of `ws.messages`, it is lost to the UI.
+⚬ Also check: whether the daemon turn itself stalls (no `complete` thought, no assistant row in `chat_log`) when the window loses focus, e.g. the turn is tied to the WS client or a busy/typing gate (#131's `TYPING_IDLE_S`).
+Confirm first: reproduce, then check (a) `chat_log` for the assistant row, (b) the daemon log for the turn finishing, (c) `ws.messages` for a `complete` thought with that event id. (a)+(b) present → UI bug; absent → daemon bug.
+Fix (expected): the chat state outlives the view (move `ChatViewModel` up to the app/`WebSocketManager` level, or keep the view alive), a turn restored from history with a user row and no assistant row shows as pending, and the reply is picked up on return (re-ingest or re-fetch `/api/chats` on appear and on `complete`).
+Files (expected): Swift: Views/ChatView.swift, maybe Services/WebSocketManager.swift and the main window container; daemon only if (b) fails.
+Verify:
+⚬ Live: send a chat message, switch to another section or app before the reply, come back → the answer is there (or the turn shows as pending and fills in when done).
+⚬ Live: same, but stay away until the turn finishes, then come back → answer shown.
+⚬ If daemon code changes: test that a chat turn completes and logs the assistant row with no WS client connected; non-vacuous per rule 5.
+⚬ pytest gate + Swift typecheck (rule 8).
+
+#143 — Chat: a Stop button to cancel a request that is still running [ ]
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "add a cancel / stop button to a chat request."
+Today: no way to stop a chat turn. The WS `user_message` is pushed onto the event bus (`main.py` ~1911) and the orchestrator runs it inline, `await self._handle_user_message(...)` (`ai/orchestrator.py:1303`), so a slow turn also holds up every other event until it ends. `WebSocketManager.sendUserMessage` returns the `message_id` (= event id), which is the handle to cancel by. Existing pattern: `main.py` `_handle_command` (e.g. `demonstration_cancel`).
+Design:
+1. Swift: while a turn is pending, the send button in `ChatView` becomes Stop (and Esc stops it); same in `QuickAskPanel`. Stop sends a `chat_cancel` command with the `message_id`.
+2. Daemon: run each chat turn as its own `asyncio.Task` keyed by event id, so it can be cancelled; `chat_cancel` cancels that task. Unknown or finished id is a no-op.
+3. On cancel: emit a `complete` thought ("Stopped.") so the UI clears the spinner, log the assistant row as stopped in `chat_log` (so history and #142's reload agree), and end the phone turn the same as the `finally` block does today.
+4. Consent (7a): cancelling must never leave a half-done side effect. Any approval card the turn opened is withdrawn (its future cancelled, card removed); a tool call already approved and running is allowed to finish, and the turn stops after it. Say which in the stopped message.
+5. A model call that is mid-generation: cancel the await; if the local MLX / provider call can't be interrupted, drop its result when it returns.
+Files (expected): Swift: Views/ChatView.swift, Views/QuickAskPanel.swift, Services/WebSocketManager.swift (`sendChatCancel`), Models/WSMessage.swift (command payload if needed); daemon: ai/orchestrator.py (turn task registry + cancel), main.py `_handle_command` (`chat_cancel`). Overlaps #142 (ChatView.swift): not in the same wave.
+Verify:
+⚬ New test: start a chat turn with a slow fake model, send `chat_cancel` → the task is cancelled, a `complete` thought "Stopped." is emitted, `chat_log` gets the stopped row; non-vacuous: make cancel a no-op, test fails.
+⚬ New test: cancelling while an approval card is open resolves the card as withdrawn and runs no tool.
+⚬ New test: `chat_cancel` for an unknown id does nothing and raises nothing.
+⚬ Live: ask something slow, press Stop → spinner ends, "Stopped." shows, the next question works right away.
+⚬ pytest gate + Swift typecheck (rule 8).
 
 ---
 
@@ -564,6 +618,60 @@ Deviations: `WebSocketManager.swift` not changed (not needed).
 ---
 
 ---
+
+---
+
+#135 — Settings: a search box, and sections grouped into categories [ ]
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "add a search feature to settings and re order them into categories that make sense"
+Today: `Views/SettingsView.swift` (544 lines) is one long `Form` with ~30 sections in the order they were built (Appearance, lifecycle, provider, presets, then every feature view, then rules / training / knowledge / watches / delivery / history / privacy ledger, then Save). No way to find a setting except scrolling.
+Want:
+1. A search field at the top. Typing filters to the sections whose title or keywords match; clearing it shows everything. No match → "No settings match "<text>"".
+2. Sections grouped under category headings, in this proposed order (assistant proposal, user to confirm):
+   ⚬ General: Appearance, app lifecycle (#96), main window.
+   ⚬ Models: inference provider + per-engine pickers, provider presets, vision model (#107), web search.
+   ⚬ Features: daily brief, weekly report, meeting prep, meeting notes (#86), Quick Ask, "Watch me" shortcut (#84), Watch for… (#88).
+   ⚬ Delivery & iPhone: delivery (#87), iPhone remote (#85).
+   ⚬ Permissions & consent: macOS permissions, standing rules (#78), Always allow (#116).
+   ⚬ Memory & data: knowledge index (#134), activity history, action history / Undo (#83), privacy ledger (#82).
+   ⚬ Personal model: training data (#118/#119), personal model (#120).
+DECISIONS (user, 2026-11-20):
+1. Layout: a sidebar of categories (`NavigationSplitView`), search field in the sidebar. Picking a category shows only its sections in the detail pane. While a search is typed, the detail pane shows matches from every category, each under its category name; clearing the search goes back to the selected category.
+2. Save stays one action for all categories (switching category must not drop unsaved edits: keep `SettingsViewModel` above the split view).
+Files (expected): Views/SettingsView.swift (owned); new Views/SettingsSearch.swift (rule 12: the category + keyword table and the filter); the `*SettingsView.swift` files only if a section needs a keyword hook.
+Approach: a static table `[SettingsEntry(category, title, keywords, view)]` drives both the order and the filter, so a new section is added in one place. Keywords cover words a user would type ("model", "Groq", "API key", "login", "iPhone", "undo", "privacy"). The Save row stays visible whatever the filter.
+Watch for: Save in `SettingsView` saves `SettingsViewModel` fields; a hidden section must keep its unsaved edits (filter hides views, it must not drop state). Locked-by-env notes (`lockedNote`) must still show.
+Verify:
+⚬ Typing "groq", "iphone", "undo", "rules" each shows only the matching section(s); clearing restores all.
+⚬ Edit a provider field, search something else, clear, Save → the edit is saved.
+⚬ Every section that exists today appears exactly once (test or a checked list in Results).
+⚬ Swift typecheck (rule 8); a unit test of the filter function, non-vacuous (rule 5).
+Deviations:
+
+---
+
+#136 — Settings: fields for the local MLX models (main, analysis, drafting) [ ]
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "add model fields to the settings window"
+Today: Settings → Inference provider picks the provider per engine, but the MLX model that runs for "Local (MLX on this Mac)" can only be set by `MLX_MAIN_MODEL` / `MLX_ANALYSIS_MODEL` / `MLX_DRAFTING_MODEL` in `agent-daemon/.env` or by hand in `~/.bot-inator/settings.json`. The keys are already in `user_settings.ALLOWED_KEYS`; no view writes them. Vision already has its own local-model picker (`VisionSettingsView.swift`, `routes/providers.py` `/vision`), so it is out of scope. Cloud presets already have per-role model fields (`ProviderPresetsSection.swift`).
+Want:
+1. Under Inference provider, when any engine resolves to `local`, a "Local models" block with one text field per local engine (Main, Analysis, Drafting), each showing the current value or the memory-based default (`config.default_mlx_models()`) as its placeholder.
+2. Empty field = use the default (key removed from settings.json, not saved as "").
+3. A shell export of the key locks the field with the existing `lockedNote` text, like the engine pickers.
+4. Saving a changed model shows the existing "restart required" state (`_settings_view()` `restart_required`) and the Restart button when `can_restart`.
+DECISIONS (user, 2026-11-20):
+1. Each field is free text (a Hugging Face repo id or a local folder path) plus a "Choose folder…" button that fills in the path. No picker of cached models in this item; that can be a later item.
+2. Memory warning: a one-line note when the three models together likely exceed this Mac's memory, using the summed download size when the HF metadata is in the local cache. It never blocks Save; no note when the sizes are unknown.
+Files (expected): new Views/LocalModelsSection.swift (rule 12); Views/SettingsView.swift (embed only, at wave close; #135 owns it, so do not run both in one wave); `main.py` `_settings_view()` to report the MLX keys, their defaults and lock state, if not already returned.
+Watch for: a typo'd repo id must not leave the daemon unable to start. On load failure the engine falls back to the default model and the Settings row shows the error (check the current MLX load path for how a failure surfaces today).
+Verify:
+⚬ Set Main to a different MLX model, Save, Restart → `Running now` / engine status shows the new model id; clearing the field and restarting goes back to the default.
+⚬ `MLX_MAIN_MODEL` exported in the daemon shell → the field is read-only with the locked note.
+⚬ A bad id → daemon still starts on the default; the error shows in Settings.
+⚬ "Choose folder…" fills the field with the picked folder's path, and that path loads after a restart.
+⚬ Three large cached models on a small-memory Mac → the memory note shows and Save still works; unknown sizes → no note.
+⚬ pytest gate and Swift typecheck (rule 8); a new test of `_settings_view()` reporting the MLX keys and defaults, non-vacuous (rule 5).
+Deviations:
 
 ---
 
@@ -637,6 +745,127 @@ Deviations (part 1):
 ⚬ Background passes run on AC power OR after 300 s idle (#119's training needs both). One line in `background_blocked` if the user wants both.
 ⚬ Vector distance limit added: without it the nearest chunk always "matched".
 ⚬ Uses private helpers from `ai/memory.py` and `tools/list_recent_emails.py` rather than editing them.
+
+#137–#141 came out of the user's ask on 2026-11-20, after #134 went live
+("can we add these items to the todo.md I want them to be able to be indexed
+as well ... iMessages, Calendar, Notes, browser history, and your history
+from ChatGPT or other apps"). Each is a new source in the #134 index and
+inherits every #134 rule (LIVING_SPEC §1 "Knowledge index"): off by default,
+own toggle, own cloud toggle (off), the index stays on the Mac, a turn that
+used its snippets is tainted, off deletes its rows, "Forget everything"
+clears it. Shared files: every item adds its name to `SOURCES` and a reader
+in `ai/knowledge_index.py`, a row in `Views/KnowledgeIndexSettingsView.swift`
+and a kind label in `ai/taint.py`, so they cannot run in parallel as written.
+Wave plan when scheduled: either one slot does all five in order, or each
+slot owns a new `ai/knowledge_sources/<name>.py` reader and the runner
+registers them at wave close (rule 9). Suggested order: #138, #139 (small,
+readers exist), #141, #137, #140 (the only one that can use the network).
+
+Results for #137–#141 (waves 31–32, 2026-11-20):
+⚬ READERS (wave 31, one module each, same interface: `NAME`, `TITLE`, `DESCRIPTION`, `TAINT_LABEL`, `DEFAULT_OPTIONS`, `validate_options`, `listing`, `choices`): `ai/knowledge_sources/imessage.py` (26 tests), `calendar.py` (30), `notes.py` (30), `browser.py` (44), `ai_exports.py` (37). Rule 5: 25 / 15 / 14 / 26 / 15 one-at-a-time breaks, each fails a test.
+⚬ WIRING (wave 32): `ai/knowledge_sources/__init__.py` registry; `ai/knowledge_index.py` now has 9 sources, all off by default with cloud off, and per-source options stored validated (`get_options` / `set_options`; a bad stored value falls back to defaults and shows as `options_error`); `routes/knowledge.py` gains `GET/PUT /sources/{source}/options`, `GET /sources/{source}/choices` (worker thread), `POST /sources/ai_chats/imports`, `DELETE /sources/ai_chats/imports/{id}`; `ai/taint.py` + `ai/knowledge_retrieval.py` label each source (message, calendar event, note, web page, AI chat); new `Views/KnowledgeSourceOptionsViews.swift`; `PrivacyLedgerView.swift` (one label); two safety cases (`inj_indexed_imessage_shortcut`, `inj_indexed_web_page_shortcut`); LIVING_SPEC §3.2 / §4. Tests: `tests/test_knowledge_sources_wiring.py` (35); 30 of 31 breaks fail a test alone, the 31st is one of two redundant stale-pass guards (removing both fails).
+⚬ DECISIONS (wave 32 agent; the user can overturn):
+  1. Source OFF deletes its rows and resets only the opt-ins (cloud toggle, browser page text, the AI-chat import list); look-back, windows and exclude lists stay.
+  2. FORGET EVERYTHING resets options to defaults EXCEPT the lists that keep things out (Messages exclude list, excluded sites, browser profile choice, excluded Notes folders): a reset must never widen what a later "on" reads. The import list is cleared; export files are never touched.
+  3. BROWSER PAGE TEXT needs both its own switch AND the #124 web opt-in (`AGENT_WEB_SEARCH`), and AC power or idle for every fetch, "Index now" included (a blocked page is indexed by title and address and fetched on a later allowed pass). Each fetch is a `web_search` ledger row with tool `knowledge_browser`.
+  4. Narrowing takes effect at once: a newly excluded conversation, site or Notes folder, a shortened look-back or calendar window, and a removed import delete their rows inside `set_options`.
+⚬ PER SOURCE:
+  #137: all conversations, exclude list by chat, identifier or handle; one item per conversation per day; senders shown by handle (chat.db has no contact names; #127 forbids listing Contacts); text only; the #85 own thread always excluded, also by a "bot-inator:" prefix backstop. UNVERIFIED on a real chat.db.
+  #138: read through `calendar_access` only while the backend reports full access (a pass never triggers the macOS prompt); 31-day slices; not ready or a failed slice → `complete=False`, nothing pruned; notes cut to 500 chars and 50 attendees by the app. UNVERIFIED against the real app.
+  #139: JXA through osascript; one call lists id, name, folder, date and lock flag; bodies fetched lazily in batches of 25; locked notes and Recently Deleted never read. MEASURED on the user's library: 815 notes, listing under 1 s, full first pass 58 s, so the NoteStore.sqlite route is not needed. Shared notes are tainted like every source.
+  #140: Safari, Chromium (Chrome, Arc, Brave, Edge; every profile) and Firefox readers on temp copies; one item per normalised URL, merged across browsers; look-back 7 / 30 / 90 / 365 / everything (default 90); excluded sites match subdomains; token-like query strings are stripped and such URLs are never fetched; local and private hosts never fetched; at most one fetch per URL per 30 days, 1 s apart. On this Mac (counts only): 10 profiles, 13,562 URLs in 90 days. UNVERIFIED: Arc, Brave, Edge and Firefox (no history here), Safari profiles, real page fetching.
+  #141: ChatGPT and Claude `conversations.json`, alone or in the zip (also `conversations-<n>.json`); provider detected from structure; ChatGPT active branch only; tools, images, hidden and system messages skipped; the same conversation in two imports appears once, the later update wins; a missing file → error and `complete=False` (nothing pruned); 2 GiB cap; a 349 MB made-up export lists in 0.9 s. UNVERIFIED: any real export (both formats are undocumented; details come from third-party parsers), the conversation link patterns.
+⚬ ALSO (runner, 2026-11-20, asked for by the "AI chat performance" session after measuring ~29,700 one-chunk model calls in the first real pass): an item's chunks are embedded in ONE `encode` call (`KnowledgeIndex._embed_many`, `embedder.many`), the vector backfill in batches of 32, and every `encode` passes `show_progress_bar=False` (`ai/memory.py` too). Tests in `tests/test_knowledge_index.py` (3); rule 5: per-chunk embedding restored and the flag removed → 2 fail.
+⚬ Live (user), none run yet: each source on → Index now → a Chat question only that source can answer names its source; Messages: leave a conversation out, its count drops at once; Browser: shorten the look-back, older pages go; with page text + Web search on and on AC power the ledger shows "Page text for your browser history index"; AI chats: import the real ChatGPT zip, import it again (no duplicates), Remove. The new Settings controls have not been rendered or clicked.
+
+#137 — Index iMessages [~] live
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "iMessages ... I want them to be able to be indexed as well."
+Today: #134 decision 4 and LIVING_SPEC §1 said "Not iMessages in v1". The user lifted that on 2026-11-20 (LIVING_SPEC amended the same day). `events/imessage_watcher.py` already reads `~/Library/Messages/chat.db` (needs Full Disk Access). `KnowledgeIndex` refuses any folder inside `~/Library/Messages`; that stays (this source reads chat.db through its own reader, not as a folder).
+DECISIONS (user, 2026-11-20):
+1. All conversations are indexed once the source is on, with an EXCLUDE LIST of contacts and group chats in Settings. Excluding a conversation deletes its rows at once.
+DECISIONS (assistant proposal; the user can overturn any):
+2. Own toggle and own cloud toggle, both off, with wording that these are other people's words.
+3. One item per conversation per day (messages grouped, sender names kept), so a snippet has context and a date; `item_id` = chat id + date; no link (Messages has no stable per-message URL).
+4. Text only. Attachments, reactions and deleted messages are skipped.
+5. Newest first, capped like mail (5,000 items, 500 per pass).
+6. The iPhone remote's own thread (#85) is always excluded: it is the app talking to the user.
+Files (expected): reader in `ai/knowledge_index.py` (or new `ai/knowledge_sources/imessage.py`), `SOURCES`, `routes/knowledge.py` (exclude list endpoints), `KnowledgeIndexSettingsView.swift` (toggle + exclude list), `ai/taint.py` (label), `tests/test_knowledge_index.py` (the "no iMessage source" test changes to "off by default, own toggle").
+Verify:
+⚬ New test on a fake chat.db: source off → nothing read; on → a message is found with its conversation and date; an excluded contact is never indexed and excluding later removes its rows. Non-vacuous each.
+⚬ New test: the #85 own thread is never indexed.
+⚬ Safety: a planted instruction in an indexed message cannot run a side-effecting tool (extend `inj_indexed_mail_shortcut`).
+⚬ Live: turn it on, Index now, ask Chat about something only a text said; the answer names the conversation and date.
+⚬ pytest gate + Swift typecheck (rule 8).
+
+#138 — Index Calendar events [~] live
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "Calendar ... I want them to be able to be indexed as well."
+Today: the calendar layer reads events through EventKit in the app (#60, `CalendarBridge.swift`, `tools/calendar_access.py`), with attendees (#80). Nothing indexes them, so "when did I last meet Sam?" has no answer.
+DECISIONS (assistant proposal; the user can overturn any):
+1. Reuse `tools/calendar_access.py`; no new permission. If Calendar access is missing, the source shows the same message the Permissions screen does.
+2. One item per event: title, time, location, attendees, notes. Window: 2 years back, 1 year ahead. Recurring events: each occurrence in the window, not the rule.
+3. Own toggle and cloud toggle, both off. Attendee names and notes are other people's data: tainted like every other source.
+4. `item_id` = event id + start; changed or deleted events are updated or pruned on the next pass.
+Files (expected): reader (as #137), `SOURCES`, `KnowledgeIndexSettingsView.swift`, `ai/taint.py`, tests.
+Verify:
+⚬ New test with a fake calendar backend: an event is found by attendee name and by a word in its notes; a deleted event is pruned; off → rows gone. Non-vacuous each.
+⚬ Live: "when is my next dentist appointment?" and "when did I last meet <name>?" answer from the calendar and name the event.
+⚬ pytest gate + Swift typecheck (rule 8).
+
+#139 — Index Apple Notes [~] live
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "Notes ... I want them to be able to be indexed as well."
+Today: `tools/notes.py` (#46) creates and appends notes through AppleScript; nothing reads them in bulk.
+DECISIONS (assistant proposal; the user can overturn any):
+1. HOW TO READ is decided when scheduled, by trying both on a real library: (a) AppleScript `body of note` (uses the Automation permission the app already has; slow for thousands of notes), (b) `~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite` (fast, needs Full Disk Access, note bodies are gzipped protobuf, undocumented). Start with (a); move to (b) only if a pass over 1,000 notes takes over 5 minutes.
+2. Locked (password-protected) notes are never read. "Recently Deleted" is skipped.
+3. One item per note: title, folder, modified date, text (HTML stripped). Link: none unless a stable `notes://` link is found.
+4. Own toggle and cloud toggle, both off. A shared note can hold other people's text: tainted like every other source.
+Files (expected): reader (as #137), `SOURCES`, `KnowledgeIndexSettingsView.swift`, `ai/taint.py`, `ai/permissions.py` only if (b) is used, tests.
+Verify:
+⚬ New test with a fake notes reader: a note is found by a word in its body; an edited note is re-indexed, a deleted one pruned; a locked note is never loaded. Non-vacuous each.
+⚬ Live: time one full pass on the user's real Notes and record it here; ask Chat about one note.
+⚬ pytest gate + Swift typecheck (rule 8).
+
+#140 — Index browser history (titles and URLs; page text as an option; a look-back limit) [~] live
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "browser history ... I want them to be able to be indexed as well." On what to index: "make it an option to do both and set a time limit for how long to go back".
+DECISIONS (user, 2026-11-20):
+1. Two levels, both options: TITLES AND URLS (local history files only, no network), and PAGE TEXT (also download each visited page and index its text).
+2. A LOOK-BACK LIMIT in Settings: only visits newer than the limit are indexed; shortening it deletes older rows.
+3. Browsers: Safari, Chrome, Arc / Brave / Edge, Firefox.
+DECISIONS (assistant proposal; the user can overturn any):
+4. Look-back choices: 7 days, 30 days, 90 days, 1 year, everything. Default 90 days.
+5. Page text is a SECOND switch under the source, off by default, because it is the only index source that uses the network (7c). When on: fetched through #124's `fetch_page` path (http/https only, no cookies or logins, so a signed-in page comes back as its public version), at most one fetch per URL per 30 days, rate limited, AC power or idle only, and each fetch is a privacy-ledger row. Never fetched: private/incognito visits (not in history anyway), localhost and private-network addresses, URLs with tokens in the query string (strip the query or skip).
+6. An exclude list of sites (domains) in Settings; a few are excluded by default (banking, health and sign-in pages are suggested, the user edits the list).
+7. One item per URL (not per visit): title, URL, last visit, visit count; link = the URL. Fetched page text is outside text: tainted, and the injection shield matters most here.
+8. History files are copied to a temp file before reading (browsers hold them locked). Safari's needs Full Disk Access; Chromium browsers and Firefox read from the profile folders; every profile found is listed with its own checkbox.
+Files (expected): reader (as #137; one function per browser family: Safari `History.db`, Chromium `History`, Firefox `places.sqlite`), `SOURCES`, `routes/knowledge.py` (look-back, page-text switch, site exclude list, profiles), `KnowledgeIndexSettingsView.swift`, `ai/egress_log.py` (one kind, or reuse #124's), `ai/taint.py`, tests.
+Verify:
+⚬ New tests on fake history files for each of the three formats: a visit inside the limit is indexed, one outside is not; shortening the limit removes older rows; an excluded domain is never indexed. Non-vacuous each.
+⚬ New test: with page text off, indexing makes no network call (socket patched to raise); with it on, each fetch writes one ledger row and a private-network URL is never fetched.
+⚬ Safety: a planted instruction in fetched page text cannot run a side-effecting tool.
+⚬ Live: "what was that site about <topic> I read last week?" returns the page with its link.
+⚬ pytest gate + Swift typecheck (rule 8).
+
+#141 — Import chat history from ChatGPT and other AI apps (export files) [~] live
+Wave: _ · Agent: _ · Added: 2026-11-20 · Source: user
+Ask: "your history from ChatGPT or other apps ... I want them to be able to be indexed as well."
+DECISIONS (user, 2026-11-20):
+1. IMPORT EXPORT FILES: the user downloads their data export from the provider and picks the file in Settings. The app does not read other apps' local storage.
+DECISIONS (assistant proposal; the user can overturn any):
+2. Formats in v1: ChatGPT export (`conversations.json`, inside the zip or alone) and Claude export (`conversations.json`). A third format is added only when the user has a file to test with.
+3. One item per conversation: title, date, the turns in order (user and assistant text; tool output, images and attachments skipped). Long conversations are chunked as usual.
+4. Importing the same or a newer export again updates changed conversations and adds new ones; it never duplicates. Each import is listed in Settings (file name, date, conversation count) with a Remove button that deletes its rows.
+5. The picked file is read in place and not copied into `~/.bot-inator`; only the index holds its text. A zip is read without unpacking to disk.
+6. Own toggle and cloud toggle, both off. Assistant replies in these chats are model output and may quote web pages: tainted like every other source.
+7. Nothing is sent to OpenAI or Anthropic; this is a local file import.
+Files (expected): reader + importers (as #137, or new `ai/knowledge_sources/ai_exports.py`), `SOURCES`, `routes/knowledge.py` (import, list, remove), `KnowledgeIndexSettingsView.swift` (file picker + import list), `ai/taint.py`, tests with small made-up export fixtures.
+Verify:
+⚬ New tests on made-up ChatGPT and Claude export fixtures: a conversation is found by a phrase from the middle of it; importing twice does not duplicate; Remove deletes that import's rows only; a malformed file gives a clear error and indexes nothing. Non-vacuous each.
+⚬ Live: import the user's real ChatGPT export; ask Chat about something discussed there; the answer names the conversation.
+⚬ pytest gate + Swift typecheck (rule 8).
 
 ### Personal model
 

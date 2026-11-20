@@ -12,7 +12,26 @@
 - ``POST /api/knowledge/index-now``            ``{started, ...status}``; 409 while a
   pass is running
 - ``POST /api/knowledge/forget``               deletes the whole index, turns every
-  source off; ``{deleted, ...status}``
+  source off; ``{deleted, ...status}``. Options go back to their defaults,
+  except the lists that keep things out (``ki.KEPT_ON_FORGET``).
+
+#137–#141 (sources from ``ai/knowledge_sources/``):
+
+- ``GET  /api/knowledge/sources/{source}/options``  ``{source, options, defaults,
+  options_error}``; 404 for unknown sources and the four without options
+- ``PUT  /api/knowledge/sources/{source}/options``  body = the options object;
+  400 with the reader's own message when it doesn't validate. Narrowing
+  changes delete their rows at once (``deleted``); changes only a re-read can
+  prune start a one-source pass in a worker thread. ``{...status, options,
+  deleted}``
+- ``GET  /api/knowledge/sources/{source}/choices``  the reader's pickers
+  (Messages conversations, Notes folders, browser profiles, AI-chat imports),
+  run in a worker thread; 404 for Calendar (it has none)
+- ``POST /api/knowledge/sources/ai_chats/imports``  body ``{path}`` (absolute,
+  picked in the app): read once in place; the same path again replaces its
+  entry and keeps its id. 400 for a bad file. ``{...status, import}``
+- ``DELETE /api/knowledge/sources/ai_chats/imports/{id}``  removes it and its
+  conversations; 404 unknown id. ``{...status, deleted}``
 
 Nothing here sends anything off the Mac. The app-wide ``AuthMiddleware``
 (#27) guards every route.
@@ -124,4 +143,85 @@ async def index_now(request: Request) -> dict[str, Any]:
 async def forget(request: Request) -> dict[str, Any]:
     index = _index(request)
     deleted = await asyncio.to_thread(index.forget_everything)
+    return {**await asyncio.to_thread(_view, request, index), "deleted": deleted}
+
+
+# ---- per-source options (#137–#141) -------------------------------------------
+
+
+class ImportBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str
+
+
+def _module(index: ki.KnowledgeIndex, source: str) -> Any:
+    try:
+        return index.source_module(source)
+    except ki.SourceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _reindex(request: Request, source: str, wanted: bool) -> None:
+    indexer = getattr(request.app.state, "knowledge_indexer", None)
+    if wanted and indexer is not None:
+        indexer.reindex(source)
+
+
+@router.get("/sources/{source}/options")
+async def get_options(source: str, request: Request) -> dict[str, Any]:
+    index = _index(request)
+    _module(index, source)
+    return {"source": source, "options": index.get_options(source),
+            "defaults": ki.default_options(source), "options_error": index.options_error(source)}
+
+
+@router.put("/sources/{source}/options")
+async def put_options(source: str, request: Request) -> dict[str, Any]:
+    index = _index(request)
+    _module(index, source)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="options must be a JSON object") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="options must be a JSON object")
+    try:
+        result = await asyncio.to_thread(index.set_options, source, body)
+    except ValueError as exc:  # ki.SourceError: the reader's own message
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _reindex(request, source, result["reindex"])
+    return {**await asyncio.to_thread(_view, request, index), "options": result["options"],
+            "deleted": result["deleted"]}
+
+
+@router.get("/sources/{source}/choices")
+async def get_choices(source: str, request: Request) -> dict[str, Any]:
+    index = _index(request)
+    module = _module(index, source)
+    if getattr(module, "choices", None) is None:
+        raise HTTPException(status_code=404, detail=f"{module.TITLE} has nothing to choose")
+    # Messages reads chat.db, Notes runs osascript, browsers stat files:
+    # never on the event loop.
+    return await asyncio.to_thread(index.choices, source)
+
+
+@router.post("/sources/ai_chats/imports")
+async def add_import(body: ImportBody, request: Request) -> dict[str, Any]:
+    index = _index(request)
+    try:
+        entry = await asyncio.to_thread(index.add_ai_chat_import, body.path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _reindex(request, "ai_chats", True)
+    return {**await asyncio.to_thread(_view, request, index), "import": entry}
+
+
+@router.delete("/sources/ai_chats/imports/{import_id}")
+async def remove_import(import_id: str, request: Request) -> dict[str, Any]:
+    index = _index(request)
+    try:
+        deleted = await asyncio.to_thread(index.remove_ai_chat_import, import_id)
+    except ki.SourceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _reindex(request, "ai_chats", True)
     return {**await asyncio.to_thread(_view, request, index), "deleted": deleted}
