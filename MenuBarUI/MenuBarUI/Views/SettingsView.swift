@@ -554,6 +554,8 @@ struct SettingsView: View {
         case .vision:
             // #107: which model look_at_screen asks.
             VisionSettingsView()
+            // #147: background screen watching in timed sessions.
+            ScreenWatchSettingsView()
         case .webSearch:
             WebSearchSettingsView()
         case .dailyBrief:

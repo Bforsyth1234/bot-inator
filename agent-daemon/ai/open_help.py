@@ -398,7 +398,8 @@ _EVENT_STOPWORDS = frozenset(
 # ground an idea (todo #66). A new event type must be added here before
 # open-help reacts to it (invariant 7d: when in doubt, stay quiet).
 CONTENT_EVENT_TYPES = frozenset(
-    {"file", "mail_received", "imessage_received", "event_starting_soon"}
+    # #147: screen_seen carries the vision model's description of the window.
+    {"file", "mail_received", "imessage_received", "event_starting_soon", "screen_seen"}
 )
 # How :func:`_describe` starts the line of an event that is not content.
 _FOCUS_LINE_PREFIXES = ("switched to ", "app_activated", "clipboard_changed")
@@ -450,6 +451,10 @@ def _describe(event: ContextEvent) -> str:
         return f"file {meta.get('action', '?')}: {meta.get('path', '?')}"
     if event.event_type == "imessage_received":
         return f"iMessage received: {str(meta.get('text') or '')[:200]!r}"
+    if event.event_type == "screen_seen":
+        from events import screen_watcher
+
+        return screen_watcher.describe(event)
     if event.event_type == "app_activated":
         title = f" — {event.window_title}" if event.window_title else ""
         return f"switched to {event.app_name or '?'}{title}"

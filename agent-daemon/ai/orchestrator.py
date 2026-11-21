@@ -113,6 +113,8 @@ _AGENT_TRIGGER_EXCLUDED_EVENT_TYPES: frozenset[str] = frozenset({
     "app_activated",
     "clipboard_changed",
     "event_starting_soon",
+    # #147: background screen watching only feeds idea sources (7d).
+    "screen_seen",
 })
 
 # Built-in follow-up kinds the NextStepSuggester already turns into an
@@ -3561,6 +3563,10 @@ class Orchestrator:
             if meta.get("video_url"):
                 text += f" — video link: {meta['video_url']}"
             return text
+        if event.event_type == "screen_seen":
+            from events import screen_watcher
+
+            return screen_watcher.describe(event)
         if event.event_type == "clipboard_changed":
             return f"Copied {meta.get('kind', 'something')} in {event.app_name or 'an app'}"
         if event.event_type == "user_message":
@@ -3587,6 +3593,52 @@ def _is_tool_call_rejection(exc: Exception) -> bool:
     """True for Groq 400s caused by a malformed or invalid tool call."""
     text = str(exc)
     return "400" in text and any(marker in text for marker in _TOOL_CALL_REJECTIONS)
+
+
+_FAILED_NAME_RE = re.compile(r'"name"\s*:\s*"([A-Za-z0-9_]+)"')
+_FAILED_ARGS_RE = re.compile(r'"arguments"\s*:\s*(.*?)\s*\}?\s*$', re.DOTALL)
+SALVAGE_MAX_CHARS = 2000
+
+
+def _failed_generation(exc: Exception) -> str:
+    """Groq's ``failed_generation`` text from a tool-call 400, or ""."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        inner = body.get("error") if isinstance(body.get("error"), dict) else body
+        text = inner.get("failed_generation")
+        if isinstance(text, str):
+            return text
+    match = re.search(r"'failed_generation':\s*'(.*)'\s*\}\s*\}?\s*$", str(exc), re.DOTALL)
+    return match.group(1) if match else ""
+
+
+def _salvage_final_answer(exc: Exception) -> Optional[str]:
+    """#148: the answer text of a final answer Groq could not parse, or None.
+
+    GPT-OSS sometimes writes ``{"name": "answer", "arguments": no action"}``
+    (no opening quote). Groq rejects it twice and the event failed. Only a
+    ``final_answer`` / ``answer`` call is salvaged: a broken call to any
+    other tool still fails, so no tool ever runs on guessed arguments.
+    """
+    text = _failed_generation(exc)
+    name = _FAILED_NAME_RE.search(text)
+    if not name or name.group(1) not in ("final_answer", ANSWER_ALIAS):
+        return None
+    args = _FAILED_ARGS_RE.search(text)
+    raw = (args.group(1) if args else "").strip()
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("answer"), str):
+        answer = parsed["answer"]
+    elif isinstance(parsed, str):
+        answer = parsed
+    else:
+        inner = re.search(r'"answer"\s*:\s*"?(.*?)"?\s*\}?\s*$', raw, re.DOTALL)
+        answer = inner.group(1) if inner else raw
+    answer = answer.strip().strip('"').strip("'").strip()
+    return answer[:SALVAGE_MAX_CHARS] or None
 
 
 def _allow_null_optionals(spec: dict[str, Any]) -> None:
@@ -3872,7 +3924,15 @@ def _make_groq_model_class(base: type) -> type:
                     if attempt == 0 and _is_tool_call_rejection(exc):
                         logger.info("Groq rejected a tool call (%s); retrying once", exc)
                         continue
-                    raise
+                    salvaged = _salvage_final_answer(exc) if _is_tool_call_rejection(exc) else None
+                    if salvaged is None:
+                        raise
+                    # #148: a final answer with broken JSON, twice: keep its text.
+                    logger.info("Groq rejected a final answer twice; salvaged %r", salvaged[:120])
+                    from smolagents.models import ChatMessage  # type: ignore
+
+                    message = ChatMessage(role="assistant", content=salvaged)
+                    break
             # #143: the HTTP call can't be interrupted; a reply that comes
             # back after a Stop is dropped (it can't call a tool).
             chat_turns.raise_if_stopped()
