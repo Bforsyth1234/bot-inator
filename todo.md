@@ -35,6 +35,10 @@ a. NO BACKGROUND ACTION WITHOUT CONSENT. Every side-effecting tool call
    only, an "Always allow" click (per tool + trigger kind, revocable,
    every run announced with Undo) and a 10 s countdown while the user is
    active are consent too. LIVING_SPEC §1 "Always allow and the countdown".
+   AMENDED (user, 2026-11-21, for #147): background capture of the front
+   window is allowed only while the screen-watch switch is on AND a timed
+   session the user started is running; captures are reads that only feed
+   idea sources. LIVING_SPEC §1 "Screen watching".
    CONSTRAINT (user, 2026-11-18, for #118–#121): a personal model (LoRA
    adapter) never touches consent; the gate is the same code whichever
    model is loaded. LIVING_SPEC §1 "Personal model".
@@ -73,7 +77,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #146
+Next ID: #149
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -834,6 +838,41 @@ Verify (2026-11-20, release build, real daemon):
 ⚬ Swift typecheck (rule 8) passes. No daemon code changed.
 ⚬ Live (user): open Settings, click through every category, Cmd-Tab away and back several times → no stall; Memory & data → Knowledge index → iMessage list scrolls, filters and toggles as before.
 ⚬ NOT DONE: `ws.messages` still grows for the whole session (QuickAskPanel, ChatViewModel and ApprovalPresenter rely on its indexes being append-only); a cap needs an index offset in those three readers.
+
+---
+
+#147 — Watch the screen in the background (timed sessions) and feed it to the idea pipeline [~] live
+Results (2026-11-21, direct add):
+⚬ Built as designed below: `events/screen_watcher.py`, `routes/screen_watch.py`, `Views/ScreenWatchSettingsView.swift` (shared `ScreenWatchModel`, embedded under Settings → Vision), menu bar "Watch screen for ▸ 15 min / 1 h / 4 h" / "Stop watching screen (N min left)" and an eye icon while a session runs (`StatusItemController.swift`).
+⚬ Wiring: `user_settings.py` key, `ai/orchestrator.py` (signal-only + `_describe_event`), `ai/open_help.py` (content event + line), `ai/privacy.py` (personal fields), `ai/taint.py` (outside text, kind `window`), `main.py` (listener + router), `SettingsSearch.swift` keywords, LIVING_SPEC §1/§4/§6, invariant 7a note above.
+⚬ Tests: new `tests/test_screen_watcher.py` (26). Non-vacuous: 8 sabotages (switch check, settle, activity, min gap, temp delete, dedupe, signal-only, personal fields) each fail ≥1 test. Full gate: 2819 passed. Swift typecheck clean.
+⚬ Live (2026-11-21, user's daemon): switch on, 15-min session started 10:11:31, local Qwen3-VL-4B loaded in 1.0 s, 12 captures / 0 skipped in 7 min. Not yet seen: an open-help idea grounded in a `screen_seen` event.
+⚬ Note: Messages is not on the never-watch list by default, so conversations are captured and described (locally here).
+
+---
+
+#148 — BUG: iMessage events crash when Groq rejects a broken final answer twice [~] live
+Wave: — (direct add) · Added: 2026-11-21 · Source: user ("yes look at the imessage bug"), daemon log 10:17–10:18
+Evidence: on `imessage_received` turns GPT-OSS called `answer` with `"arguments": no action"` (no opening quote). Groq returned 400 `tool_use_failed`; the one retry failed the same way; `AgentGenerationError` ended the event with a traceback (`orchestrator.py` Groq `generate`).
+Fix: `ai/orchestrator.py` `_salvage_final_answer` / `_failed_generation`: after the retry, a rejected call whose `failed_generation` names `final_answer` or `answer` becomes a plain-text reply (then the existing text → `final_answer` path). Reads `exc.body` or the error text. A broken call to any other tool still raises: no tool runs on guessed arguments.
+Verify (2026-11-21):
+⚬ `tests/test_groq_model.py` +3 (salvage from the log's exact text, from `exc.body`, other tool still raises). Non-vacuous: without the fix 2 fail; salvaging any tool name 1 fails.
+⚬ Full gate: 2821 passed, 1 failed (`test_chat_stop.py::test_stop_during_a_slow_model_ends_the_turn_with_a_stopped_row`), run while the user's daemon and local vision model were busy. That file passed 17/17 three times on its own; read as timing flake under load, not caused by this change (it touches only the second-rejection path).
+⚬ Live (user): watch the daemon log on the next iMessages: no `AgentGenerationError`; a `salvaged 'no action'` line instead.
+Not changed: the iMessage prompt still offers `send_imessage` although #72's refusal blocks it (log 10:17:58: offered, refused by `user_declined_before`). Working as designed; the extra model step is wasted.
+Wave: — (direct add) · Added: 2026-11-21 · Source: user
+Ask: "can we make it so it watches the screen and feeds the images to the llm" → answers: suggest ideas; capture on app/window switch AND on an interval; cloud vision allowed with the opt-in; a Settings toggle plus timed sessions.
+INVARIANT AMENDMENT (user, 2026-11-21): #107 decision 1 said "no background capture". Amended: the daemon may capture the FRONT WINDOW in the background only while a SCREEN-WATCH SESSION the user started is running (Settings switch `AGENT_SCREEN_WATCH`, default "0", AND a session started from the menu bar / Settings for 15 min, 1 h or 4 h; sessions end on their own and on daemon restart). Captures are reads, not actions: 7a's card rule is unchanged (nothing it suggests runs without a card). 7c: the cloud vision route needs the personal-text opt-in, as #107 decision 3. 7d: images never reach the user directly; descriptions go through open-help's generate → judge → feedback filter.
+Design:
+⚬ New `events/screen_watcher.py` (`ScreenWatcher`): one thread; polls every 2 s while a session runs. Capture when the front window (pid + window id) changed and has stayed for 3 s, OR when 120 s passed since the last capture and the user was active in the last 60 s (HID idle time). At most one capture per 20 s.
+⚬ Every capture goes through `tools.look_at_screen.resolve("front_window")` (secure input, never-watch apps, private windows, sensitive sites, bot-inator's own windows) and `vision_engine.route()` (refused route = no capture). Captured into a 0700 temp folder, scaled, described by the vision model with a fixed prompt, then DELETED. An unchanged image (same hash as the last one of that window) is not described again.
+⚬ Emits `ContextEvent("screen_seen", app_name, window_title, metadata={"app","bundle_id","title","description","engine"})`. Signal-only (`_AGENT_TRIGGER_EXCLUDED_EVENT_TYPES`): the tool-calling agent never runs on it. Content event for open-help (`CONTENT_EVENT_TYPES`), so ideas come only through the judge. Personal fields `description`, `title` (`PERSONAL_EVENT_FIELDS`), so a cloud detection engine sees a placeholder unless the opt-in is on. Outside text for taint (a window can show anyone's words).
+⚬ New `routes/screen_watch.py`: `GET /api/screen-watch` (enabled, active, ends_at, captures, skipped, last_reason, route), `PUT` `{enabled}`, `POST /start` `{minutes ∈ 15,60,240}`, `POST /stop`.
+⚬ Swift: new `Views/ScreenWatchSettingsView.swift` (switch + start/stop + status), menu bar item "Watch screen for 1 hour" / "Stop watching screen (N min left)".
+Verify:
+⚬ New `tests/test_screen_watcher.py`: no capture without the switch or a session; session expiry stops capture; switch trigger waits for the 3 s settle; interval trigger needs recent activity; min gap; refused window/route → no capture and no event; temp folder deleted on success and failure; event shape; duplicate image not re-described. Route tests. Non-vacuous per rule 5.
+⚬ pytest gate + Swift typecheck (rule 8).
+⚬ Live (user): Settings → Screen watching on → Watch for 15 min → switch between a few apps → Thoughts shows `screen_seen` rows with descriptions; 1Password in front → no row; session ends after 15 min; Privacy ledger shows image rows only with a cloud vision model.
 
 ### Memory
 

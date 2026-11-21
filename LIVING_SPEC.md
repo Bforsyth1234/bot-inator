@@ -55,6 +55,23 @@ automatically" notice with one-click Undo and a macOS notification. A run
 whose tool failed is not journaled and the normal card path goes on.
 Store `~/.bot-inator/standing_rules.json` (0600, `AGENT_STANDING_RULES_PATH`).
 
+**Screen watching (amendment to #107 decision 1, user decision
+2026-11-21, item #147).** The daemon may capture the front window without a
+card only while the Settings switch `AGENT_SCREEN_WATCH` is on (default off)
+AND a session the user started (15 min, 1 h or 4 h; menu bar or Settings) is
+running. Sessions live in memory: a restart ends them. Captures are reads:
+each one passes `look_at_screen.resolve("front_window")` (secure input,
+never-watch apps, private windows, sensitive sites, bot-inator's own
+windows) and `vision_engine.route()` (cloud vision needs the personal-text
+opt-in, 7c), is described once by the vision model and deleted. The
+description becomes a signal-only `screen_seen` event: the tool-calling
+agent never runs on it; only open-help's generate → judge → feedback
+filter (7d) can turn it into an idea card, and 7a's card rule is unchanged.
+`description`/`title` are personal text (placeholder for cloud engines
+without the opt-in) and outside text for taint (#81). The menu bar icon is
+an eye while a session runs. `events/screen_watcher.py`,
+`routes/screen_watch.py`, `ScreenWatchSettingsView.swift`.
+
 **Always allow and the countdown (amendment to 7a, user decisions
 2026-11-18, items #115–#117).** Asked "can we add a button that always
 allows something to happen ... I want the model to have more freedom but
@@ -598,6 +615,8 @@ the bearer token (see Auth above):
 | GET/POST | `/api/watches`          | List / save watches (≤ 20; denied 3× in a row switches one off) (#88). |
 | PATCH/DELETE | `/api/watches/{id}` | `{enabled?, daily_limit?, cooldown_minutes?}` / delete (#88). |
 | GET    | `/api/tool-health`        | Every logged generated tool's health (#90).       |
+| GET/PUT | `/api/screen-watch`      | Screen-watching switch, session state and vision route; PUT `{enabled}` (off also stops the session) (#147). |
+| POST   | `/api/screen-watch/start` \| `/stop` | `{minutes}` ∈ 15, 60, 240 (409 while the switch is off) / stop (#147). |
 | GET    | `/api/rules`              | Standing rules, pending "always do this?" offers, recent automatic runs (#78). |
 | POST   | `/api/rules/offers/{id}/accept` | The user's yes: re-checks every limit, creates the rule (404 / 409) (#78). |
 | POST   | `/api/rules/offers/{id}/dismiss` | "No thanks" (offered again only after 5 more clean approvals) (#78). |
@@ -865,6 +884,9 @@ write-only; a save is mirrored into `os.environ` so it applies at once.
 |                               | transcript (0600, `~/.bot-inator/meetings/`) → one |
 |                               | prepared offer; local engines only;                |
 |                               | `routes/meeting_notes.py`. Optional `mlx-whisper`. |
+| `events/screen_watcher.py`    | #147 screen-watch sessions: front-window capture   |
+|                               | on switch / every 2 min while active → vision      |
+|                               | description → signal-only `screen_seen` event.     |
 | `tools/read_front_window.py`  | #89 front-window text via the app's Accessibility  |
 |                               | bridge (`bridge`, WS routed in `main.py`).         |
 | `ai/knowledge_index.py`       | #134 local knowledge index: `~/.bot-inator/        |

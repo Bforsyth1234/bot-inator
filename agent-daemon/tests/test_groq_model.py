@@ -298,3 +298,53 @@ def test_unknown_argument_with_a_value_is_kept_for_the_model_to_see() -> None:
     # Unparseable arguments and unknown tools are left as they were.
     assert _cleaned("list_events", "{not json") == "{not json"
     assert _cleaned("no_such_tool", {"": 1}) == {"": 1}
+
+
+# ---- #148: a final answer Groq could not parse is salvaged -------------------
+
+_BROKEN = ("Error code: 400 - {'error': {'message': 'Failed to parse tool call arguments as "
+           "JSON', 'type': 'invalid_request_error', 'code': 'tool_use_failed', "
+           "'failed_generation': '{\"name\": \"answer\", \"arguments\": no action\"}'}}")
+
+
+class _BodyError(RuntimeError):
+    def __init__(self, text: str, body: Any) -> None:
+        super().__init__(text)
+        self.body = body
+
+
+class _AlwaysBroken(_FakeBase):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__(ChatMessage(role="assistant", content=""))
+        self.exc = exc
+        self.calls = 0
+
+    def generate(self, *args, **kwargs):
+        self.calls += 1
+        raise self.exc
+
+
+def test_unparseable_final_answer_is_salvaged_after_the_retry() -> None:
+    m = _make_groq_model_class(_AlwaysBroken)(RuntimeError(_BROKEN))
+    out = m.generate([], tools_to_call_from=[object()])
+    assert m.calls == 2
+    assert out.tool_calls[0].function.name == "final_answer"
+    assert out.tool_calls[0].function.arguments == {"answer": "no action"}
+
+
+def test_salvage_reads_the_error_body_too() -> None:
+    body = {"error": {"code": "tool_use_failed",
+                      "failed_generation": '{"name": "final_answer", "arguments": {"answer": "no action"}'}}
+    m = _make_groq_model_class(_AlwaysBroken)(_BodyError("Error code: 400 - Failed to parse tool call", body))
+    out = m.generate([], tools_to_call_from=[object()])
+    assert out.tool_calls[0].function.arguments == {"answer": "no action"}
+
+
+def test_a_broken_call_to_any_other_tool_still_raises() -> None:
+    import pytest
+
+    text = _BROKEN.replace('\\"name\\": \\"answer\\"', '\\"name\\": \\"send_imessage\\"')
+    text = text.replace('"name": "answer"', '"name": "send_imessage"')
+    m = _make_groq_model_class(_AlwaysBroken)(RuntimeError(text))
+    with pytest.raises(RuntimeError):
+        m.generate([], tools_to_call_from=[object()])

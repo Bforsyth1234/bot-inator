@@ -75,6 +75,7 @@ from ai.setup_scan import (
 )
 from events.calendar_watcher import CalendarWatcher
 from events.clipboard_watcher import ClipboardWatcher
+from events.screen_watcher import ScreenWatcher  # #147
 from events.daily_brief import DailyBriefScheduler
 # #128: imported as the module on purpose (``weekly_report`` is also its tool).
 from events import weekly_report as weekly_report_mod
@@ -292,6 +293,8 @@ async def lifespan(app: FastAPI):
             ("mail_watcher", MailWatcher),
             ("calendar_watcher", CalendarWatcher),
             ("clipboard_watcher", ClipboardWatcher),
+            # #147: idle until the user starts a screen-watch session.
+            ("screen_watcher", ScreenWatcher),
             ("daily_brief", DailyBriefScheduler),
             ("weekly_report", WeeklyReportScheduler),
         ):
@@ -895,6 +898,9 @@ app.include_router(knowledge_routes.router)  # #134
 from routes import card_chat as card_chat_routes  # noqa: E402
 
 app.include_router(card_chat_routes.router)  # #130
+from routes import screen_watch as screen_watch_routes  # noqa: E402
+
+app.include_router(screen_watch_routes.router)  # #147
 
 
 def _next_seq() -> int:

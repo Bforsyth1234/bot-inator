@@ -34,9 +34,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             button.toolTip = "bot-inator: click to open, right-click for more"
         }
         ws.$lastStatus
-            .combineLatest(demo.$trace)
+            .combineLatest(demo.$trace, ScreenWatchModel.shared.$active)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _ in self?.updateIcon() }
+            .sink { [weak self] _, _, _ in self?.updateIcon() }
             .store(in: &cancellables)
         updateIcon()
     }
@@ -48,6 +48,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             image = NSImage(systemSymbolName: "pause.circle", accessibilityDescription: "bot-inator")
         } else if demo.isRecording {
             image = NSImage(systemSymbolName: "record.circle.fill", accessibilityDescription: "bot-inator")
+        } else if ScreenWatchModel.shared.active {
+            // #147: a screen-watch session is running.
+            image = NSImage(systemSymbolName: "eye.circle", accessibilityDescription: "bot-inator is watching the screen")
         } else {
             image = RobotGlyph.image()
         }
@@ -100,6 +103,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             menu.addItem(pause)
         }
         menu.addItem(action(demo.isRecording ? "Stop Watch me" : "Watch me…") { [watchMe] in watchMe() })
+        let screenWatch = ScreenWatchModel.shared
+        if screenWatch.active {
+            menu.addItem(action("Stop watching screen (\(screenWatch.minutesLeft) min left)") {
+                Task { await screenWatch.stop() }
+            })
+        } else if screenWatch.enabled {
+            let watch = NSMenuItem(title: "Watch screen for", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for length in ScreenWatchModel.lengths {
+                sub.addItem(action(length.label) { Task { await screenWatch.start(minutes: length.minutes) } })
+            }
+            watch.submenu = sub
+            menu.addItem(watch)
+        }
         let recorder = MeetingRecorder.shared
         if recorder.isRecording {
             menu.addItem(action("Stop taking notes") { Task { await recorder.stopFromClick() } })

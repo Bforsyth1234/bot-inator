@@ -58,6 +58,9 @@ ALLOWED_KEYS = frozenset({
     # #120: the personal model (LoRA adapter folder) in use, "" = the base
     # model. Written by ai.model_eval.PersonalModel, read live.
     "AGENT_PERSONAL_ADAPTER",
+    # #147: screen watching ("1"/"0", default off). Read live by
+    # events.screen_watcher; a session must also be started.
+    "AGENT_SCREEN_WATCH",
     "AGENT_REMOTE",
     "AGENT_REMOTE_HANDLE",
     "AGENT_REMOTE_IDLE_MINUTES",

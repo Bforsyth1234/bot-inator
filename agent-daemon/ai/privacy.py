@@ -51,6 +51,8 @@ PERSONAL_EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     # idea sources' detection prompts would dump them.
     "meeting_prep": ("attendees", "mail"),
     "daily_brief": ("waiting_on", "lookahead"),
+    # #147: what the vision model read off the user's screen.
+    "screen_seen": ("description", "title"),
 }
 # ``read_email`` result keys holding personal text.
 PERSONAL_EMAIL_FIELDS: tuple[str, ...] = ("subject", "body")

@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 # Events whose own metadata is outside text (decision 1a).
-OUTSIDE_TEXT_EVENTS: frozenset[str] = frozenset({"imessage_received", "mail_received"})
+OUTSIDE_TEXT_EVENTS: frozenset[str] = frozenset({"imessage_received", "mail_received", "screen_seen"})
 
 # Built-in tools that return outside text (decision 1b), with the kind of
 # text each returns. Every MCP tool marks too (#69 decision 5); callers
@@ -92,6 +92,7 @@ SOURCE_EVENT_KINDS: Mapping[str, str] = {
     "mail_received": "email",
     "imessage_received": "message",
     "event_starting_soon": "calendar",
+    "screen_seen": "window",
 }
 
 # How the card names each kind of outside text: "from <phrase>".
@@ -339,6 +340,10 @@ class TurnTaint:
         if event_type == "mail_received":
             label = f"email from {sender}" if sender else "an email"
             self._add("email", label, [meta.get("subject"), meta.get("sender")])
+            return True
+        if event_type == "screen_seen":
+            # #147: a window can show anyone's words.
+            self._add("window", "the watched window", [meta.get("description"), meta.get("title")])
             return True
         if event_type == "pattern_detected":
             kind = is_outside_trigger(meta.get("trigger"))
