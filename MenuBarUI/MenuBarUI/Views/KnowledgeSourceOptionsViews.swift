@@ -136,7 +136,10 @@ struct IMessageOptionsView: View {
                     .appFont(.fine)
                     .frame(maxWidth: 260)
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
+                    // Lazy: a Mac can have thousands of conversations, and
+                    // a checkbox per one built up front cost ~800 MB and
+                    // made every window focus change redraw them all.
+                    LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(shown(conversations)) { conv in
                             Toggle(isOn: Binding(
                                 get: { !isExcluded(conv) },

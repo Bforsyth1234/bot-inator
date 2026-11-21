@@ -38,8 +38,11 @@ struct ThoughtStreamView: View {
 
     // MARK: - Thought list
 
+    /// `thoughts` scans and sorts every message, so it is built once per
+    /// redraw here and passed down, not recomputed for each use.
     private var thoughtList: some View {
-        ScrollViewReader { proxy in
+        let thoughts = self.thoughts
+        return ScrollViewReader { proxy in
             List(thoughts) { entry in
                 ThoughtRow(seq: entry.seq, timestamp: entry.timestamp, payload: entry.payload)
                     .id(entry.id)
@@ -47,16 +50,16 @@ struct ThoughtStreamView: View {
             }
             .listStyle(.plain)
             .onAppear {
-                scrollToBottom(proxy: proxy, animated: false)
+                scrollToBottom(thoughts.last, proxy: proxy, animated: false)
             }
             .onChange(of: thoughts.count) { _, _ in
-                scrollToBottom(proxy: proxy, animated: true)
+                scrollToBottom(thoughts.last, proxy: proxy, animated: true)
             }
         }
     }
 
-    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
-        guard let last = thoughts.last else { return }
+    private func scrollToBottom(_ last: ThoughtEntry?, proxy: ScrollViewProxy, animated: Bool) {
+        guard let last else { return }
         DispatchQueue.main.async {
             if animated {
                 withAnimation(.easeOut(duration: 0.15)) {
