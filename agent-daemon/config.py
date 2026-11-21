@@ -199,7 +199,8 @@ class Settings:
     # Default inference provider for the three engines (main, analysis,
     # drafting). ``"local"`` runs MLX on Apple Silicon; any other name is
     # an OpenAI-compatible preset from ``providers.PRESETS`` (#97: groq,
-    # openai, anthropic, gemini, xai, openrouter, local_server, custom).
+    # openai, anthropic, gemini, xai, openrouter, local_server, splash,
+    # custom).
     # Selected via
     # ``AGENT_PROVIDER``. Use :meth:`engine_provider` rather than reading
     # this directly: each engine can override it.

@@ -51,6 +51,7 @@ there is one integration with presets:
 | xAI | `https://api.x.ai/v1` | none: pick from List models | untested |
 | OpenRouter | `https://openrouter.ai/api/v1` | none: pick from List models | untested |
 | Local server | `http://localhost:11434/v1` | none | run against Ollama |
+| Splash | `http://127.0.0.1:8001/v1` (start it with `splash serve --port 8001 --model …`; its default port 8000 is the daemon's) | `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` (all roles) | untested; needs an M3+ on macOS 26.4+ |
 | Custom | any OpenAI-compatible URL | none | untested |
 
 In **Settings… (⌘,)**: pick the provider, paste your key, click **List

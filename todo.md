@@ -166,7 +166,7 @@ pass-rate measurement is a live check · #38 a second
 
 ## Live checks
 
-Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #135, #136, #137–#141, #142, #143, #144, #145; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
+Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #135, #136, #137–#141, #142, #143, #144, #145, #146; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
 
 ## Completed items (archived to DONE.md)
 
@@ -838,6 +838,23 @@ Verify (2026-11-20, release build, real daemon):
 ⚬ Swift typecheck (rule 8) passes. No daemon code changed.
 ⚬ Live (user): open Settings, click through every category, Cmd-Tab away and back several times → no stall; Memory & data → Knowledge index → iMessage list scrolls, filters and toggles as before.
 ⚬ NOT DONE: `ws.messages` still grows for the whole session (QuickAskPanel, ChatViewModel and ApprovalPresenter rely on its indexes being append-only); a cap needs an index offset in those three readers.
+
+---
+
+#146 — Splash provider preset (local inference server for Apple silicon) [~] live
+Wave: — (direct add) · Added: 2026-11-20 · Source: user
+Ask: "should the app use this https://github.com/incoai/splash" → "Yes, add preset".
+Decision (runner, 2026-11-20): an option in the provider picker, not the default. MLX stays the default because Splash needs an M3+ on macOS 26.4+ (first run recommends Local from 24 GB on any Apple silicon), serves only five model families with nothing small for `analysis`, and is a separate server the user runs.
+Results:
+⚬ `agent-daemon/providers.py`: preset `splash` ("Splash (local, Apple silicon)", prefix `SPLASH`), base `http://127.0.0.1:8001/v1`, no key, every role defaults to `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` (one server serves one model). Source: Splash `docs/api.md`, `docs/server.md` (base `/v1`, `GET /v1/models`, `--port`).
+⚬ Port 8001, not Splash's default 8000: 8000 is the daemon's (`config.py` `port`). The user starts it with `splash serve --port 8001 --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M`.
+⚬ Loopback base → local (7c), no ledger rows; a LAN base counts as cloud. First run's cloud list skips it (loopback filter), same as `local_server`. The Settings picker reads presets from the daemon, so no Swift change.
+⚬ `docs/providers.md` table row; `config.py` comment.
+Verify (2026-11-20):
+⚬ New `tests/test_splash_preset.py` (4 tests). Non-vacuous: without the preset, collection fails (KeyError 'splash'); with the base on port 8000, the port test fails.
+⚬ Full pytest gate: 2793 passed. No Swift changed.
+⚬ Live (user): `brew install incoai/tap/splash`; `splash serve --port 8001 --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M`; Settings → provider Splash → List models shows the model → Test → Save → Restart Daemon; a Chat turn and one tool call with a card work; Privacy ledger shows nothing new. Preset stays `tested=False` until then.
+Deviations:
 
 ---
 

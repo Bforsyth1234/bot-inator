@@ -122,3 +122,6 @@ agent-daemon/tools/generated/*
 
 # Eval results (model output on recorded cases; may hold personal text)
 agent-daemon/evals/results/
+
+# /brag launch-video working output (large)
+brag-output/

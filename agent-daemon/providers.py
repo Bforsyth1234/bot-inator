@@ -12,6 +12,9 @@ Gemini https://ai.google.dev/gemini-api/docs/openai ·
 xAI https://docs.x.ai/developers/models ·
 Anthropic https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk ·
 Groq https://console.groq.com/docs/models.
+Splash (#146, 2026-11-20) https://github.com/incoai/splash docs/api.md and
+docs/server.md: OpenAI base ``/v1``, ``GET /v1/models``, ``--port``
+(default 8000, which is the daemon's own port, so the preset uses 8001).
 Default models are set only where they were confirmed; the others are
 blank and the user picks from the provider's own ``/models`` list in
 Settings. Nothing here is written from memory.
@@ -30,6 +33,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 ENGINE_ROLES: tuple[str, ...] = ("main", "analysis", "drafting")
+SPLASH_DEFAULT_MODEL = "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M"
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,16 @@ PRESETS: dict[str, Preset] = {p.id: p for p in (
     Preset(
         "local_server", "Local server (Ollama, LM Studio)", "LOCAL_SERVER",
         "http://localhost:11434/v1", key_required=False,
+    ),
+    # Splash (#146): local inference server for Apple silicon (M3+, macOS
+    # 26.4+). One server serves one model, so every role defaults to the
+    # README's quick-start model. Start it with
+    # ``splash serve --port 8001 --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M``.
+    Preset(
+        "splash", "Splash (local, Apple silicon)", "SPLASH",
+        "http://127.0.0.1:8001/v1",
+        {role: SPLASH_DEFAULT_MODEL for role in ENGINE_ROLES},
+        key_required=False, docs_url="https://github.com/incoai/splash",
     ),
     Preset("custom", "Custom (OpenAI-compatible)", "CUSTOM", ""),
 )}
