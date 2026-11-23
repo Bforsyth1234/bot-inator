@@ -77,7 +77,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #149
+Next ID: #150
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -877,6 +877,17 @@ Verify (2026-11-21):
 ⚬ Full gate: 2821 passed, 1 failed (`test_chat_stop.py::test_stop_during_a_slow_model_ends_the_turn_with_a_stopped_row`), run while the user's daemon and local vision model were busy. That file passed 17/17 three times on its own; read as timing flake under load, not caused by this change (it touches only the second-rejection path).
 ⚬ Live (user): watch the daemon log on the next iMessages: no `AgentGenerationError`; a `salvaged 'no action'` line instead.
 Not changed: the iMessage prompt still offers `send_imessage` although #72's refusal blocks it (log 10:17:58: offered, refused by `user_declined_before`). Working as designed; the extra model step is wasted.
+
+---
+
+#149 — BUG: menu bar app permissions reset after every rebuild [~] live
+Wave: — (direct add) · Added: 2026-11-21 · Source: user ("how come these permissions dont stay", screenshot: Contacts, Microphone, Speech Recognition back to not_determined) → "Yes, fix it"
+Cause: `install.sh` signed MenuBarUI.app ad hoc, so its designated requirement was `cdhash H"…"`. TCC keys grants to that requirement; each rebuild changes the hash, so macOS treats the app as new.
+Fix: `install.sh` signs with `BOT_INATOR_SIGN_ID` if set ("-" forces ad hoc), else the first "Apple Development" identity in the keychain, else ad hoc as before (says the grants won't stick).
+Verify (2026-11-21):
+⚬ `bash -n install.sh` clean; `./install.sh` on this Mac: "Signing with \"Apple Development: …\"", `codesign --verify` passes, designated requirement is now `identifier "com.botinator.MenuBarUI" and anchor apple generic and certificate leaf[subject.CN] = …` (no cdhash).
+⚬ No pytest/Swift change.
+⚬ Live (user): grant Contacts, Microphone, Speech Recognition once; run `./install.sh` again; reopen the app; all three stay granted.
 Wave: — (direct add) · Added: 2026-11-21 · Source: user
 Ask: "can we make it so it watches the screen and feeds the images to the llm" → answers: suggest ideas; capture on app/window switch AND on an interval; cloud vision allowed with the opt-in; a Settings toggle plus timed sessions.
 INVARIANT AMENDMENT (user, 2026-11-21): #107 decision 1 said "no background capture". Amended: the daemon may capture the FRONT WINDOW in the background only while a SCREEN-WATCH SESSION the user started is running (Settings switch `AGENT_SCREEN_WATCH`, default "0", AND a session started from the menu bar / Settings for 15 min, 1 h or 4 h; sessions end on their own and on daemon restart). Captures are reads, not actions: 7a's card rule is unchanged (nothing it suggests runs without a card). 7c: the cloud vision route needs the personal-text opt-in, as #107 decision 3. 7d: images never reach the user directly; descriptions go through open-help's generate → judge → feedback filter.
