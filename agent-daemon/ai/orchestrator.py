@@ -57,6 +57,7 @@ from . import card_batch
 from . import card_chat as card_chat_mod  # #130
 from . import chat_turns  # #143
 from . import knowledge_retrieval  # #134 part 2
+from . import delivery as delivery_mod
 from .delivery import BYPASS_KEY as DELIVERY_BYPASS_KEY
 from . import needs_reply as reply_checks
 
@@ -1192,6 +1193,28 @@ class Orchestrator:
                 logger.exception("Error handling event: %s", event)
 
     async def _handle_event(self, event: ContextEvent) -> None:
+        opened = (event.metadata or {}).get(DELIVERY_BYPASS_KEY)
+        if opened not in ("held", "inbox"):
+            await self._handle_event_inner(event)
+            return
+        # #131: the user pressed Show on a held / Inbox entry. A message or
+        # mail turn often ends in "no action", which used to look like the
+        # button did nothing: say so when the turn sent no card.
+        before = getattr(self, "_cards_sent", 0)
+        await self._handle_event_inner(event)
+        if getattr(self, "_cards_sent", 0) == before:
+            try:
+                self.publish_notice({
+                    "id": f"shown_nothing:{uuid.uuid4().hex[:12]}",
+                    "level": "info",
+                    "title": "Nothing to suggest",
+                    "body": f"Checked {delivery_mod.offer_title(event)}. "
+                            "The assistant found nothing to do for it.",
+                })
+            except Exception:
+                logger.exception("show-result notice failed")
+
+    async def _handle_event_inner(self, event: ContextEvent) -> None:
         if event.event_type == NOTICE_EVENT_TYPE:
             # A listener thread's notice (#19): not an observation, so no
             # thought, no observers, no agent.
@@ -1391,6 +1414,7 @@ class Orchestrator:
     async def _after_rule_run(self, event_id: str, run: dict[str, Any]) -> None:
         """#78: announce one automatic run (thought, notice with Undo, and a
         macOS notification). The run is already journaled (source="rule")."""
+        self._cards_sent = getattr(self, "_cards_sent", 0) + 1  # #131 Show result
         await self._emit_thought(
             event_id, "tool_result",
             f"{run['tool']} (standing rule {run['rule_id']}, no card): {run['result']}",
@@ -2236,6 +2260,7 @@ class Orchestrator:
                     notes=list(notes or []),
                 )
                 result = {"queued": True, "place": place, "message": card_batch.QUEUED_MESSAGE}
+                orchestrator._cards_sent = getattr(orchestrator, "_cards_sent", 0) + 1
                 done_store = getattr(orchestrator, "_turn_done", None)
                 if done_key and done_store is not None:
                     done_store[done_key] = result
@@ -2414,6 +2439,7 @@ class Orchestrator:
                     orchestrator, tool_name, result=result, args=call_args, kwargs=call_kwargs,
                 )
             if auto_allowed:
+                orchestrator._cards_sent = getattr(orchestrator, "_cards_sent", 0) + 1
                 # #116: journaled as source="always_allow", with Undo.
                 Orchestrator._after_always_allow_run(
                     orchestrator, tool_name, trigger,
@@ -2816,6 +2842,7 @@ class Orchestrator:
             ),
         )
         offer_id = self._record_offer_shown(tool_name, tool_args)
+        self._cards_sent = getattr(self, "_cards_sent", 0) + 1  # #131 Show result
         self._note_card_source(offer_id)
         delivery = getattr(self, "delivery", None)
         if delivery is not None and getattr(self, "_turn_kind", "") == "event" and not (

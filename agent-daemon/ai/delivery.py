@@ -544,7 +544,24 @@ def _title(event_type: str, meta: Mapping[str, Any]) -> str:
         text = _file_title(meta)
         if text:
             return text
+    # A held message or mail names who and what, not the raw event type, so
+    # the Held list says what Show will check (local UI only).
+    sender = " ".join(str(meta.get("sender") or "").split())
+    if event_type == "imessage_received":
+        text = " ".join(str(meta.get("text") or "").split())
+        head = f"Message from {sender}" if sender and sender != "unknown" else "Message"
+        return (f"{head}: {text}" if text else head)[:160]
+    if event_type == "mail_received":
+        subject = " ".join(str(meta.get("subject") or "").split())
+        head = f"Email from {sender}" if sender else "Email"
+        return (f"{head}: {subject}" if subject else head)[:160]
     return event_type
+
+
+def offer_title(event: Any) -> str:
+    """The one-line label of a held / Inbox event (its Held-list title)."""
+    meta = event.metadata if isinstance(getattr(event, "metadata", None), dict) else {}
+    return _title(str(getattr(event, "event_type", "") or ""), meta)
 
 
 @dataclass
@@ -1004,6 +1021,6 @@ __all__ = [
     "AGENT_INITIATED", "BYPASS_KEY", "BusyGate", "Decision", "Delivery",
     "DeliverySettings", "HELD_REASON_KEY", "PAUSED_FLAG", "HELD_SINCE_KEY", "HeldOffer",
     "NEVER_WATCH_SEED", "PAUSE_DURATIONS", "default_held_path",
-    "default_settings", "default_settings_path", "is_never_watched",
+    "default_settings", "default_settings_path", "is_never_watched", "offer_title",
     "set_default_settings", "shelf_life",
 ]
