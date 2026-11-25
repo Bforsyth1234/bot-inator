@@ -6919,3 +6919,40 @@ Verify (2026-11-21):
 ⚬ `bash -n install.sh` clean; `./install.sh` on this Mac: "Signing with \"Apple Development: …\"", `codesign --verify` passes, designated requirement is now `identifier "com.botinator.MenuBarUI" and anchor apple generic and certificate leaf[subject.CN] = …` (no cdhash).
 ⚬ No pytest/Swift change.
 ⚬ Live (user, 2026-11-23): granted Contacts, Microphone, Speech Recognition; `./install.sh` rebuilt the app; reopened (pid 34868); all three still granted.
+
+## Items closed 2026-11-25 (moved from todo.md)
+
+#150 — Settings: always show Restart Daemon, and restart on its own after a save that needs it [x]
+Done: 2026-11-25 · Commit: 2a09c6b (merged in 2a301fe, PR #55)
+Wave: _ · Agent: _ · Added: 2026-11-23 · Source: user
+Ask: "a) always show the restart daemon button. and b) auto restart it when a change requires it has been saved."
+Today: `Views/SettingsView.swift:674` shows "Restart Daemon" only when `saved.restartRequired` is true; after Save the status line says "Saved. Restart the daemon to apply." (`:280`) and the user must click. `restart_required` comes from `_settings_view()` (`agent-daemon/main.py:1424`); `POST /api/restart` (`main.py:1561`) re-execs, or 409s under `--reload` (`can_restart` false).
+DECISIONS (user, 2026-11-23):
+1. A: the Restart Daemon button is always visible in Settings, not only when `restartRequired` is true. Still disabled when `can_restart` is false, with the existing "--reload" help text.
+2. B: when Save returns `restart_required: true` and `can_restart` is true, the app asks for a restart itself, no click. When `can_restart` is false, keep today's "Restart the daemon to apply" message.
+3. B waits for idle (user, 2026-11-23: "Yes, wait for idle"): the auto-restart happens only when no turn is running and no approval card is open. Otherwise Settings shows "Saved. Restarting when the current task finishes." and the daemon restarts as soon as it is idle. A restart never drops a turn or withdraws a card. The manual Restart Daemon button (A) still restarts at once.
+4. Same everywhere (user, 2026-11-23: "Yes, same way"): every save that returns `restart_required: true` auto-restarts with the same idle rule: Settings, the first-run choice (`routes/first_run.py:256`, `Views/FirstRunView.swift`) and the local-models section (#136, `Views/LocalModelsSection.swift`). One shared Swift helper, not three copies.
+Files:
+⚬ OWNED: MenuBarUI/MenuBarUI/Views/SettingsView.swift (button + save → restart), MenuBarUI/MenuBarUI/Views/FirstRunView.swift and MenuBarUI/MenuBarUI/Views/LocalModelsSection.swift (save paths only), new shared helper (e.g. `Services/DaemonRestart.swift`: calls `POST /api/restart?when=idle`, returns now/pending for the status text).
+⚬ Daemon (decision 3): `agent-daemon/main.py` `restart_daemon()` gains a `when=idle` option, and `_settings_view()` gains a `restart_pending` field. The idle check and deferred re-exec go in a new module (e.g. `ai/deferred_restart.py`, rule 12 spirit) so `main.py` only calls it.
+Approach:
+⚬ A: drop the `if viewModel.saved?.restartRequired == true` guard around the button. The button calls `POST /api/restart` as today (at once).
+⚬ B: at the end of `save()`, if `saved?.restartRequired == true && saved?.canRestart == true`, call `POST /api/restart?when=idle`. The daemon waits on its side, not the app, so it still restarts if the Settings window or the app is closed.
+⚬ Idle = no turn in progress in the orchestrator AND no pending approval_request (including code review). The daemon checks every ~2 s; when idle, it re-execs exactly as `restart_daemon()` does now. Reply `{"restart": "now"}` or `{"restart": "pending"}`; the app shows "Saved. Restarting…" or "Saved. Restarting when the current task finishes." A second save while pending keeps one pending restart. A manual restart (A) cancels the wait and restarts at once.
+⚬ Fallback if the idle check can't see turns/cards cleanly: restart only when idle at the moment of save, otherwise show today's message plus the button (no waiting).
+Verify:
+⚬ Live (user): open Settings with nothing changed → Restart Daemon is shown and works. Change the provider → Save → daemon restarts by itself, Settings reloads, `restart_required` is false. Change only a live setting (e.g. cloud personal text) → Save → no restart. Run under `--reload` → button disabled, Save shows "Restart the daemon to apply", no restart attempted. With an approval card open → change the provider → Save → "Restarting when the current task finishes"; approve or deny the card → daemon restarts; the card is recorded approved/denied, not `withdrawn`. First run: pick an engine → daemon restarts by itself, no button. Local models: change a model → Save → same auto-restart (or "when the current task finishes").
+⚬ New `tests/test_deferred_restart.py`: idle → re-exec called at once; turn running or card open → not called, then called once both clear; two pending requests → one re-exec; manual restart while pending → at once; `can_restart` false → 409. Re-exec is mocked. Non-vacuous per rule 5 (drop the idle check → the "card open" test fails).
+⚬ pytest gate + Swift typecheck (rule 8).
+Results (subagent, 2026-11-25):
+⚬ New `ai/deferred_restart.py`: `daemon_idle()` (no `Orchestrator._pending`, no `_pending_code`, event queue empty, `EventBus.consumer_busy` false while the loop task is alive; chat turns are awaited inside that loop, so they count) and `DeferredRestart` (one pending restart, 2 s poll, fires once, a manual restart cancels the wait, a turn starting in the 0.5 s reply delay sends it back to waiting).
+⚬ `main.py`: re-exec moved to `_reexec_daemon()` (same behaviour); `restart_daemon(when=None|"idle")` replies `{"status":"restarting","restart":"now"|"pending"}`, 400 for another `when`, 409 when `can_restart` is false; `_settings_view()` gains `restart_pending`.
+⚬ New `Services/DaemonRestart.swift` (the one helper: `.now` / `.pending` / `.unavailable` / `.failed` + the status text). `SettingsView.swift`: button always shown (disabled under --reload); `save()` auto-restarts with `whenIdle: true`. `FirstRunView.swift` `submit()` uses the helper.
+⚬ New `tests/test_deferred_restart.py` (15). Non-vacuous: dropping the card/busy checks → 4 fail; dropping the one-pending / fire-once / cancel guards → 2 fail; restored → pass.
+Verify (runner, 2026-11-25): pytest 2860 passed, 0 failed (with #151 in the tree); Swift typecheck 0 errors. Live check above still to run → `[~] live`.
+Deviations:
+1. Edited `events/event_bus.py` (not on the list): a `consumer_busy` flag set in `consume()`, read-only property. Without it the only ways to see a running turn were monkeypatching `_handle_event` or reading the task's coroutine stack. Only caller of `consume()` is `orchestrator.py:1187`.
+2. `LocalModelsSection.swift` unchanged: it has no save of its own; its changes merge into `SettingsViewModel.save()`, so local-model saves get the same auto-restart.
+3. The reply keeps `"status":"restarting"` next to `"restart"` so older app builds still decode; the helper reads a reply without `"restart"` as "now".
+Note: Settings does not poll `restart_pending` after a "pending" reply; it shows the message and the daemon restarts on its own.
+⚬ Live (user, 2026-11-25): Restart Daemon button shown and works; user marked #150 done. The auto-restart after Save and the wait-for-idle path were not separately reported.
