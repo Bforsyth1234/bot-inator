@@ -40,6 +40,10 @@ class EventBus:
     def __init__(self, maxsize: int = 0) -> None:
         self._queue: asyncio.Queue[ContextEvent] = asyncio.Queue(maxsize=maxsize)
         self._loop: asyncio.AbstractEventLoop | None = None
+        # #150: True from the moment :meth:`consume` hands an event out
+        # until the consumer asks for the next one, i.e. while the
+        # orchestrator loop is handling it (a turn is running).
+        self._consumer_busy = False
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Record the event loop that owns this bus (for cross-thread pushes)."""
@@ -53,7 +57,15 @@ class EventBus:
         await self._queue.put(event)
 
     async def consume(self) -> ContextEvent:
-        return await self._queue.get()
+        self._consumer_busy = False  # the previous event is done
+        event = await self._queue.get()
+        self._consumer_busy = True
+        return event
+
+    @property
+    def consumer_busy(self) -> bool:
+        """#150: the consumer took an event and has not asked for another."""
+        return self._consumer_busy
 
     def push_threadsafe(self, event: ContextEvent) -> None:
         """Schedule a push from a non-asyncio thread.

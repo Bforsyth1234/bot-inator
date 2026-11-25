@@ -6907,3 +6907,15 @@ Results (wave 17, 2026-11-11, commits d328716, 386610e):
 ⚬ Full pytest suite on wave-17: 1614 passed.
 ⚬ Live (user): in a new clone, ./install.sh then ./run.sh → the app opens.
 Deviations:
+
+## Items closed 2026-11-23 (moved from todo.md)
+
+#149 — BUG: menu bar app permissions reset after every rebuild [x]
+Done: 2026-11-23 · Commit: a8da59d
+Wave: — (direct add) · Added: 2026-11-21 · Source: user ("how come these permissions dont stay", screenshot: Contacts, Microphone, Speech Recognition back to not_determined) → "Yes, fix it"
+Cause: `install.sh` signed MenuBarUI.app ad hoc, so its designated requirement was `cdhash H"…"`. TCC keys grants to that requirement; each rebuild changes the hash, so macOS treats the app as new.
+Fix: `install.sh` signs with `BOT_INATOR_SIGN_ID` if set ("-" forces ad hoc), else the first "Apple Development" identity in the keychain, else ad hoc as before (says the grants won't stick).
+Verify (2026-11-21):
+⚬ `bash -n install.sh` clean; `./install.sh` on this Mac: "Signing with \"Apple Development: …\"", `codesign --verify` passes, designated requirement is now `identifier "com.botinator.MenuBarUI" and anchor apple generic and certificate leaf[subject.CN] = …` (no cdhash).
+⚬ No pytest/Swift change.
+⚬ Live (user, 2026-11-23): granted Contacts, Microphone, Speech Recognition; `./install.sh` rebuilt the app; reopened (pid 34868); all three still granted.

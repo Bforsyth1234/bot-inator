@@ -77,7 +77,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #149
+Next ID: #152
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -166,7 +166,7 @@ pass-rate measurement is a live check · #38 a second
 
 ## Live checks
 
-Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #135, #136, #137–#141, #142, #143, #144, #145, #146; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
+Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #135, #136, #137–#141, #142, #143, #144, #145, #146, #147, #148, #150, #151; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
 
 ## Completed items (archived to DONE.md)
 
@@ -300,6 +300,7 @@ Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #135, #136, #137
 - #97 — One OpenAI-compatible provider, with presets for OpenAI, Anthropic, Gemini, xAI and Groq · 2026-11-19 · [DONE.md](DONE.md)
 - #91 — Make the GitHub repo say what this is: description, LICENSE, demo at the top of the README · 2026-11-19 · [DONE.md](DONE.md)
 - #92 — One-command install and start · 2026-11-19 · [DONE.md](DONE.md)
+- #149 — BUG: menu bar app permissions reset after every rebuild · 2026-11-23 · [DONE.md](DONE.md)
 
 ---
 
@@ -424,6 +425,45 @@ one that touches the WS schema. None is scheduled into a wave yet.
 ---
 
 ### Generated tools
+
+#151 — Tell the user up front when a generated tool needs to run outside the sandbox (or needs a macOS permission) [~] live
+Wave: _ · Agent: _ · Added: 2026-11-23 · Source: user
+Ask: "when the app generates a tool that needs permissions outside the sandbox shouldnt the app tell the user it needs that to work?"
+Today:
+⚬ The code review card (`Views/CodeReviewAlert.swift:230`) has the "Run outside the sandbox" checkbox (#104), off by default, with the same generic text for every tool: "Leave off unless the sandbox blocks something this tool needs". It never says whether THIS tool needs it.
+⚬ The dry run (`tools/draft_dry_run.py` `refusal_note` / `evaluate_call`) counts a sandbox refusal as a hard problem and sends it back to the drafter. Some refusals no rewrite can fix (#102/#103: macOS refuses `quit` and Mail message data, Apple Event -10004, to any `sandbox-exec` process).
+⚬ The user only finds out after install, when a call fails and `ai/tool_health.py` (`REASON_SANDBOX_APPLE_EVENT`, `REASON_SANDBOX_EXECUTABLE`, `CATEGORY_SANDBOX`) says "you can let it run outside the sandbox: Tool Manager → …".
+⚬ macOS permissions (Contacts, Calendar, Automation, Full Disk Access) are likewise only reported after a failure (`CATEGORY_PERMISSION` → Settings → Permissions).
+DECISIONS (user, 2026-11-25):
+⚬ Q1 → both cards: the idea card (`generate_custom_tool` card in `Views/ApprovalAlert.swift`) gives an early "will likely need…" line from the idea text; the code card gives the exact reasons from the code.
+⚬ Q2 → install anyway: if a tool needs outside-the-sandbox and the box is left off, Approve still installs it sandboxed. The card has already said it will fail; Tool Manager can flip it later. Approve is never blocked.
+⚬ Q3 → Grant button: for each macOS permission not granted yet, the card shows a "Grant" button that opens the right System Settings pane, reusing the Permissions checklist's open action (#59, `Views/PermissionsView.swift`). Granting never approves the card.
+Approach (assistant, 2026-11-23; Q1–Q3 resolved above):
+1. A "needs" check from the drafted source, at code-gate time (new module, e.g. `ai/tool_needs.py`, reusing `tool_sandbox`'s AST helpers): flags `quit` / Mail message-data AppleScript, Apple Events to `DENIED_APPLE_EVENT_TARGETS`, `subprocess` of programs outside the allowed exec list, writes into closed paths (`~/Library`, `~/.ssh`), and the TCC permission each API needs (Contacts, EventKit, Mail database → Full Disk Access, `tell application` → Automation for that app).
+2. Dry-run result: a refusal that matches a known unfixable class (-10004, denied exec) is recorded as "needs outside the sandbox", not sent to the drafter as a bug.
+3. The code card shows a line per need, in plain words: "This tool needs to run outside the sandbox to work: it quits apps, which macOS blocks for sandboxed tools." and "It also needs Contacts access (not granted yet)." with the permission's current state from `ai/permissions.py`.
+4. The checkbox stays OFF by default (invariant 7b, #104 decision 1); the card only explains. If the user leaves it off, the tool installs sandboxed and the first failure says the same thing as today.
+5. The idea card (first gate) can say it too ("This will likely need to run outside the sandbox"), so the user can drop the idea before any code is written.
+Files:
+⚬ OWNED: new `agent-daemon/ai/tool_needs.py` (code scan + idea-text guess), new `tests/test_tool_needs.py`, `tools/draft_dry_run.py` (refusal classing only), `MenuBarUI/MenuBarUI/Views/CodeReviewAlert.swift` (needs section + Grant buttons), `MenuBarUI/MenuBarUI/Views/ApprovalAlert.swift` (one "will likely need" line on the generate_custom_tool card), new `MenuBarUI/MenuBarUI/Views/ToolNeedsSection.swift` (shared by both cards).
+⚬ EDITED (additive): `Views/PermissionsView.swift` (expose the open-pane action for reuse, no behaviour change).
+⚬ Runner: the `needs` field (list of {kind, reason, granted}) on the idea and code-review payloads in `schemas/ws_messages.py` + `WSMessage.swift`; `Orchestrator` fills it; LIVING_SPEC row.
+Verify:
+⚬ Tests: a draft that runs `tell application "Spotify" to quit` → needs `outside_sandbox` with the quit reason; one that reads Contacts → needs `contacts`; a plain file-in-Documents tool → no needs. Dry run: a -10004 refusal → recorded as a need, not a drafter problem. Non-vacuous per rule 5 (drop the quit pattern → the first test fails).
+⚬ pytest gate + Swift typecheck (rule 8).
+⚬ Live (user): ask for "a tool that quits Spotify" → the code card says it needs to run outside the sandbox and why; box still off by default; the idea card before it said "will likely need to run outside the sandbox". Approve with the box off → it installs; the first call fails with today's tool_health line. Ask for a tool that lists Contacts with Contacts not granted → the card says Contacts access is needed, Grant opens System Settings → Privacy → Contacts, and the card stays open.
+Results (subagent, 2026-11-25):
+⚬ New `ai/tool_needs.py`: source scan (quit via `tell … to quit` / tell block / JXA `.quit()`; Mail message data; Apple Events to the `DENIED_APPLE_EVENT_TARGETS` apps, pinned by a test; subprocess of programs outside `ALLOWED_EXECUTABLES`; `os.system` / `shell=True`; writes into ~/Library or ~/.ssh; permissions contacts / calendars / reminders / full_disk_access / automation:<App>, `granted` from `ai/permissions.py`), an idea-text guess, and a small store for dry-run needs.
+⚬ `tools/draft_dry_run.py`: `unfixable_refusal()`: a -10004 / privilege-violation or denied-exec refusal (with no closed path named) becomes a need on `DryRunResult.needs`, not a drafter problem. #114 path refusals unchanged.
+⚬ `schemas/ws_messages.py` + `Models/WSMessage.swift`: `ToolNeed` {kind, reason, granted, permission_id}; optional `needs` on `ApprovalRequestPayload` and `CodeApprovalRequestPayload` (old payloads decode). `ai/orchestrator.py`: `_card_needs()` off the loop, 3 s limit (falls back to the scan without permission checks), never holds a card back; filled on the code card and on generate_custom_tool idea cards without actions.
+⚬ New `Views/ToolNeedsSection.swift` (`.exact` on `CodeReviewAlert.swift` above the trust checkbox, `.likely` one line on `ApprovalAlert.swift`), Grant buttons via new additive `PermissionsViewModel.request(permissionId:)` / `settingsURL(forNeedKind:)` in `PermissionsView.swift`. Checkbox still off by default; Approve never blocked.
+⚬ New `tests/test_tool_needs.py` (19), incl. `test_tool_needs_never_touches_trust`. Non-vacuous: dropping the quit patterns → 5 fail; Contacts detection → 2; treating Documents as closed → 3; dry-run classing → 3; `needs=None` in the orchestrator → 2; restored → pass.
+Verify (runner, 2026-11-25): pytest 2860 passed, 0 failed (with #150 in the tree); Swift typecheck 0 errors. LIVING_SPEC §4 row added. Live check above still to run → `[~] live`.
+Deviations:
+1. Each need also carries `permission_id`, so Grant calls the exact Permissions row instead of rebuilding its id from app names.
+2. Dry-run needs reach the code card through a store in `ai/tool_needs.py` (`record_dry_run` / `code_needs`, matched on the card's code), so `tools/meta_tool_generator.py` (not on the list) is unchanged.
+3. An email idea is guessed as Full Disk Access, not outside the sandbox: a generated tool can use the `list_recent_emails` built-in sandboxed. Only AppleScript Mail message data in the code is flagged outside-the-sandbox.
+4. Grant reuses the Permissions row's own action: for Contacts and Calendars that is the app's own macOS prompt; System Settings opens when the row does that or there is no row (Reminders, unlisted Automation apps).
 
 ---
 
@@ -890,6 +930,39 @@ Verify:
 ⚬ New `tests/test_screen_watcher.py`: no capture without the switch or a session; session expiry stops capture; switch trigger waits for the 3 s settle; interval trigger needs recent activity; min gap; refused window/route → no capture and no event; temp folder deleted on success and failure; event shape; duplicate image not re-described. Route tests. Non-vacuous per rule 5.
 ⚬ pytest gate + Swift typecheck (rule 8).
 ⚬ Live (user): Settings → Screen watching on → Watch for 15 min → switch between a few apps → Thoughts shows `screen_seen` rows with descriptions; 1Password in front → no row; session ends after 15 min; Privacy ledger shows image rows only with a cloud vision model.
+
+#150 — Settings: always show Restart Daemon, and restart on its own after a save that needs it [~] live
+Wave: _ · Agent: _ · Added: 2026-11-23 · Source: user
+Ask: "a) always show the restart daemon button. and b) auto restart it when a change requires it has been saved."
+Today: `Views/SettingsView.swift:674` shows "Restart Daemon" only when `saved.restartRequired` is true; after Save the status line says "Saved. Restart the daemon to apply." (`:280`) and the user must click. `restart_required` comes from `_settings_view()` (`agent-daemon/main.py:1424`); `POST /api/restart` (`main.py:1561`) re-execs, or 409s under `--reload` (`can_restart` false).
+DECISIONS (user, 2026-11-23):
+1. A: the Restart Daemon button is always visible in Settings, not only when `restartRequired` is true. Still disabled when `can_restart` is false, with the existing "--reload" help text.
+2. B: when Save returns `restart_required: true` and `can_restart` is true, the app asks for a restart itself, no click. When `can_restart` is false, keep today's "Restart the daemon to apply" message.
+3. B waits for idle (user, 2026-11-23: "Yes, wait for idle"): the auto-restart happens only when no turn is running and no approval card is open. Otherwise Settings shows "Saved. Restarting when the current task finishes." and the daemon restarts as soon as it is idle. A restart never drops a turn or withdraws a card. The manual Restart Daemon button (A) still restarts at once.
+4. Same everywhere (user, 2026-11-23: "Yes, same way"): every save that returns `restart_required: true` auto-restarts with the same idle rule: Settings, the first-run choice (`routes/first_run.py:256`, `Views/FirstRunView.swift`) and the local-models section (#136, `Views/LocalModelsSection.swift`). One shared Swift helper, not three copies.
+Files:
+⚬ OWNED: MenuBarUI/MenuBarUI/Views/SettingsView.swift (button + save → restart), MenuBarUI/MenuBarUI/Views/FirstRunView.swift and MenuBarUI/MenuBarUI/Views/LocalModelsSection.swift (save paths only), new shared helper (e.g. `Services/DaemonRestart.swift`: calls `POST /api/restart?when=idle`, returns now/pending for the status text).
+⚬ Daemon (decision 3): `agent-daemon/main.py` `restart_daemon()` gains a `when=idle` option, and `_settings_view()` gains a `restart_pending` field. The idle check and deferred re-exec go in a new module (e.g. `ai/deferred_restart.py`, rule 12 spirit) so `main.py` only calls it.
+Approach:
+⚬ A: drop the `if viewModel.saved?.restartRequired == true` guard around the button. The button calls `POST /api/restart` as today (at once).
+⚬ B: at the end of `save()`, if `saved?.restartRequired == true && saved?.canRestart == true`, call `POST /api/restart?when=idle`. The daemon waits on its side, not the app, so it still restarts if the Settings window or the app is closed.
+⚬ Idle = no turn in progress in the orchestrator AND no pending approval_request (including code review). The daemon checks every ~2 s; when idle, it re-execs exactly as `restart_daemon()` does now. Reply `{"restart": "now"}` or `{"restart": "pending"}`; the app shows "Saved. Restarting…" or "Saved. Restarting when the current task finishes." A second save while pending keeps one pending restart. A manual restart (A) cancels the wait and restarts at once.
+⚬ Fallback if the idle check can't see turns/cards cleanly: restart only when idle at the moment of save, otherwise show today's message plus the button (no waiting).
+Verify:
+⚬ Live (user): open Settings with nothing changed → Restart Daemon is shown and works. Change the provider → Save → daemon restarts by itself, Settings reloads, `restart_required` is false. Change only a live setting (e.g. cloud personal text) → Save → no restart. Run under `--reload` → button disabled, Save shows "Restart the daemon to apply", no restart attempted. With an approval card open → change the provider → Save → "Restarting when the current task finishes"; approve or deny the card → daemon restarts; the card is recorded approved/denied, not `withdrawn`. First run: pick an engine → daemon restarts by itself, no button. Local models: change a model → Save → same auto-restart (or "when the current task finishes").
+⚬ New `tests/test_deferred_restart.py`: idle → re-exec called at once; turn running or card open → not called, then called once both clear; two pending requests → one re-exec; manual restart while pending → at once; `can_restart` false → 409. Re-exec is mocked. Non-vacuous per rule 5 (drop the idle check → the "card open" test fails).
+⚬ pytest gate + Swift typecheck (rule 8).
+Results (subagent, 2026-11-25):
+⚬ New `ai/deferred_restart.py`: `daemon_idle()` (no `Orchestrator._pending`, no `_pending_code`, event queue empty, `EventBus.consumer_busy` false while the loop task is alive; chat turns are awaited inside that loop, so they count) and `DeferredRestart` (one pending restart, 2 s poll, fires once, a manual restart cancels the wait, a turn starting in the 0.5 s reply delay sends it back to waiting).
+⚬ `main.py`: re-exec moved to `_reexec_daemon()` (same behaviour); `restart_daemon(when=None|"idle")` replies `{"status":"restarting","restart":"now"|"pending"}`, 400 for another `when`, 409 when `can_restart` is false; `_settings_view()` gains `restart_pending`.
+⚬ New `Services/DaemonRestart.swift` (the one helper: `.now` / `.pending` / `.unavailable` / `.failed` + the status text). `SettingsView.swift`: button always shown (disabled under --reload); `save()` auto-restarts with `whenIdle: true`. `FirstRunView.swift` `submit()` uses the helper.
+⚬ New `tests/test_deferred_restart.py` (15). Non-vacuous: dropping the card/busy checks → 4 fail; dropping the one-pending / fire-once / cancel guards → 2 fail; restored → pass.
+Verify (runner, 2026-11-25): pytest 2860 passed, 0 failed (with #151 in the tree); Swift typecheck 0 errors. Live check above still to run → `[~] live`.
+Deviations:
+1. Edited `events/event_bus.py` (not on the list): a `consumer_busy` flag set in `consume()`, read-only property. Without it the only ways to see a running turn were monkeypatching `_handle_event` or reading the task's coroutine stack. Only caller of `consume()` is `orchestrator.py:1187`.
+2. `LocalModelsSection.swift` unchanged: it has no save of its own; its changes merge into `SettingsViewModel.save()`, so local-model saves get the same auto-restart.
+3. The reply keeps `"status":"restarting"` next to `"restart"` so older app builds still decode; the helper reads a reply without `"restart"` as "now".
+Note: Settings does not poll `restart_pending` after a "pending" reply; it shows the message and the daemon restarts on its own.
 
 ### Memory
 

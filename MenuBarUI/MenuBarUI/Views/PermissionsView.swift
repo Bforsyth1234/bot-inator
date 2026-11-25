@@ -112,6 +112,35 @@ final class PermissionsViewModel: ObservableObject {
         }
     }
 
+    /// #151: the same action as a row's button, by permission id (the Grant
+    /// button on a generated tool's card, `ToolNeedsSection`). Loads the rows
+    /// first when this model has none; an unknown id does nothing.
+    func request(permissionId: String) async {
+        if rows.isEmpty { await refresh() }
+        guard let row = rows.first(where: { $0.id == permissionId }) else { return }
+        await request(row)
+    }
+
+    /// #151: the System Settings pane for a need with no Permissions row
+    /// (Reminders, Automation for an app the checklist doesn't list).
+    /// Mirrors `ai.permissions.SETTINGS_URLS`.
+    static func settingsURL(forNeedKind kind: String) -> URL? {
+        let pane = "x-apple.systempreferences:com.apple.preference.security?"
+        let anchor: String
+        if kind.hasPrefix("automation:") {
+            anchor = "Privacy_Automation"
+        } else {
+            switch kind {
+            case "contacts": anchor = "Privacy_Contacts"
+            case "calendars": anchor = "Privacy_Calendars"
+            case "reminders": anchor = "Privacy_Reminders"
+            case "full_disk_access": anchor = "Privacy_AllFiles"
+            default: return nil
+            }
+        }
+        return URL(string: pane + anchor)
+    }
+
     private static func describe(_ status: MeetingAuthStatus) -> String {
         switch status {
         case .authorized: return "granted"

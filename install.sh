@@ -76,7 +76,26 @@ sed -e 's/$(DEVELOPMENT_LANGUAGE)/en/' -e 's/$(EXECUTABLE_NAME)/MenuBarUI/' \
   Info.plist > "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
-codesign --force --sign - "$APP" 2>/dev/null
+# Sign with a stable identity when there is one (#149). macOS keys privacy
+# grants (Contacts, Microphone, Speech Recognition, Calendars) to the app's
+# designated requirement. Ad hoc, that is the build's cdhash, so every
+# rebuild looks like a new app and the grants reset. A certificate makes it
+# "bundle ID + team", the same on every build.
+#   BOT_INATOR_SIGN_ID="-"            force ad hoc
+#   BOT_INATOR_SIGN_ID="<name|hash>"  use that identity
+sign_id="${BOT_INATOR_SIGN_ID:-}"
+if [[ -z "$sign_id" ]]; then
+  sign_id="$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/"Apple Development: /{print $2; exit}')"
+fi
+if [[ -n "$sign_id" && "$sign_id" != "-" ]]; then
+  say "Signing with \"$sign_id\" (permissions survive rebuilds)"
+  codesign --force --sign "$sign_id" "$APP" \
+    || fail "signing with \"$sign_id\" failed; set BOT_INATOR_SIGN_ID=- to sign ad hoc"
+else
+  say "Signing ad hoc: no Apple Development certificate, so macOS asks for permissions again after each rebuild"
+  codesign --force --sign - "$APP" 2>/dev/null
+fi
 codesign --verify "$APP"
 
 say "Installed. Start it with:  ./run.sh"

@@ -52,11 +52,13 @@ from . import (
     tool_health, tool_summary,
 )
 from . import standing_rules
+from . import tool_needs  # #151
 from . import always_allow as always_allow_mod
 from . import card_batch
 from . import card_chat as card_chat_mod  # #130
 from . import chat_turns  # #143
 from . import knowledge_retrieval  # #134 part 2
+from . import delivery as delivery_mod
 from .delivery import BYPASS_KEY as DELIVERY_BYPASS_KEY
 from . import needs_reply as reply_checks
 
@@ -392,6 +394,30 @@ def _now_line(now: Optional[datetime] = None) -> str:
         now = now.astimezone()
     return (f"It is now {now.strftime('%A')} {now.isoformat(timespec='minutes')} "
             "(the user's local time).")
+
+
+# #151: the permission checks behind a card's needs never prompt, but the
+# Contacts / Calendars rows ask the menu bar app; a slow answer must not hold
+# a card back.
+_CARD_NEEDS_TIMEOUT_SECONDS = 3.0
+
+
+async def _card_needs(fn: Callable[..., list[dict[str, Any]]], *args: Any) -> Optional[list[dict[str, Any]]]:
+    """``fn(*args)`` (an ``ai.tool_needs`` card helper) off the loop; ``None``
+    when nothing is needed or it fails (a card is never held back by it)."""
+    try:
+        needs = await asyncio.wait_for(
+            asyncio.to_thread(fn, *args), timeout=_CARD_NEEDS_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        try:  # the scan alone is quick; only the permission checks were slow
+            needs = fn(*args, check=False)
+        except Exception:
+            logger.debug("card needs failed", exc_info=True)
+            return None
+    except Exception:
+        logger.debug("card needs failed", exc_info=True)
+        return None
+    return needs or None
 
 
 def _now_iso() -> str:
@@ -778,6 +804,8 @@ class Orchestrator:
                 rewritable=chat_rewrite,
                 replace=lambda: self._replace_code_card(request_id),
             )
+        # #151: what this code needs (outside the sandbox, macOS permissions).
+        needs = await _card_needs(tool_needs.code_needs, tool_name, code)
         msg = CodeApprovalRequest(
             seq=self._next_seq(),
             timestamp=_now_iso(),
@@ -792,6 +820,7 @@ class Orchestrator:
                 timeout_seconds=int(self.code_approval_timeout),
                 chat=True if chat is not None else None,
                 replaces_request_id=replaces_request_id or None,
+                needs=needs,
             ),
         )
         await self._send(msg)
@@ -1192,6 +1221,28 @@ class Orchestrator:
                 logger.exception("Error handling event: %s", event)
 
     async def _handle_event(self, event: ContextEvent) -> None:
+        opened = (event.metadata or {}).get(DELIVERY_BYPASS_KEY)
+        if opened not in ("held", "inbox"):
+            await self._handle_event_inner(event)
+            return
+        # #131: the user pressed Show on a held / Inbox entry. A message or
+        # mail turn often ends in "no action", which used to look like the
+        # button did nothing: say so when the turn sent no card.
+        before = getattr(self, "_cards_sent", 0)
+        await self._handle_event_inner(event)
+        if getattr(self, "_cards_sent", 0) == before:
+            try:
+                self.publish_notice({
+                    "id": f"shown_nothing:{uuid.uuid4().hex[:12]}",
+                    "level": "info",
+                    "title": "Nothing to suggest",
+                    "body": f"Checked {delivery_mod.offer_title(event)}. "
+                            "The assistant found nothing to do for it.",
+                })
+            except Exception:
+                logger.exception("show-result notice failed")
+
+    async def _handle_event_inner(self, event: ContextEvent) -> None:
         if event.event_type == NOTICE_EVENT_TYPE:
             # A listener thread's notice (#19): not an observation, so no
             # thought, no observers, no agent.
@@ -1391,6 +1442,7 @@ class Orchestrator:
     async def _after_rule_run(self, event_id: str, run: dict[str, Any]) -> None:
         """#78: announce one automatic run (thought, notice with Undo, and a
         macOS notification). The run is already journaled (source="rule")."""
+        self._cards_sent = getattr(self, "_cards_sent", 0) + 1  # #131 Show result
         await self._emit_thought(
             event_id, "tool_result",
             f"{run['tool']} (standing rule {run['rule_id']}, no card): {run['result']}",
@@ -2236,6 +2288,7 @@ class Orchestrator:
                     notes=list(notes or []),
                 )
                 result = {"queued": True, "place": place, "message": card_batch.QUEUED_MESSAGE}
+                orchestrator._cards_sent = getattr(orchestrator, "_cards_sent", 0) + 1
                 done_store = getattr(orchestrator, "_turn_done", None)
                 if done_key and done_store is not None:
                     done_store[done_key] = result
@@ -2414,6 +2467,7 @@ class Orchestrator:
                     orchestrator, tool_name, result=result, args=call_args, kwargs=call_kwargs,
                 )
             if auto_allowed:
+                orchestrator._cards_sent = getattr(orchestrator, "_cards_sent", 0) + 1
                 # #116: journaled as source="always_allow", with Undo.
                 Orchestrator._after_always_allow_run(
                     orchestrator, tool_name, trigger,
@@ -2789,6 +2843,11 @@ class Orchestrator:
                 origin_notes=origin_notes, shield=getattr(self, "_taint", None),
             )
 
+        # #151: the idea card's "will likely need ..." line.
+        idea_needs = (
+            await _card_needs(tool_needs.idea_card_needs, tool_args)
+            if tool_name == "generate_custom_tool" and not actions else None
+        )
         msg = ApprovalRequest(
             seq=self._next_seq(),
             timestamp=_now_iso(),
@@ -2813,9 +2872,11 @@ class Orchestrator:
                 always_allow_label=allow_label,
                 auto_approve_seconds=auto_seconds,
                 chat=True if chat_on else None,
+                needs=idea_needs,
             ),
         )
         offer_id = self._record_offer_shown(tool_name, tool_args)
+        self._cards_sent = getattr(self, "_cards_sent", 0) + 1  # #131 Show result
         self._note_card_source(offer_id)
         delivery = getattr(self, "delivery", None)
         if delivery is not None and getattr(self, "_turn_kind", "") == "event" and not (
