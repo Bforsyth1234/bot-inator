@@ -46,6 +46,24 @@ class ApprovalAction(BaseModel):
     label: str = ""
 
 
+class ToolNeed(BaseModel):
+    """#151: one thing a generated tool needs to work (``ai.tool_needs``).
+
+    ``kind``: ``outside_sandbox``, or a macOS permission (``contacts``,
+    ``calendars``, ``reminders``, ``full_disk_access``, ``automation:<App>``).
+    ``reason`` is plain words ("it quits apps, which macOS blocks for
+    sandboxed tools"). ``granted``: the permission's state now (``None`` when
+    it can't tell, and always for ``outside_sandbox``: the card only
+    explains, trust stays the off-by-default checkbox). ``permission_id``:
+    the Permissions row (#59) the card's Grant button opens, if there is one.
+    """
+
+    kind: str
+    reason: str
+    granted: bool | None = None
+    permission_id: str | None = None
+
+
 class ApprovalRequestPayload(BaseModel):
     request_id: str
     event_id: str
@@ -82,6 +100,10 @@ class ApprovalRequestPayload(BaseModel):
     # in place of the note field. ``None`` (older daemons, other cards) keeps
     # the note field. Chat never approves; only the buttons decide.
     chat: bool | None = None
+    # #151: on a ``generate_custom_tool`` idea card, what the tool will likely
+    # need (guessed from the idea's words). ``None`` (older daemons, other
+    # cards, nothing found) shows nothing.
+    needs: list[ToolNeed] | None = None
 
 
 class ApprovalResponsePayload(BaseModel):
@@ -140,6 +162,10 @@ class CodeApprovalRequestPayload(BaseModel):
     # #130: this card's code was rewritten from the chat on card
     # ``replaces_request_id``; that older card can no longer be approved.
     replaces_request_id: str | None = None
+    # #151: what this code needs to work (read from the source, plus what the
+    # dry run found no rewrite can fix). ``None`` shows nothing. Never sets
+    # trust: the "Run outside the sandbox" checkbox stays off by default.
+    needs: list[ToolNeed] | None = None
 
 
 class CodeApprovalResponsePayload(BaseModel):

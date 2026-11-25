@@ -867,6 +867,21 @@ write-only; a save is mirrored into `os.environ` so it applies at once.
 |                               | `gated_forward` for every dynamic-tool call (raise |
 |                               | or `status: error`); 2 repairable failures in a    |
 |                               | week → a repair idea; `routes/tool_health.py`.     |
+| `ai/tool_needs.py`            | #151 what a drafted tool needs, for the cards:     |
+|                               | outside the sandbox (quits apps, Mail message      |
+|                               | data, Apple Events to Terminal/Finder/System       |
+|                               | Events, a blocked program, writes into ~/Library   |
+|                               | or ~/.ssh, a -10004 / denied-exec dry-run refusal) |
+|                               | and macOS permissions with `granted` state.        |
+|                               | `needs` on the code card and the                   |
+|                               | generate_custom_tool idea card ("will likely       |
+|                               | need…"). Explains only: never sets trust, the box  |
+|                               | stays off, Approve installs sandboxed.             |
+| `ai/deferred_restart.py`      | #150 `POST /api/restart?when=idle`: restart once   |
+|                               | no turn runs (`EventBus.consumer_busy`, queue      |
+|                               | empty) and no approval / code card is open; one    |
+|                               | pending restart; a plain restart cancels the wait. |
+|                               | `restart_pending` in the settings view.            |
 | `ai/standing_rules.py`        | #78 standing rules: offers, limits, deterministic  |
 |                               | runs; `~/.bot-inator/standing_rules.json`          |
 |                               | (`AGENT_STANDING_RULES_PATH`); hooks in            |

@@ -35,6 +35,7 @@ from ai.mlx_engine import MLXEngine
 from ai.orchestrator import Orchestrator
 from ai.pattern_recognizer import PatternRecognizer, make_detection_evaluator
 from ai import activity_store, egress_log
+from ai.deferred_restart import DeferredRestart, daemon_idle  # #150
 from ai.idea_outcomes import (
     DecisionLog,
     OutcomeStore,
@@ -1423,6 +1424,8 @@ def _settings_view() -> dict[str, Any]:
         ),
         "restart_required": saved != running or mlx_changed,
         "can_restart": _can_self_restart(),
+        # #150: a restart asked for after a save waits for a turn or card.
+        "restart_pending": _deferred_restart is not None and _deferred_restart.pending,
         # Fields the UI can't change because they're exported in the shell.
         "locked_fields": [
             field_name for field_name, env_key in _SETTING_FIELDS
@@ -1558,32 +1561,56 @@ async def put_settings(body: SettingsUpdate) -> dict[str, Any]:
     return _settings_view()
 
 
+def _reexec_daemon() -> None:
+    """Replace this process with the same command line (saved settings apply)."""
+    logger.info("Restarting daemon to apply settings")
+    try:
+        app.state.memory.close()
+    except Exception:
+        logger.exception("Error closing memory before restart")
+    user_settings.clear_inherited_environ()
+    # ``orig_argv`` is the full original command line, interpreter
+    # included, e.g. ``[python, .venv/bin/uvicorn, main:app]``.
+    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+
+
+_deferred_restart: Optional[DeferredRestart] = None
+
+
+def _restarter() -> DeferredRestart:
+    """#150: the one restart scheduler (idle = no turn, no open card)."""
+    global _deferred_restart
+    if _deferred_restart is None:
+        _deferred_restart = DeferredRestart(
+            is_idle=lambda: daemon_idle(
+                getattr(app.state, "orchestrator", None),
+                getattr(app.state, "event_bus", None),
+            ),
+            # Looked up at call time so tests can patch ``main._reexec_daemon``.
+            reexec=lambda: _reexec_daemon(),
+        )
+    return _deferred_restart
+
+
 @app.post("/api/restart")
-async def restart_daemon() -> dict[str, str]:
+async def restart_daemon(when: Optional[str] = None) -> dict[str, str]:
     """Re-exec the daemon so saved settings take effect.
 
     Replies first, then replaces this process with the same command line
-    after a short delay so the HTTP response gets out.
+    after a short delay so the HTTP response gets out. ``when=idle`` (#150,
+    sent by the app after a save) waits until no turn is running and no
+    approval card is open: ``{"restart": "pending"}``. Without it the
+    restart is immediate and cancels any wait: ``{"restart": "now"}``.
     """
+    if when not in (None, "idle"):
+        raise HTTPException(status_code=400, detail="when must be 'idle'")
     if not _can_self_restart():
         raise HTTPException(
             status_code=409,
             detail="running under --reload; restart the daemon manually",
         )
-
-    def _reexec() -> None:
-        logger.info("Restarting daemon to apply settings")
-        try:
-            app.state.memory.close()
-        except Exception:
-            logger.exception("Error closing memory before restart")
-        user_settings.clear_inherited_environ()
-        # ``orig_argv`` is the full original command line, interpreter
-        # included, e.g. ``[python, .venv/bin/uvicorn, main:app]``.
-        os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
-
-    asyncio.get_running_loop().call_later(0.5, _reexec)
-    return {"status": "restarting"}
+    outcome = _restarter().request(when_idle=when == "idle")
+    return {"status": "restarting", "restart": outcome}
 
 
 def _checked_generated_name(tool_name: str, verb: str) -> None:

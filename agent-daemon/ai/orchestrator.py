@@ -52,6 +52,7 @@ from . import (
     tool_health, tool_summary,
 )
 from . import standing_rules
+from . import tool_needs  # #151
 from . import always_allow as always_allow_mod
 from . import card_batch
 from . import card_chat as card_chat_mod  # #130
@@ -393,6 +394,30 @@ def _now_line(now: Optional[datetime] = None) -> str:
         now = now.astimezone()
     return (f"It is now {now.strftime('%A')} {now.isoformat(timespec='minutes')} "
             "(the user's local time).")
+
+
+# #151: the permission checks behind a card's needs never prompt, but the
+# Contacts / Calendars rows ask the menu bar app; a slow answer must not hold
+# a card back.
+_CARD_NEEDS_TIMEOUT_SECONDS = 3.0
+
+
+async def _card_needs(fn: Callable[..., list[dict[str, Any]]], *args: Any) -> Optional[list[dict[str, Any]]]:
+    """``fn(*args)`` (an ``ai.tool_needs`` card helper) off the loop; ``None``
+    when nothing is needed or it fails (a card is never held back by it)."""
+    try:
+        needs = await asyncio.wait_for(
+            asyncio.to_thread(fn, *args), timeout=_CARD_NEEDS_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        try:  # the scan alone is quick; only the permission checks were slow
+            needs = fn(*args, check=False)
+        except Exception:
+            logger.debug("card needs failed", exc_info=True)
+            return None
+    except Exception:
+        logger.debug("card needs failed", exc_info=True)
+        return None
+    return needs or None
 
 
 def _now_iso() -> str:
@@ -779,6 +804,8 @@ class Orchestrator:
                 rewritable=chat_rewrite,
                 replace=lambda: self._replace_code_card(request_id),
             )
+        # #151: what this code needs (outside the sandbox, macOS permissions).
+        needs = await _card_needs(tool_needs.code_needs, tool_name, code)
         msg = CodeApprovalRequest(
             seq=self._next_seq(),
             timestamp=_now_iso(),
@@ -793,6 +820,7 @@ class Orchestrator:
                 timeout_seconds=int(self.code_approval_timeout),
                 chat=True if chat is not None else None,
                 replaces_request_id=replaces_request_id or None,
+                needs=needs,
             ),
         )
         await self._send(msg)
@@ -2815,6 +2843,11 @@ class Orchestrator:
                 origin_notes=origin_notes, shield=getattr(self, "_taint", None),
             )
 
+        # #151: the idea card's "will likely need ..." line.
+        idea_needs = (
+            await _card_needs(tool_needs.idea_card_needs, tool_args)
+            if tool_name == "generate_custom_tool" and not actions else None
+        )
         msg = ApprovalRequest(
             seq=self._next_seq(),
             timestamp=_now_iso(),
@@ -2839,6 +2872,7 @@ class Orchestrator:
                 always_allow_label=allow_label,
                 auto_approve_seconds=auto_seconds,
                 chat=True if chat_on else None,
+                needs=idea_needs,
             ),
         )
         offer_id = self._record_offer_shown(tool_name, tool_args)

@@ -277,29 +277,46 @@ final class SettingsViewModel: ObservableObject {
             try Self.checkStatus(response, data)
             apply(try JSONDecoder().decode(DaemonSettings.self, from: data))
             errorMessage = nil
-            statusMessage = saved?.restartRequired == true
-                ? "Saved. Restart the daemon to apply."
-                : "Saved."
         } catch {
             errorMessage = "Save failed: \(error.localizedDescription)"
+            return
         }
+        guard saved?.restartRequired == true else {
+            statusMessage = "Saved."
+            return
+        }
+        guard saved?.canRestart == true else {
+            statusMessage = "Saved. Restart the daemon to apply."  // --reload
+            return
+        }
+        // #150: restart on its own, once no turn runs and no card is open.
+        let outcome = await DaemonRestart.request(
+            baseURL: baseURL, session: session, whenIdle: true
+        )
+        statusMessage = DaemonRestart.savedMessage(outcome)
+        if outcome == .now { await waitForRestart() }
     }
 
+    /// The Restart Daemon button: restarts at once (cancels a pending wait).
     func restart() async {
         isBusy = true
         defer { isBusy = false }
-        do {
-            let request = try DaemonAuth.request(
-                baseURL.appendingPathComponent("api/restart"), method: "POST"
-            )
-            let (data, response) = try await session.data(for: request)
-            try DaemonAuth.checkAuth(response)
-            try Self.checkStatus(response, data)
-        } catch {
-            errorMessage = "Restart failed: \(error.localizedDescription)"
+        switch await DaemonRestart.request(baseURL: baseURL, session: session, whenIdle: false) {
+        case .now, .pending:
+            break
+        case .unavailable:
+            errorMessage = "Restart failed: running under --reload; restart the daemon manually"
+            return
+        case .failed(let why):
+            errorMessage = "Restart failed: \(why)"
             return
         }
         statusMessage = "Restarting…"
+        await waitForRestart()
+    }
+
+    /// Callers hold `isBusy`.
+    private func waitForRestart() async {
         // Local MLX models can take a while to load; poll for up to ~60s.
         for _ in 0..<60 {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -671,13 +688,12 @@ struct SettingsView: View {
             HStack {
                 Button("Save") { Task { await viewModel.save() } }
                     .keyboardShortcut(.defaultAction)
-                if viewModel.saved?.restartRequired == true {
-                    Button("Restart Daemon") { Task { await viewModel.restart() } }
-                        .disabled(viewModel.saved?.canRestart != true)
-                        .help(viewModel.saved?.canRestart == true
-                              ? "Restart the daemon so the saved settings take effect"
-                              : "Daemon runs with --reload; restart it from its terminal")
-                }
+                // #150: always shown; disabled under --reload.
+                Button("Restart Daemon") { Task { await viewModel.restart() } }
+                    .disabled(viewModel.saved?.canRestart != true)
+                    .help(viewModel.saved?.canRestart == true
+                          ? "Restart the daemon so the saved settings take effect"
+                          : "Daemon runs with --reload; restart it from its terminal")
                 Spacer()
                 if viewModel.isBusy { ProgressView().controlSize(.small) }
             }

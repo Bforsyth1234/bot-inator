@@ -171,9 +171,18 @@ final class FirstRunViewModel: ObservableObject {
         do {
             _ = try await send("api/first_run/choice", method: "POST", body: body)
             apiKey = ""
-            message = "Saved. Restarting the daemon on your choice…"
-            _ = try? await send("api/restart", method: "POST", body: [:])
-            for _ in 0..<90 {
+            // #150: same rule as Settings: restart once no turn runs and no
+            // card is open (first run normally has neither).
+            let outcome = await DaemonRestart.request(
+                baseURL: baseURL, session: session, whenIdle: true
+            )
+            switch outcome {
+            case .now: message = "Saved. Restarting the daemon on your choice…"
+            case .pending, .unavailable, .failed: message = DaemonRestart.savedMessage(outcome)
+            }
+            if outcome == .unavailable { return }
+            // A pending restart waits for the current task: allow 10 min.
+            for _ in 0..<(outcome == .pending ? 600 : 90) {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 if let data = try? await send("api/first_run", method: "GET", body: nil),
                    let s = try? JSONDecoder().decode(FirstRunState.self, from: data), !s.pending {

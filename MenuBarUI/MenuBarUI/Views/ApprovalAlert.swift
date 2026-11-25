@@ -65,6 +65,7 @@ struct ApprovalAlert: View {
                     originNotesSection
                     if let summary = toolIdeaSummary {
                         toolIdeaCard(summary)
+                        likelyNeedsLine
                     } else if let actions = bundleActions {
                         reasoningSection
                         bundleCard(actions)
@@ -104,6 +105,16 @@ struct ApprovalAlert: View {
 
     /// #130: the daemon offers a chat on this card (tool ideas).
     private var chatOn: Bool { payload.chat == true }
+
+    /// #151: the idea card's "will likely need…" line (outside the sandbox,
+    /// macOS permissions), guessed by the daemon from the idea's words.
+    @ViewBuilder
+    private var likelyNeedsLine: some View {
+        if payload.toolName == "generate_custom_tool",
+           let needs = payload.needs, !needs.isEmpty {
+            ToolNeedsSection(needs: needs, style: .likely)
+        }
+    }
 
     /// The plan as changed in chat (what Approve builds), then the thread.
     private var chatSection: some View {

@@ -57,6 +57,9 @@ struct ApprovalRequestPayload: Codable, Hashable {
     /// #130: the card has a chat thread (`POST /api/card-chat/{request_id}`)
     /// instead of the note field. nil (older daemons, other cards) = note field.
     var chat: Bool? = nil
+    /// #151: on a `generate_custom_tool` idea card, what the tool will likely
+    /// need. nil (older daemons, other cards, nothing found) = no line.
+    var needs: [ToolNeed]? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -73,6 +76,27 @@ struct ApprovalRequestPayload: Codable, Hashable {
         case alwaysAllowLabel = "always_allow_label"
         case autoApproveSeconds = "auto_approve_seconds"
         case chat
+        case needs
+    }
+}
+
+/// #151: one thing a generated tool needs to work (`ai.tool_needs`).
+/// `kind` is "outside_sandbox" or a macOS permission ("contacts",
+/// "calendars", "reminders", "full_disk_access", "automation:<App>").
+/// `granted` is nil when the daemon can't tell (always for
+/// outside_sandbox: the card only explains). `permissionId` is the
+/// Permissions row a Grant button requests.
+struct ToolNeed: Codable, Hashable {
+    let kind: String
+    let reason: String
+    var granted: Bool? = nil
+    var permissionId: String? = nil
+
+    var isOutsideSandbox: Bool { kind == "outside_sandbox" }
+
+    enum CodingKeys: String, CodingKey {
+        case kind, reason, granted
+        case permissionId = "permission_id"
     }
 }
 
@@ -340,6 +364,9 @@ struct CodeApprovalRequestPayload: Codable, Hashable {
     var chat: Bool? = nil
     /// #130: this code was rewritten from the chat on that older card.
     var replacesRequestId: String? = nil
+    /// #151: what this code needs to work. nil (older daemons, nothing
+    /// found) = no section. Never sets trust: the checkbox stays off.
+    var needs: [ToolNeed]? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
@@ -352,6 +379,7 @@ struct CodeApprovalRequestPayload: Codable, Hashable {
         case previousCode = "previous_code"
         case chat
         case replacesRequestId = "replaces_request_id"
+        case needs
     }
 }
 

@@ -33,6 +33,13 @@ Isolation is layered, because the code has not been approved yet:
 * ``tools.mcp`` is a recorder too (#112): ``call_mcp`` returns placeholder
   text and never reaches the daemon or an MCP server.
 
+A refusal no rewrite can fix (#151: macOS refusing an Apple Event to any
+sandboxed process, -10004; the sandbox refusing to run a program) is not a
+problem sent back to the drafter: :func:`unfixable_refusal` turns it into a
+need (``DryRunResult.needs``), kept for the code card by ``ai.tool_needs``,
+which says the tool needs to run outside the sandbox. Every other refusal
+is unchanged.
+
 If ``sandbox-exec`` is missing or fails its self-test, the dry run is
 skipped (returns no problems): unapproved code never runs unsandboxed.
 """
@@ -95,6 +102,7 @@ PLANNER_SYSTEM_PROMPT = (
 )
 
 from ai.mlx_engine import THINK_BLOCK_RE as _THINK_BLOCK_RE
+from ai.tool_health import _SANDBOX_AE_RE
 from tools import tool_sandbox
 
 # Runs inside the sandbox. argv: daemon_root, draft_path, tool_name, kwargs_json
@@ -491,6 +499,10 @@ class DryRunResult:
 
     hard: list[str] = field(default_factory=list)
     soft: list[str] = field(default_factory=list)
+    # #151: refusals no rewrite can fix (Apple Event -10004, a program the
+    # sandbox will not run). Not repairs: the code card says the tool needs
+    # to run outside the sandbox (``ai.tool_needs``).
+    needs: list[Any] = field(default_factory=list)
 
     @property
     def all(self) -> list[str]:
@@ -526,19 +538,59 @@ def refusal_note(out: dict) -> str:
     return _refusal(_result_text(out), out, raised=False)
 
 
+def unfixable_refusal(text: str, out: Optional[dict] = None) -> Optional[Any]:
+    """#151: a ``tool_needs.Need`` when ``text`` is a sandbox refusal no rewrite
+    can fix: macOS refusing an Apple Event to any sandboxed process (-10004,
+    "privilege violation"), or the sandbox refusing to run a program. A
+    refused PATH is not one of these (the drafter can move the file, #114),
+    nor is anything else; those stay hard problems."""
+    from ai import tool_health, tool_needs
+
+    if not text:
+        return None
+    if _SANDBOX_AE_RE.search(text):
+        return tool_needs.Need(tool_needs.OUTSIDE_SANDBOX, tool_needs.REASON_DRY_RUN_APPLE_EVENT)
+    if out is not None and _refusal(text, out, raised=True):
+        return None
+    if tool_health._SANDBOX_EXEC_RE.search(text):
+        return tool_needs.Need(tool_needs.OUTSIDE_SANDBOX, tool_needs.REASON_DRY_RUN_EXEC)
+    return None
+
+
+def _split_unfixable(texts: list[str], out: dict) -> tuple[list[str], list[Any]]:
+    kept: list[str] = []
+    needs: list[Any] = []
+    for text in texts:
+        need = unfixable_refusal(text, out)
+        if need is None:
+            kept.append(text)
+        elif need not in needs:
+            needs.append(need)
+    return kept, needs
+
+
 def evaluate_call(call: DryRunCall, out: dict, after: set[str], label: str) -> DryRunResult:
-    """Turn one probe result into hard and soft problems."""
+    """Turn one probe result into hard and soft problems (and #151 needs)."""
     if out.get("timeout"):
         return DryRunResult(hard=[f"{label}: did not finish within {_CALL_TIMEOUT_SECONDS}s"])
     if "no_output" in out:
         return DryRunResult(hard=[f"{label}: the process exited without a result ({out['no_output']})"])
     problems: list[str] = []
     soft: list[str] = []
-    if out.get("exception"):
-        problems.append(f"{label}: raised {out['exception']}")
-    for err in out.get("thread_errors") or []:
+    raised = [str(out["exception"])] if out.get("exception") else []
+    raised, needs = _split_unfixable(raised, out)
+    threads, thread_needs = _split_unfixable([str(e) for e in out.get("thread_errors") or []], out)
+    needs += [n for n in thread_needs if n not in needs]
+    for exc in raised:
+        problems.append(f"{label}: raised {exc}")
+    for err in threads:
         problems.append(f"{label}: a background thread raised {err}")
     result = out.get("result")
+    if isinstance(result, dict) and result.get("status") == "error":
+        # The draft caught the refusal itself and reported it.
+        need = unfixable_refusal(_result_text(out))
+        if need is not None and need not in needs:
+            needs.append(need)
     if not out.get("exception"):
         if not isinstance(result, dict) or "status" not in result:
             problems.append(
@@ -569,7 +621,7 @@ def evaluate_call(call: DryRunCall, out: dict, after: set[str], label: str) -> D
             soft.append(f"{label}: expected {rel} to be gone afterwards, but it is still there")
     if any(p.startswith(label + ": expected") for p in soft):
         soft.append(f"{label}: files after the call: {sorted(after)}")
-    return DryRunResult(hard=problems, soft=soft)
+    return DryRunResult(hard=problems, soft=soft, needs=needs)
 
 
 def run_dry_run(tool_name: str, source: str, plan: DryRunPlan) -> DryRunResult:
@@ -588,6 +640,7 @@ def run_dry_run(tool_name: str, source: str, plan: DryRunPlan) -> DryRunResult:
         one = evaluate_call(call, out, after, label)
         total.hard.extend(one.hard)
         total.soft.extend(one.soft)
+        total.needs.extend(n for n in one.needs if n not in total.needs)
         note = refusal_note(out)
         if note and one.hard and note not in notes:
             notes.append(note)
@@ -595,7 +648,18 @@ def run_dry_run(tool_name: str, source: str, plan: DryRunPlan) -> DryRunResult:
     # is the line that tells the drafter what to change.
     total.hard = total.hard[:MAX_DRY_RUN_PROBLEMS] + notes
     total.soft = total.soft[:MAX_DRY_RUN_PROBLEMS]
+    _record_needs(tool_name, source, total.needs)
     return total
+
+
+def _record_needs(tool_name: str, source: str, needs: list[Any]) -> None:
+    """#151: keep this draft's needs for its code card (``ai.tool_needs``)."""
+    try:
+        from ai import tool_needs
+
+        tool_needs.record_dry_run(tool_name, source, needs)
+    except Exception:
+        logger.debug("could not record dry-run needs", exc_info=True)
 
 
 def remove_sandbox_cache() -> None:
@@ -607,4 +671,5 @@ def remove_sandbox_cache() -> None:
 __all__ = [
     "DryRunCall", "DryRunPlan", "DryRunResult", "dry_run_enabled", "evaluate_call",
     "parse_plan", "plan_dry_run", "refusal_note", "run_dry_run", "sandbox_available",
+    "unfixable_refusal",
 ]

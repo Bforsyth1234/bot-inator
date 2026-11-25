@@ -41,6 +41,10 @@ struct CodeReviewAlert: View {
             } else {
                 noteSection
             }
+            // #151: what this tool needs, above the (off by default) checkbox.
+            if let needs = payload.needs, !needs.isEmpty {
+                ToolNeedsSection(needs: needs, style: .exact)
+            }
             trustSection
             Spacer(minLength: 0)
             buttonRow
@@ -48,7 +52,8 @@ struct CodeReviewAlert: View {
         .padding(18)
         .frame(width: 680,
                height: min(chatOn ? 900 : 740,
-                           (((summary != nil ? 700 : 600) + (chatOn ? 170 : 0))
+                           (((summary != nil ? 700 : 600) + (chatOn ? 170 : 0)
+                             + (payload.needs?.isEmpty == false ? 90 : 0))
                             * textSize.layoutScale).rounded()))
         .onAppear {
             chat.requestId = payload.requestId
