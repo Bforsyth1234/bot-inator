@@ -77,7 +77,7 @@ views (e.g. in `SettingsView.swift` / `ToolManagerView.swift`) at wave
 close, so parallel slots never share `main.py` or a view file.
 ============================================================ -->
 
-Next ID: #152
+Next ID: #155
 Legend: `[ ]` todo · `[~]` in progress · `[~] live` built, waiting on its live check · `[x]` done (move to DONE.md)
 
 ## Wave plan
@@ -166,7 +166,7 @@ pass-rate measurement is a live check · #38 a second
 
 ## Live checks
 
-Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #135, #136, #137–#141, #142, #143, #144, #145, #146, #147, #148, #151; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
+Open (waves 28–32, 2026-11-20): #130, #131, #132, #133, #134, #135, #136, #137–#141, #142, #143, #144, #145, #146, #147, #148, #151, #153; each item's "Live (user)" line has the steps. Earlier ones: none open (marked done by the user 2026-11-19; list in DONE.md). #96 is open below: it needs the user's signing run, not a live check.
 
 ## Completed items (archived to DONE.md)
 
@@ -465,6 +465,31 @@ Deviations:
 2. Dry-run needs reach the code card through a store in `ai/tool_needs.py` (`record_dry_run` / `code_needs`, matched on the card's code), so `tools/meta_tool_generator.py` (not on the list) is unchanged.
 3. An email idea is guessed as Full Disk Access, not outside the sandbox: a generated tool can use the `list_recent_emails` built-in sandboxed. Only AppleScript Mail message data in the code is flagged outside-the-sandbox.
 4. Grant reuses the Permissions row's own action: for Contacts and Calendars that is the app's own macOS prompt; System Settings opens when the row does that or there is no row (Reminders, unlisted Automation apps).
+
+#153 — BUG: the assistant offers a "new tool" idea for something a built-in already does (quitting an app) [~] live
+Wave: _ · Agent: _ · Added: 2026-11-25 · Source: user (screenshots during #151's live check, 2026-11-25: one chat called the built-in `quit_app` for Spotify; a later one opened a `generate_custom_tool` idea card, "A tool to quit a specific macOS application by its bundle identifier or name") → "add the duplicate idea bug to todo.md"
+Cause (read from the code, not reproduced): only prompts guard this. The chat prompt says "if one of them can accomplish the request, call it — do not generate a duplicate" (`ai/orchestrator.py` ~3478), and both the `generate_custom_tool` docstring (`tools/meta_tool_generator.py` ~1326) and the drafting prompt (~114) say never to write a tool that quits apps, takes screenshots, looks at the screen or lists/reads email. Nothing in code enforces it, so a model that ignores the prompt reaches the idea card. A generated quit tool would also fail sandboxed (-10004, #102).
+Approach (assistant, 2026-11-25):
+⚬ A deterministic refusal before the idea card, the same shape as #123's `_delete_idea_refusal` (`ai/orchestrator.py` ~244, called ~2230): a new `builtin_overlap_problem(tool_name, description, expected_logic)` next to `delete_idea_problem` (`tools/meta_tool_generator.py:602`) maps an idea to the built-in that covers it: quit/close an app → `quit_app`; screenshot → `take_screenshot`; look at/read the screen → `look_at_screen`; list/read email → `list_recent_emails` / `read_email`; web search/fetch → `web_search` / `fetch_page`; contact lookup → `find_contact`. The refusal `{"status":"error","error":"builtin_covers_this","message":"Use the built-in quit_app(app_name) instead."}` goes back to the model, which then calls the built-in; no card opens.
+⚬ Keep it conservative (a missed duplicate is better than refusing a real new tool): match on the idea's verb + object (e.g. "quit"/"close" + "app"/"application"), not single words; reuse `ai/tool_needs.py`'s `_IDEA_RULES` patterns where they fit.
+DECISION (user, 2026-11-25): refuse even when the user explicitly asks for a new tool that a built-in covers ("make a new tool that quits apps"): the refusal sends the model to the built-in (`quit_app` etc.); no idea card. #104 "Run outside the sandbox" is not a reason to let a duplicate through.
+Files: `tools/meta_tool_generator.py` (new `builtin_overlap_problem`), `ai/orchestrator.py` (one call beside `_delete_idea_refusal`), new `tests/test_builtin_overlap.py`.
+Verify:
+⚬ Tests: "quit a specific macOS application by bundle id or name" → refused naming `quit_app`; "take a screenshot of the front window" → `take_screenshot`; "a pomodoro timer" → no refusal; "close the oldest Finder tab" style edge → decide and pin. Orchestrator: the refusal returns before any approval_request is sent. Non-vacuous per rule 5 (drop the quit rule → the first test fails).
+⚬ pytest gate (rule 8).
+⚬ Live (user): in Chat, "make a tool that quits Spotify" → no New Tool Idea card; the `quit_app` card opens instead.
+GitHub: https://github.com/Bforsyth1234/bot-inator/issues/58
+Results (runner, 2026-11-25):
+⚬ `tools/meta_tool_generator.py`: `builtin_overlap()` / `builtin_overlap_problem()` next to `delete_idea_problem`. Verb + object with only filler words between (up to 6: my, the, all, recent, unread, a number, …), a negation within the 40 chars before skips the match ("without quitting any apps"). Maps to `quit_app`, `take_screenshot`, `look_at_screen`, `list_recent_emails` / `read_email`, `web_search` / `fetch_page`, `find_contact`.
+⚬ `ai/orchestrator.py`: `_builtin_idea_refusal()` beside `_delete_idea_refusal()`, called right after it for `generate_custom_tool`. Returns `{"status":"error","error":"builtin_covers_this","builtin":…,"message":"The built-in quit_app(app_name) already does this. Call quit_app instead; …"}`; no card opens.
+⚬ New `tests/test_builtin_overlap.py` (19): 10 ideas matched to their built-in, 7 real tools not matched (pomodoro timer, organize screenshot files, save email attachments, draft an email reply, close Finder windows, a weather API, "without quitting any apps"), the quit idea refused before any card when the user asked for it in Chat, a real idea still gets its card.
+Verify (runner, 2026-11-25):
+⚬ Non-vacuous: quit rule off → 4 fail; orchestrator call off → 1 fails; restored (`cmp` clean) → 19 pass.
+⚬ pytest gate: 2879 passed, 0 failed.
+⚬ Live check above still to run (needs a daemon restart to load the change).
+Deviations:
+1. The filler-word limit is 6, not 4: "List my 10 most recent unread emails" has 5 and was missed at 4.
+2. "Close old Finder windows" is not matched (closing windows is not quitting an app; `quit_app` can't close a window).
 
 ---
 
@@ -932,6 +957,13 @@ Verify:
 ⚬ pytest gate + Swift typecheck (rule 8).
 ⚬ Live (user): Settings → Screen watching on → Watch for 15 min → switch between a few apps → Thoughts shows `screen_seen` rows with descriptions; 1Password in front → no row; session ends after 15 min; Privacy ledger shows image rows only with a cloud vision model.
 
+#152 — BUG: making a selection on a card brings the app to the foreground [ ] open
+Wave: _ · Agent: _ · Added: 2026-11-25 · Source: user · Issue: https://github.com/Bforsyth1234/bot-inator/issues/57
+Ask: "after making a selection on a card the app is brought to the foreground it should not be."
+Want: choosing an option on a card (Approve / Deny / Show / Dismiss, etc.) resolves the card and leaves focus where it was. The app is not activated or raised as a side effect.
+Where to look: card button handlers and anything they call that activates the app (`NSApp.activate`, `makeKeyAndOrderFront`, opening a window): `Views/ApprovalAlert.swift`, `Views/CodeReviewAlert.swift`, `ApprovalPresenter.swift`, `Views/OfferInboxView.swift`.
+Verify: with another app in front, make a selection on a card; the other app stays in front. Swift typecheck (rule 8).
+
 ### Memory
 
 #134 — "It knows your stuff": local search over your mail, files and past chats [~] live
@@ -1175,6 +1207,27 @@ Results (wave 28 slot C, 2026-11-20):
 Deviations:
 ⚬ Cases are chat requests ("Draft a reply to the email from X") with `read_email` stubbed, not `mail_received` events: a bare event doesn't ask for a reply.
 ⚬ Agreement is counted per rubric line across repeats, not per output.
+
+### Integrations
+
+#154 — foreman-inator integration: open issues from chat or ideas, "PR ready" cards, approve or request changes from the iPhone remote [ ]
+Wave: _ · Agent: _ · Added: 2026-11-25 · Source: spec (foreman-inator SPEC.md milestone 3, todo #22 / issue https://github.com/Bforsyth1234/foreman-inator/issues/11)
+Ask: foreman-inator (https://github.com/Bforsyth1234/foreman-inator, see its SPEC.md "bot-inator (optional)" and milestone 3) turns a GitHub issue labeled `agent` into a draft PR, AI-reviewed, then marked ready for the user's review. bot-inator becomes an optional client: open an issue from chat or a noticed idea, show a "PR ready for review" card, and send Approve or Request changes (with a comment) from the iPhone remote.
+DECISIONS (spec, 2026-11-23):
+1. bot-inator talks to GitHub directly (GitHub API, the user's own token or app), never to the foreman-inator worker. The worker has no inbound port; GitHub is the board.
+2. Consent rules apply on bot-inator's side (invariant 7a/7d): an idea becomes an issue only after its normal idea card is approved; opening an issue, labeling it, approving or requesting changes are each a side-effecting call behind an approval_request. Approve from the remote is NOT a "yes <code>" reply action if it would merge (merging stays the user's own click on GitHub); request changes carries the user's comment as the kickback note.
+3. Only labels from foreman-inator's allowed users count: the `agent` label (and `tier:N`) must be applied by the user's own GitHub account, or the worker ignores the issue. bot-inator applies them as the user, never a bot account, and the card says so.
+Files: TBD at scheduling (likely a new `tools/github_issues.py`, a new `routes/foreman.py` or watcher for PR-ready polling, a new Swift card view; runner registers per rules 9 and 12).
+Approach: a read-only poll of the user's repos for foreman-inator state, mapped to cards:
+⚬ "PR ready": a PR marked ready for review (out of draft) by foreman-inator's App → card with title, model/tier/cost from the PR description, Approve / Request changes / Open.
+⚬ Status: foreman-inator posts one status comment per issue (writing, AI review, escalated, ready); the card can show that line rather than re-deriving state.
+⚬ `needs-info`: when the worker's clarity check labels an issue `needs-info` and asks a question in a comment, show a card with the question and a reply box; the reply is posted as an issue comment (approval card).
+⚬ `fman sweep` exists on the foreman-inator side (cleans stale tickets/worktrees and re-queues); bot-inator does not run it, but a dropped or swept ticket should clear its card.
+Verify:
+⚬ Tests with a fake GitHub client: idea card approved → one issue created with `agent` label; idea card denied → no API call; ready PR → one card, deduped across polls; `needs-info` issue → question card; Approve / Request changes each go through an approval_request. Non-vacuous per rule 5.
+⚬ pytest gate (rule 8); Swift typecheck for the card view.
+⚬ Live (user): on a repo with foreman-inator installed, approve an idea card → issue appears labeled `agent` by the user → worker picks it up → "PR ready" card → Request changes from the iPhone remote → new attempt starts.
+Deviations:
 
 ### Security and providers
 

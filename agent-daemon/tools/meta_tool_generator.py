@@ -625,6 +625,67 @@ def delete_idea_problem(tool_name: str, description: str, expected_logic: str) -
     return ""
 
 
+# #153: ideas a built-in already covers. Verb + object only (a missed
+# duplicate is better than refusing a real new tool), with only filler
+# words between them, so "save attachments from email" or "organize my
+# screenshots folder" still get their card.
+_FILLER = r"(?:(?:a|an|the|my|all|any|one|some|specific|given|named|running|open|other|" \
+    r"frontmost|front|current|macos|mac|new|recent|latest|unread|last|most|today'?s|\d+)\s+){0,6}?"
+_BUILTIN_OVERLAP: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (re.compile(
+        r"\b(?:force[- ]?)?(?:quit|quits|quitting|clos(?:e|es|ing)|terminat\w*|kill\w*)\s+"
+        + _FILLER + r"(?:[A-Z][\w.]*\s+)?(?:apps?|applications?|programs?)\b", re.I),
+     "quit_app", "quit_app(app_name)"),
+    (re.compile(r"\b(?:take|takes|taking|capture\w*|grab\w*|snap\w*)\s+" + _FILLER
+                + r"(?:\w+\s+)?(?:screen ?shots?|screen ?captures?|screen ?grabs?)\b", re.I),
+     "take_screenshot", "take_screenshot(path)"),
+    (re.compile(r"\b(?:describe\w*|read\w*|see|sees|look\w*\s+at|analy[sz]\w*|ocr\w*|"
+                r"summari[sz]\w*)\s+(?:what(?:'s| is)\s+)?(?:\w+\s+){0,2}?on\s+(?:the|my)\s+screen\b",
+                re.I),
+     "look_at_screen", "look_at_screen(question, target)"),
+    (re.compile(r"\b(?:list\w*|read\w*|fetch\w*|get|gets|getting|show\w*|summari[sz]\w*|"
+                r"check\w*|count\w*)\s+" + _FILLER
+                + r"(?:e-?mails?|mail\s+messages?|messages?\s+in\s+(?:my\s+|the\s+)?inbox|inbox)\b",
+                re.I),
+     "list_recent_emails", "list_recent_emails(count, mailbox, since, until) / read_email(message_id)"),
+    (re.compile(r"\b(?:search\w*|query\w*)\s+(?:the\s+)?(?:web|internet|google|online)\b|"
+                r"\b(?:web|internet|google)\s+search\w*\b|"
+                r"\b(?:scrap\w*|fetch\w*|download\w*|read\w*)\s+(?:a\s+|the\s+|any\s+)?"
+                r"(?:web\s*pages?|websites?|web\s*sites?|urls?)\b", re.I),
+     "web_search", "web_search(query, limit) / fetch_page(url)"),
+    (re.compile(r"\b(?:look\w*\s*up|find\w*|get|gets|search\w*)\s+"
+                r"(?:(?:a|the|my|someone'?s|a\s+person'?s|person'?s|contact'?s|their)\s+){0,3}"
+                r"(?:e-?mail\s+address(?:es)?|phone\s+numbers?|contacts?)\b", re.I),
+     "find_contact", "find_contact(name, limit)"),
+)
+_NEGATION_RE = re.compile(r"\b(?:never|not|no|without|don'?t|doesn'?t|instead\s+of)\s+(?:\w+\s+){0,2}$", re.I)
+
+
+def builtin_overlap(tool_name: str, description: str, expected_logic: str) -> tuple[str, str]:
+    """#153: ``(built-in name, signature)`` when a built-in already does what
+    this tool idea describes, else ``("", "")``. Deterministic, before any card."""
+    text = " ".join((tool_name.replace("_", " "), description or "", expected_logic or ""))
+    for pattern, name, signature in _BUILTIN_OVERLAP:
+        for match in pattern.finditer(text):
+            if _NEGATION_RE.search(text[max(0, match.start() - 40):match.start()]):
+                continue
+            return name, signature
+    return "", ""
+
+
+def builtin_overlap_problem(tool_name: str, description: str, expected_logic: str) -> str:
+    """#153 (user, 2026-11-25: refuse even when asked for): the message that
+    sends the model to the built-in, or ""."""
+    name, signature = builtin_overlap(tool_name, description, expected_logic)
+    if not name:
+        return ""
+    return (
+        f"The built-in {signature} already does this. Call {name} instead; do "
+        "not generate a tool for it (a generated tool runs in a sandbox that "
+        "can't do this, and duplicates of built-ins are not offered)."
+    )
+
+
 _BANNED_BUILTIN_CALLS = frozenset({"eval", "exec", "compile", "__import__"})
 _BANNED_MODULE_CALLS = frozenset({("os", "system"), ("os", "popen"), ("pty", "spawn")})
 

@@ -264,6 +264,33 @@ def _delete_idea_refusal(
     return {"status": "error", "error": "delete_not_recoverable", "message": problem}
 
 
+def _builtin_idea_refusal(
+    param_names: list[str], call_args: list[Any], call_kwargs: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """#153: a ``generate_custom_tool`` idea that a built-in already covers
+    (quit_app, take_screenshot, ...) is refused before its idea card, even
+    when the user asked for a new tool; the model is sent to the built-in."""
+    try:
+        from tools.meta_tool_generator import builtin_overlap, builtin_overlap_problem  # noqa: WPS433
+
+        bound = dict(zip(param_names, call_args))
+        bound.update(call_kwargs)
+        fields = (
+            str(bound.get("tool_name") or ""), str(bound.get("description") or ""),
+            str(bound.get("expected_logic") or ""),
+        )
+        problem = builtin_overlap_problem(*fields)
+    except Exception:
+        logger.exception("built-in overlap check failed")
+        return None
+    if not problem:
+        return None
+    return {
+        "status": "error", "error": "builtin_covers_this",
+        "builtin": builtin_overlap(*fields)[0], "message": problem,
+    }
+
+
 def _web_call_needs_card(
     orchestrator: Any, shield: Any, tool_name: str,
     param_names: list[str], call_args: list[Any], call_kwargs: dict[str, Any],
@@ -2228,6 +2255,9 @@ class Orchestrator:
                 # #123 (user: option B): reminders/events have no Trash, and
                 # nothing is deleted for good: refuse such ideas before the card.
                 refusal = _delete_idea_refusal(param_names, call_args, call_kwargs)
+            if refusal is None and tool_name == "generate_custom_tool":
+                # #153: a built-in already does it: send the model there, no card.
+                refusal = _builtin_idea_refusal(param_names, call_args, call_kwargs)
             if refusal is None and not bypass:
                 # #72: a learned "don't offer <tool> for <trigger>" refuses
                 # the call before its card; it never runs a call without one.
